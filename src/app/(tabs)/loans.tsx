@@ -78,7 +78,8 @@ export default function LoansScreen() {
   }, [step, principal, markupPercent, termMonths, dueDay, productType]);
 
   const totalRepayment = useMemo(() => {
-    return previewSchedule.reduce((sum, kist) => sum + kist.amountDue, 0 as unknown as Paise) as unknown as Paise;
+    const sum = previewSchedule.reduce((acc, kist) => acc + (kist.amountDue as unknown as number), 0);
+    return sum as unknown as Paise;
   }, [previewSchedule]);
 
   const handleCreate = async () => {

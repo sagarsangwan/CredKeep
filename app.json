@@ -31,6 +31,15 @@
           "useSQLCipher": true
         }
       ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
+          }
+        }
+      ],
       "expo-status-bar"
     ],
     "extra": {
