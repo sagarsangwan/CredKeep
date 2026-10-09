@@ -1,14 +1,15 @@
-# 03-overdue-period-engine
+# 03-late-penalty-engine
 
 Status: `ready-for-agent`
 
 ## Overview
-Implement the overdue period lifecycle and deterministic daily penalty assessment engine.
+Implement the simplified late penalty engine calculating ₹100/day per overdue loan, tracking overdue status without complex UI period abstractions.
 
 ## Acceptance Criteria
-- Evaluates loan overdue state as of a given `asOfDate`.
-- Charges ₹100/day (`10000` paise) once per overdue loan, not multiplied per overdue kist.
-- Opens an overdue period on the day after the earliest past-due kist's effective due date.
-- Closes the active overdue period as soon as all past-due kists are fully paid, stopping daily accrual even if accrued penalty balance remains unpaid.
-- Generates idempotent operation key `penalty_<loanId>_<YYYY-MM-DD>`.
-- Re-opens a new distinct overdue period if a later kist misses its due date.
+- Overdue days calculated as $\max(0, \text{differenceInCalendarDays}(\text{asOfDate}, \text{earliestUnpaidDueDate}))$.
+- Assesses flat ₹100/day (`10000` paise) once per overdue loan, regardless of whether 1, 2, or 3 kists are overdue.
+- Displays on collection UI as: `Scheduled Kist (₹2,600) + Late Penalty (₹500) = Total Payable (₹3,100)`.
+- When ₹3,100 is collected, marks kist `PAID` and clears the penalty. Next month starts clean at its original scheduled ₹2,600.
+- Paid penalties are never carried into future months.
+- Idempotent daily assessment using operation key `penalty_<loanId>_<YYYY-MM-DD>`.
+- Supports manual penalty waiver via noncash `PENALTY_WAIVER` transaction.

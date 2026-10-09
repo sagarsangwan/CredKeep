@@ -60,7 +60,7 @@ _Avoid_: Term, period, duration
 An auditable record altering the Effective Due Date of a single specific Kist with an explicit penalty treatment decision.
 _Avoid_: Reschedule, date shift, deferral
 
-### Repayments, Penalties & Overdue Lifecycle
+### Repayments, Penalties & Overdue Collections
 
 **Collection Receipt**:
 An immutable record of money received from a Borrower against a Loan Account, issued with a unique receipt number and timestamp.
@@ -82,13 +82,13 @@ _Avoid_: Advance payment, wallet credit, overpayment buffer
 Cash collected in excess of the entire remaining contractual face value of a loan, held strictly for refunding.
 _Avoid_: Excess balance, float, change
 
-**Overdue Period**:
-A continuous chronological window during which a Loan Account has at least one unpaid Kist whose Effective Due Date has elapsed, accruing a maximum of one flat daily penalty per loan.
-_Avoid_: Default term, overdue cycle, aging bucket
+**Overdue Status**:
+The state of a Loan Account having at least one unpaid Kist whose Effective Due Date has passed.
+_Avoid_: Default term, aging bucket, overdue cycle
 
 **Late Penalty**:
-A punitive fee of ₹100 per calendar day assessed once per overdue Loan Account past the grace date.
-_Avoid_: Delay fee, fine, overdue charge
+A flat fee of ₹100 per calendar day assessed once per overdue Loan Account starting the day after the earliest unpaid due date. Cleared upon payment and never carried into future months.
+_Avoid_: Compounding fine, overdue charge, per-kist penalty
 
 **Penalty Waiver**:
 An explicit, recorded noncash action by the financier to forgive an accrued Late Penalty without modifying principal, markup, or cash collections.

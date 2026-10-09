@@ -1,4 +1,4 @@
-# 0003. Relational Transaction Ledger with Materialized Balances, Persistent Idempotency, and Overdue Period Lifecycle
+# 0003. Relational Transaction Ledger with Materialized Balances, Persistent Idempotency, and Direct Kist Penalties
 
 **Status**: Accepted (Supersedes ADR-0002)
 
@@ -7,8 +7,8 @@ CredKeep V1 is an offline-first, single-financier lending ledger operating on An
 1. Fast indexed dashboard and borrower queries without computing entire account histories from raw transaction logs on every render.
 2. An auditable, append-only financial ledger where no historic transaction can be deleted or silently modified at runtime.
 3. Persistent protection against duplicate payment entries across application crashes, background process kills, or rapid user retries.
-4. Deterministic overdue penalty tracking assessed per overdue loan (not multiplied per overdue kist), modeled via distinct overdue period lifecycles.
-5. Automatic sequential allocation of extra payments to future scheduled kists without exposing a complex advance-wallet interface.
+4. An intuitive, transparent penalty model: ₹100/day assessed per overdue loan (not multiplied per overdue kist), cleared alongside the instalment, with next month starting clean at its scheduled amount.
+5. Direct sequential allocation of extra payments to future scheduled kists without exposing a complex advance-wallet interface.
 6. Support for one-time instalment due-date revisions while preserving original contractual due dates and historical penalties.
 7. Crash resilience ensuring an unexpected device shutdown or power loss mid-operation leaves zero inconsistent states between materialized balances and transaction logs.
 
@@ -22,7 +22,7 @@ We implement a normalized relational financial schema using SQLite. The design c
 
 ### 1. Database Configuration & Transaction Wrapper (`expo-sqlite ~57.0.4`)
 
-Transaction execution must strictly adhere to the official API provided by the installed `expo-sqlite` package:
+Transaction execution strictly adheres to the official API provided by the installed `expo-sqlite` package:
 - **Pragma Initialization**:
   On every database connection open:
   ```sql
@@ -69,7 +69,7 @@ The `transactions` table represents the canonical journal of financial events (D
 
 ### 3. Persistent Database-Enforced Payment Idempotency
 
-UI debouncing and in-memory async mutexes are user-experience affordances to reduce duplicate network or bridge traffic, but **they are not correctness guarantees**. Correctness must be enforced persistently by the database engine:
+UI debouncing and in-memory async mutexes are user-experience affordances to reduce duplicate network or bridge traffic, but **they are not correctness guarantees**. Correctness is enforced persistently by the database engine:
 - Every mutation request requires a client-generated UUIDv4 `operation_id` generated when the submission action is initiated.
 - The `transactions` table enforces a persistent unique index:
   ```sql
@@ -97,40 +97,29 @@ UI debouncing and in-memory async mutexes are user-experience affordances to red
   CREATE UNIQUE INDEX idx_transactions_operation_id ON transactions(operation_id);
   ```
 - **Idempotent Handling**:
-  If a duplicate submission occurs (e.g., following an app restart after an interrupted response or double-tap), SQLite raises a `SQLITE_CONSTRAINT_UNIQUE` violation. The repository intercepts this specific error, queries the existing transaction by `operation_id`, and safely returns the existing record without mutating balances.
+  If a duplicate submission occurs (e.g., following an app restart after an interrupted response or double-tap), SQLite raises a `SQLITE_CONSTRAINT_UNIQUE` violation. The repository intercepts this error, queries the existing transaction by `operation_id`, and safely returns the existing record without mutating balances.
 
 ---
 
-### 4. Overdue Penalty Engine & Overdue Period Lifecycle
+### 4. Simplified Late Penalty Behavior & Per-Loan Cap
 
-Penalties follow the confirmed product policy of **₹100/calendar day per loan, not per instalment**:
-- **Discrete Overdue Periods**:
-  Overdue tracking is persisted in `loan_overdue_periods`:
-  ```sql
-  CREATE TABLE loan_overdue_periods (
-    id TEXT PRIMARY KEY NOT NULL,
-    loan_id TEXT NOT NULL,
-    period_number INTEGER NOT NULL,
-    start_date TEXT NOT NULL, -- First calendar day after earliest past-due kist
-    end_date TEXT,            -- Date when all past-due kists became fully covered (NULL if active)
-    total_days_charged INTEGER NOT NULL DEFAULT 0,
-    total_penalties_assessed_paise INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE RESTRICT
-  );
-  ```
-- **Assessment Invariants**:
-  1. A penalty of ₹100 (`10000` paise) is assessed per calendar day where at least one kist has $\text{effective\_due\_date} < \text{asOfDate}$ and remains unpaid.
-  2. Idempotency is enforced by an operation key: `penalty_<loan_id>_<YYYY-MM-DD>`.
-  3. When all past-due kists are satisfied, `end_date` is stamped and daily accrual stops immediately.
-  4. Previously assessed, unpaid penalties remain in `loans.outstanding_penalty_paise` but **do not keep the overdue period open**.
-  5. A subsequent missed kist opens a new overdue period with incremented `period_number`. Historical assessments remain untouched.
+The penalty model matches the product owner's direct mental model without complex UI period abstractions:
+1. **Per-Loan Daily Fee**: The penalty rate is ₹100 per calendar day (`10000` paise).
+2. **Per Loan, Not Per Instalment**: If multiple kists are overdue simultaneously, the fee does NOT multiply. Overdue days are calculated from the earliest unpaid effective due date:
+   $$\text{OverdueDays} = \max\left(0, \text{differenceInCalendarDays}(\text{asOfDate}, \text{earliestUnpaidDueDate})\right)$$
+   $$\text{LatePenalty} = \text{OverdueDays} \times ₹100$$
+3. **Clean Monthly Cycles**:
+   - For an overdue installment, the UI displays:
+     $$\text{Total Payable} = \text{Scheduled Kist (₹2,600)} + \text{Late Penalty (₹500)} = \mathbf{₹3,100}$$
+   - When ₹3,100 is collected, that month's installment is marked **Paid** and the penalty is **Cleared**.
+   - **Next Month Starts Clean**: The next month sits at its original scheduled amount of ₹2,600. Paid penalties are never carried into future months.
+4. **Idempotent Daily Assessment**: Running penalty calculations multiple times on the same calendar day assesses the fee exactly once using key `penalty_<loan_id>_<YYYY-MM-DD>`.
 
 ---
 
 ### 5. Extra Payments & Sequential Future Kist Reduction
 
-CredKeep V1 eliminates the complexity of an advance wallet:
+CredKeep V1 eliminates advance-wallet interfaces:
 - Extra cash beyond current obligations applies immediately to reduce the **earliest unpaid future scheduled kist(s)** in chronological order.
 - In `repayment_schedules`:
   ```sql
@@ -154,7 +143,7 @@ CredKeep V1 eliminates the complexity of an advance wallet:
 
 ---
 
-### 6. One-Time Instalment Due-Date Changes
+### 6. One-Time Single-Instalment Due-Date Changes
 
 Financiers can reschedule a single kist without disrupting other dates:
 - Recorded in `schedule_modifications`:
@@ -223,21 +212,22 @@ When full reconciliation executes, the system asserts mathematical identity acro
 ## Required Automated Test Scenarios
 
 The financial test suite must explicitly validate:
-1. **On-Time Payment**: Full payment on or before due date &rarr; ₹0 penalty, status `PAID`.
-2. **Late Single Kist**: ₹2,600 paid 2 days late &rarr; 2 days $\times$ ₹100 = ₹200 accrued penalty.
-3. **Multiple Overdue Kists (Two Kists)**: Two kists overdue for 12 days &rarr; exactly 12 $\times$ ₹100 = ₹1,200 penalty (not ₹2,400).
-4. **Multiple Overdue Kists (Three Kists)**: Three kists overdue for 5 days &rarr; exactly 5 $\times$ ₹100 = ₹500 penalty.
-5. **Surplus Payment to Next Kist**: ₹2,700 paid on ₹2,600 kist &rarr; Kist 1 `PAID` (₹2,600), Kist 2 remaining due is ₹2,500.
-6. **Partial Payment**: ₹1,000 paid against ₹2,600 kist &rarr; Kist 1 `PARTIALLY_PAID`, ₹1,600 remains due.
-7. **Overdue Period Closure**: All past-due kists fully paid &rarr; overdue period ends; daily accrual stops even if accrued penalty balance remains unpaid.
-8. **Overdue Period Reopening**: All past kists cleared in October; November kist passes due date unpaid &rarr; opens Period 2, adds ₹100/day without duplicating October assessments.
-9. **Single Kist Rescheduling**: Kist 2 moved from 10 Nov to 15 Nov &rarr; Kist 3 due date remains 10 Dec.
-10. **Reschedule with Penalty Waiver**: Kist rescheduled after ₹300 penalties accrued with `WAIVE` option &rarr; records `PENALTY_WAIVER`, restores penalty balance to ₹0.
-11. **Idempotent Daily Assessment**: Running penalty evaluation 10 times on the same date produces exactly one ₹100 transaction.
-12. **Backup Restore Determinism**: Export and restore database &rarr; recompute DPD as of fixed snapshot date &rarr; exact parity with pre-backup state.
-13. **Latest Payment Reversal**: Reverse payment that reduced Kist 1 and partially credited Kist 2 &rarr; both kists and DPD restore to exact prior states.
-14. **Month-End Leap Year Clamping**: Loan created with Anchor Day 31 across Jan-Feb-Mar 2028 (leap year) &rarr; Jan 31, Feb 29, Mar 31.
-15. **Exception Rollback vs. Process-Termination Recovery**:
+1. **On-Time Payment**: Full payment of ₹2,600 on due date &rarr; status `PAID`, ₹0 penalty, next month starts clean at ₹2,600.
+2. **Single Kist 5 Days Late**: ₹2,600 paid 5 days late &rarr; $5 \times ₹100 = \mathbf{₹500}$ penalty; total collected ₹3,100; kist `PAID`, penalty cleared; next month starts clean at scheduled ₹2,600.
+3. **Independent Consecutive Late Payments**: Month 1 paid 5 days late (₹3,100 collected); Month 2 paid 5 days late &rarr; independently payable as ₹3,100; zero penalty carried from Month 1.
+4. **Multiple Overdue Kists (Two Kists)**: Two kists overdue for 12 days &rarr; total penalty on loan is exactly $12 \times ₹100 = \mathbf{₹1,200}$ (not ₹2,400).
+5. **Multiple Overdue Kists (Three Kists)**: Three kists overdue for 5 days &rarr; total penalty on loan is exactly $5 \times ₹100 = \mathbf{₹500}$ (not ₹1,500).
+6. **Surplus Payment to Next Kist**: ₹2,700 paid on ₹2,600 kist &rarr; Kist 1 `PAID` (₹2,600), Kist 2 remaining payable is ₹2,500 due on its original scheduled date.
+7. **Lump Sum Across Multiple Kists**: ₹6,000 paid against ₹2,600 kists &rarr; Kist 1 `PAID` (₹2,600), Kist 2 `PAID` (₹2,600), Kist 3 `PARTIALLY_PAID` (₹800 paid, ₹1,800 remaining).
+8. **Partial Payment**: ₹1,000 paid against ₹2,600 kist &rarr; Kist 1 `PARTIALLY_PAID`, ₹1,600 remaining due.
+9. **Single Kist Rescheduling**: Kist 2 moved from 10 Nov to 15 Nov &rarr; Kist 3 due date remains 10 Dec; paid on 15 Nov incurs ₹0 penalty.
+10. **Reschedule with Penalty Waiver**: Kist extended after ₹300 penalties accrued with `WAIVE` option &rarr; records `PENALTY_WAIVER`, restores penalty balance to ₹0.
+11. **Penalty Stops When Current**: All overdue kists cleared &rarr; penalty accrual stops immediately; future kists sit at scheduled ₹2,600.
+12. **Penalty Resumes on Later Miss**: Loan current in Oct; Nov kist missed &rarr; daily ₹100 accrual resumes starting day after Nov due date.
+13. **Idempotent Daily Assessment**: Running penalty evaluation 10 times on the same date produces exactly one ₹100 daily fee.
+14. **Payment Reversal (Latest Only)**: Reverse payment that paid K1 and ₹100 of K2 &rarr; both kists and DPD restore to exact prior states.
+15. **Month-End Leap Year Clamping**: Loan created with Anchor Day 31 across Jan-Feb-Mar 2028 (leap year) &rarr; Jan 31, Feb 29, Mar 31.
+16. **Exception Rollback vs. Process-Termination Recovery**:
     - *Exception Rollback*: Verify transaction rollback on runtime exception.
     - *Process-Termination Recovery*: Verify SQLite WAL recovery on native crash leaving zero corruption.
 
@@ -245,10 +235,11 @@ The financial test suite must explicitly validate:
 
 ## Consequences
 - **Positive**:
+  - Direct mental model aligns with real-world field collections.
+  - Zero carrying of paid penalties into future months.
   - High query speed via materialized balances on loans and schedules.
   - Zero duplicate penalties or double-collections via database-enforced idempotency keys.
-  - Realistic real-world cash handling: excess funds reduce future kists without advance-wallet confusion.
-  - Transparent overdue tracking via explicit overdue periods.
+  - Excess funds reduce future kists without advance-wallet confusion.
   - Flexible field rescheduling without breaking subsequent schedules.
 - **Negative / Trade-offs**:
   - Reversals in V1 are constrained to the latest payment (LIFO), preventing arbitrary out-of-order historical edits.
