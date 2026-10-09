@@ -15,6 +15,8 @@ export type ScheduledKist = {
   kistNumber: number;
   dueDate: string; // YYYY-MM-DD
   amountDue: Paise;
+  principalDue: Paise;
+  markupDue: Paise;
 };
 
 export type OverduePeriod = {

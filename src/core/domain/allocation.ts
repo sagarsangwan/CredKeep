@@ -4,10 +4,39 @@ import { PaymentAllocation } from './models';
 export type KistAllocationState = {
   kistNumber: number;
   amountDue: Paise;
+  principalDue: Paise;
+  markupDue: Paise;
   amountPaid: Paise;
+  principalPaid: Paise;
+  markupPaid: Paise;
   isDue?: boolean;
   status?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
 };
+
+function allocateProportional(
+  amount: Paise,
+  kist: KistAllocationState
+): { p: Paise; m: Paise } {
+  const unpaidPrincipal = subtractPaise(kist.principalDue, kist.principalPaid);
+  const unpaidMarkup = subtractPaise(kist.markupDue, kist.markupPaid);
+
+  if (amount >= addPaise(unpaidPrincipal, unpaidMarkup)) {
+    return { p: unpaidPrincipal, m: unpaidMarkup };
+  }
+
+  const allocP = (amount * kist.principalDue) / kist.amountDue;
+  let p = Math.round(allocP) as Paise;
+  
+  if (p > unpaidPrincipal) p = unpaidPrincipal;
+  
+  let m = subtractPaise(amount, p);
+  if (m > unpaidMarkup) {
+    m = unpaidMarkup;
+    p = subtractPaise(amount, m);
+  }
+  
+  return { p, m };
+}
 
 export type AllocationInput = {
   paymentAmount: Paise;
@@ -49,11 +78,15 @@ export function allocatePayment(input: AllocationInput): AllocationResult {
       }
       
       if (allocatedToKist > 0) {
+        const { p, m } = allocateProportional(allocatedToKist, kist);
+        kist.principalPaid = addPaise(kist.principalPaid, p);
+        kist.markupPaid = addPaise(kist.markupPaid, m);
+
         allocations.push({
           amount: allocatedToKist,
           allocatedToKist: kist.kistNumber,
-          allocatedToPrincipal: 0 as Paise, // Simplified pending product decision on Principal vs Markup split
-          allocatedToMarkup: 0 as Paise,
+          allocatedToPrincipal: p,
+          allocatedToMarkup: m,
           allocatedToPenalty: 0 as Paise
         });
       }
@@ -91,11 +124,15 @@ export function allocatePayment(input: AllocationInput): AllocationResult {
       }
       
       if (allocatedToKist > 0) {
+        const { p, m } = allocateProportional(allocatedToKist, kist);
+        kist.principalPaid = addPaise(kist.principalPaid, p);
+        kist.markupPaid = addPaise(kist.markupPaid, m);
+
         allocations.push({
           amount: allocatedToKist,
           allocatedToKist: kist.kistNumber,
-          allocatedToPrincipal: 0 as Paise,
-          allocatedToMarkup: 0 as Paise,
+          allocatedToPrincipal: p,
+          allocatedToMarkup: m,
           allocatedToPenalty: 0 as Paise
         });
       }

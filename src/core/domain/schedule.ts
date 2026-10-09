@@ -45,28 +45,33 @@ export function generateSchedule(options: ScheduleOptions): ScheduledKist[] {
   const schedule: ScheduledKist[] = [];
   
   if (productType === 'instalment') {
-    const kistAmounts = dividePaise(totalRepayment, termMonths);
+    const principalInstalments = dividePaise(principal, termMonths);
+    const markupInstalments = dividePaise(totalMarkup, termMonths);
     
     for (let i = 0; i < termMonths; i++) {
       schedule.push({
         kistNumber: i + 1,
         dueDate: calculateNextDueDate(startDate, i + 1, dueDay),
-        amountDue: kistAmounts[i]
+        amountDue: addPaise(principalInstalments[i], markupInstalments[i]),
+        principalDue: principalInstalments[i],
+        markupDue: markupInstalments[i]
       });
     }
   } else if (productType === 'bullet') {
     const markupInstalments = dividePaise(totalMarkup, termMonths);
     
     for (let i = 0; i < termMonths; i++) {
-      let amountDue = markupInstalments[i];
-      if (i === termMonths - 1) {
-        amountDue = addPaise(amountDue, principal);
-      }
+      const isLast = i === termMonths - 1;
+      const principalDue = isLast ? principal : (0 as Paise);
+      const markupDue = markupInstalments[i];
+      const amountDue = addPaise(principalDue, markupDue);
       
       schedule.push({
         kistNumber: i + 1,
         dueDate: calculateNextDueDate(startDate, i + 1, dueDay),
-        amountDue
+        amountDue,
+        principalDue,
+        markupDue
       });
     }
   }

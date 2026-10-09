@@ -4,8 +4,8 @@ import { toPaise } from './money';
 describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
   it('allocates fully to oldest unpaid instalment', () => {
     const kists = [
-      { kistNumber: 1, amountDue: toPaise(2600), amountPaid: toPaise(0) },
-      { kistNumber: 2, amountDue: toPaise(2600), amountPaid: toPaise(0) }
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) },
+      { kistNumber: 2, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) }
     ];
     
     const result = allocatePayment({
@@ -24,7 +24,7 @@ describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
 
   it('allocates to instalment first, then penalty', () => {
     const kists = [
-      { kistNumber: 1, amountDue: toPaise(2600), amountPaid: toPaise(0) }
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) }
     ];
     
     // ₹2,600 instalment + ₹500 penalty. Pay ₹3,100.
@@ -42,7 +42,7 @@ describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
 
   it('marks instalment PAID and keeps penalty outstanding if payment exactly covers instalment', () => {
     const kists = [
-      { kistNumber: 1, amountDue: toPaise(2600), amountPaid: toPaise(0) }
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) }
     ];
     
     // ₹2,600 instalment + ₹500 penalty. Pay ₹2,600.
@@ -60,8 +60,8 @@ describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
 
   it('allocates excess to next unpaid instalment (pre-payment)', () => {
     const kists = [
-      { kistNumber: 1, amountDue: toPaise(2600), amountPaid: toPaise(0) },
-      { kistNumber: 2, amountDue: toPaise(2600), amountPaid: toPaise(0) }
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) },
+      { kistNumber: 2, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) }
     ];
     
     // Pay ₹2,700 with 0 penalty
@@ -85,9 +85,9 @@ describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
     // 2. Penalty: ₹500 (remaining ₹2900)
     
     const kistsWithDueStatus = [
-      { kistNumber: 1, amountDue: toPaise(2600), amountPaid: toPaise(0), isDue: true },
-      { kistNumber: 2, amountDue: toPaise(2600), amountPaid: toPaise(0), isDue: true },
-      { kistNumber: 3, amountDue: toPaise(2600), amountPaid: toPaise(0), isDue: false }
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0), isDue: true },
+      { kistNumber: 2, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0), isDue: true },
+      { kistNumber: 3, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0), isDue: false }
     ];
 
     const result = allocatePayment({
