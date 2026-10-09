@@ -1,0 +1,241 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"><meta content="mobile_stack" name="shell-type"><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&amp;display=swap" rel="stylesheet"><style>@layer base{html,body{width:100vw;margin:0;padding:0;background-color:#f7f9fb;}body{overscroll-behavior:none;}.pb-safe{padding-bottom:env(safe-area-inset-bottom,0px);}.pt-safe{padding-top:env(safe-area-inset-top,0px);}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { colors: { "on-secondary-fixed": "#00201d", "on-background": "#191c1e", "surface-variant": "#e0e3e5", "surface-bright": "#f7f9fb", "primary-fixed-dim": "#b4c8e6", "secondary": "#006a62", "on-tertiary-fixed": "#002109", "tertiary-container": "#002e0f", "surface-container-highest": "#e0e3e5", "on-surface-variant": "#44474d", "on-error": "#ffffff", "surface-container-high": "#e6e8ea", "secondary-container": "#91f0e4", "background": "#f7f9fb", "secondary-fixed": "#94f3e7", "error": "#ba1a1a", "on-secondary-fixed-variant": "#005049", "outline-variant": "#c4c6cd", "tertiary-fixed-dim": "#62df7d", "primary-container": "#14283f", "surface-dim": "#d8dadc", "surface-container": "#eceef0", "surface-tint": "#4d6079", "outline": "#74777e", "surface-container-low": "#f2f4f6", "on-tertiary": "#ffffff", "on-surface": "#191c1e", "error-container": "#ffdad6", "secondary-fixed-dim": "#77d7cb", "surface": "#f7f9fb", "on-secondary-container": "#006f66", "on-error-container": "#93000a", "primary": "#001328", "on-primary-fixed-variant": "#354860", "tertiary": "#001605", "tertiary-fixed": "#7ffc97", "inverse-surface": "#2d3133", "on-tertiary-container": "#16a34a", "on-primary-container": "#7c8fab", "surface-container-lowest": "#ffffff", "on-tertiary-fixed-variant": "#005320", "primary-fixed": "#d2e4ff", "on-primary-fixed": "#071c33", "on-secondary": "#ffffff", "inverse-on-surface": "#eff1f3", "inverse-primary": "#b4c8e6", "on-primary": "#ffffff" }, borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, spacing: { "space-xs": "0.25rem", "space-xl": "2rem", "margin": "1rem", "gutter-mobile": "0.75rem", "space-lg": "1.5rem", "gutter": "1rem", "space-md": "1rem", "space-sm": "0.5rem", "margin-tablet": "1.5rem" }, fontFamily: { "headline-sm": ["Inter"], "body-sm": ["Inter"], "body-md": ["Inter"], "label-md": ["Inter"], "headline-md": ["Inter"], "rupee-card": ["Inter"], "headline-lg-mobile": ["Inter"], "rupee-display": ["Inter"], "label-sm": ["Inter"], "headline-lg": ["Inter"], "label-lg": ["Inter"], "body-lg": ["Inter"] }, fontSize: { "headline-sm": ["18px", { "lineHeight": "24px", "fontWeight": "600" }], "body-sm": ["12px", { "lineHeight": "16px", "fontWeight": "400" }], "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }], "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.02em", "fontWeight": "600" }], "headline-md": ["22px", { "lineHeight": "28px", "letterSpacing": "-0.01em", "fontWeight": "600" }], "rupee-card": ["20px", { "lineHeight": "26px", "letterSpacing": "-0.01em", "fontWeight": "700" }], "headline-lg-mobile": ["26px", { "lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "700" }], "rupee-display": ["30px", { "lineHeight": "36px", "letterSpacing": "-0.03em", "fontWeight": "700" }], "label-sm": ["10px", { "lineHeight": "14px", "letterSpacing": "0.04em", "fontWeight": "700" }], "headline-lg": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700" }], "label-lg": ["14px", { "lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600" }], "body-lg": ["16px", { "lineHeight": "24px", "fontWeight": "400" }] } } } };</script></head><body class="bg-surface font-body-md text-body-md text-on-surface flex flex-col min-h-screen"><header class="fixed top-0 w-full z-50 pt-safe bg-primary-container shadow-[0_1px_8px_rgba(0,0,0,0.06)]"><div class="h-14 px-margin flex items-center justify-between"><div class="flex items-center gap-space-sm"><button aria-label="Go back" class="w-11 h-11 -ml-space-xs flex items-center justify-center text-surface-container-lowest hover:text-primary-fixed active:opacity-70 transition-colors" onclick="history.back()" type="button"><span class="material-symbols-outlined text-[24px]">arrow_back</span></button><h1 class="font-headline-sm text-headline-sm text-surface-container-lowest tracking-tight">Record Payment</h1></div><div class="flex items-center gap-space-sm"><div class="flex items-center gap-1 px-2 py-0.5 rounded bg-white/10 text-primary-fixed-dim"><span class="material-symbols-outlined text-[14px]">lock</span><span class="font-label-sm text-label-sm">Offline</span></div><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="flex flex-col relative w-full pt-14 bg-surface pb-safe flex-1 min-h-screen"><div class="flex flex-col w-full pb-28">
+<!-- Offline Persistent Indicator Bar -->
+<div class="w-full bg-primary-container px-margin py-1.5 flex items-center justify-between shadow-sm">
+<div class="flex items-center gap-1.5 text-primary-fixed-dim">
+<span class="material-symbols-outlined text-[16px]">verified_user</span>
+<span class="font-label-sm text-label-sm tracking-wide uppercase">Offline Ledger Mode</span>
+</div>
+<span class="font-label-sm text-label-sm text-primary-fixed-dim/80">Local Storage Active</span>
+</div>
+<div class="p-margin flex flex-col gap-space-md">
+<!-- Borrower & Loan Context Card -->
+<div class="bg-surface-container-lowest rounded-xl p-space-md shadow-sm flex flex-col gap-3">
+<div class="flex items-start justify-between gap-space-sm">
+<div class="flex items-center gap-3 min-w-0">
+<div class="w-12 h-12 rounded-full bg-surface-container-high flex items-center justify-center text-primary font-headline-sm text-headline-sm shrink-0">
+            RK
+          </div>
+<div class="min-w-0 flex flex-col">
+<div class="flex items-center gap-1.5">
+<span class="font-headline-sm text-headline-sm text-on-surface truncate">Ramesh Kumar</span>
+<span class="w-2 h-2 rounded-full bg-secondary shrink-0" title="Active"></span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant truncate">Kirana Store, Sector 4 • +91 98765 43210</span>
+</div>
+</div>
+<span class="px-2 py-0.5 rounded bg-error-container text-on-error-container font-label-sm text-label-sm shrink-0 font-semibold">
+          1 Overdue
+        </span>
+</div>
+<!-- Loan Meta & Balance Pill Matrix -->
+<div class="bg-surface-container-low rounded-lg p-3 flex flex-col gap-2.5"><div class="flex items-center justify-between text-on-surface-variant font-label-md text-label-md"><span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">tag</span>Loan #LN-2024-08</span><span class="">Disbursed: ₹20,000</span></div><div class="bg-error-container text-on-error-container rounded-md px-2.5 py-1.5 flex items-center justify-between font-label-sm text-label-sm font-medium"><span class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">schedule</span>Original Due Date: 22 Oct 2024</span><span class="font-semibold">2 Days Late</span></div><div class="grid grid-cols-3 gap-1.5 pt-1"><div class="bg-surface-container-lowest rounded-md p-2 shadow-sm flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Regular Kist</span><span class="font-rupee-card text-rupee-card text-on-surface mt-0.5">₹2,600</span></div><div class="bg-surface-container-lowest rounded-md p-2 shadow-sm flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Penalty (₹100/d)</span><span class="font-rupee-card text-rupee-card text-error mt-0.5">+₹200</span></div><div class="bg-surface-container-lowest rounded-md p-2 shadow-sm flex flex-col border border-secondary"><span class="font-label-sm text-label-sm text-secondary uppercase tracking-wider font-semibold">Total Payable</span><span class="font-rupee-card text-rupee-card text-secondary mt-0.5 font-bold">₹2,800</span></div></div><p class="font-body-sm text-body-sm text-on-surface-variant opacity-75 mt-0.5">Optional lender late fee. Never legally mandatory.</p></div>
+</div>
+<!-- Amount Entry Section -->
+<div class="bg-surface-container-lowest rounded-xl p-space-md shadow-sm flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<label class="font-label-lg text-label-lg text-on-surface font-semibold" for="repayAmount">Enter Repayment Amount</label>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Tap to edit</span>
+</div>
+<!-- Hero Rupee Input -->
+<div class="relative flex items-center bg-surface-container-low rounded-xl px-4 py-2 focus-within:bg-surface-container-lowest focus-within:shadow-md transition-all">
+<span class="font-rupee-display text-rupee-display text-on-surface select-none pr-2 font-bold">₹</span>
+<input aria-label="Repayment amount" class="w-full bg-transparent font-rupee-display text-rupee-display text-on-surface font-bold outline-none tracking-tight" id="repayAmount" inputmode="numeric" type="text" value="2,600">
+<button aria-label="Clear amount" class="p-2 text-outline hover:text-on-surface transition-colors flex items-center justify-center" id="clearBtn" type="button">
+<span class="material-symbols-outlined text-[20px]">cancel</span>
+</button>
+</div>
+<!-- Quick Preset Chips -->
+<div class="flex flex-col gap-1.5 pt-1">
+<span class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Quick Presets</span>
+<div class="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+<button class="preset-btn px-3 py-2 rounded-lg font-label-md text-label-md shrink-0 bg-secondary-container text-on-secondary-container font-semibold transition-colors flex items-center gap-1 shadow-sm" data-amount="2600" type="button">
+<span class="material-symbols-outlined text-[15px]">done</span>
+            ₹2,600 <span class="font-normal opacity-85">(Full Due)</span>
+</button>
+<button class="preset-btn px-3 py-2 rounded-lg font-label-md text-label-md shrink-0 bg-surface-container-high text-on-surface hover:bg-surface-container-highest transition-colors font-medium" data-amount="1300" type="button">
+            ₹1,300 <span class="font-normal text-on-surface-variant">(Half)</span>
+</button>
+<button class="preset-btn px-3 py-2 rounded-lg font-label-md text-label-md shrink-0 bg-surface-container-high text-on-surface hover:bg-surface-container-highest transition-colors font-medium" data-amount="5200" type="button">
+            ₹5,200 <span class="font-normal text-on-surface-variant">(2 EMIs)</span>
+</button>
+<button class="preset-btn px-3 py-2 rounded-lg font-label-md text-label-md shrink-0 bg-surface-container-high text-on-surface hover:bg-surface-container-highest transition-colors font-medium" data-amount="14000" type="button">
+            ₹14,000 <span class="font-normal text-on-surface-variant">(Full Clear)</span>
+</button>
+</div>
+</div>
+<!-- Ledger Dynamic Allocation Helper -->
+<div class="bg-secondary/10 rounded-lg p-3 flex items-start gap-2.5 mt-1"><span class="material-symbols-outlined text-secondary text-[20px] shrink-0 mt-0.5">swap_forward</span><div class="flex flex-col gap-1"><p class="font-label-lg text-label-lg text-on-surface font-semibold" id="allocationHeadline">Automatic Surplus Rollover to Next Kist</p><p class="font-body-sm text-body-sm text-on-surface-variant" id="allocationSubtext">If ₹2,700 received: Fully settles overdue instalment #4 (₹2,600). The extra ₹100 is automatically rolled over and credited in advance toward instalment #5.</p><div class="flex flex-col gap-0.5 mt-1 pt-1 border-t border-secondary/10 text-on-surface-variant font-body-sm text-body-sm"><p class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px] text-secondary">check</span>Next payable kist (#5): Reduced to <strong class="text-on-surface font-semibold ml-0.5">₹2,500</strong> (due 24 Nov 2024).</p><p class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px] text-secondary">check</span>Original contractual total remains unchanged at ₹26,000 (No advance-wallet needed).</p></div></div></div>
+</div>
+<!-- Payment Mode Selector -->
+<div class="bg-surface-container-lowest rounded-xl p-space-md shadow-sm flex flex-col gap-3">
+<span class="font-label-lg text-label-lg text-on-surface font-semibold">Payment Mode</span>
+<div class="grid grid-cols-3 gap-2">
+<button class="mode-btn flex flex-col items-center justify-center py-3 px-2 rounded-lg bg-secondary-container text-on-secondary-container transition-all shadow-sm" data-mode="cash" type="button">
+<span class="material-symbols-outlined text-[24px]" style="font-variation-settings: 'FILL' 1;">payments</span>
+<span class="font-label-md text-label-md mt-1 font-semibold">Cash</span>
+<span class="font-label-sm text-label-sm opacity-75">In Hand</span>
+</button>
+<button class="mode-btn flex flex-col items-center justify-center py-3 px-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-all" data-mode="upi" type="button">
+<span class="material-symbols-outlined text-[24px]">qr_code_scanner</span>
+<span class="font-label-md text-label-md mt-1 font-semibold">UPI</span>
+<span class="font-label-sm text-label-sm opacity-75">GPay/PhonePe</span>
+</button>
+<button class="mode-btn flex flex-col items-center justify-center py-3 px-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-all" data-mode="bank" type="button">
+<span class="material-symbols-outlined text-[24px]">account_balance</span>
+<span class="font-label-md text-label-md mt-1 font-semibold">Bank</span>
+<span class="font-label-sm text-label-sm opacity-75">NEFT / IMPS</span>
+</button>
+</div>
+</div>
+<!-- Collection Form Details -->
+<div class="bg-surface-container-lowest rounded-xl p-space-md shadow-sm flex flex-col gap-3">
+<span class="font-label-lg text-label-lg text-on-surface font-semibold">Collection Details</span>
+<!-- Date selector row -->
+<div class="flex items-center justify-between p-3 rounded-lg bg-surface-container-low"><div class="flex items-center justify-between text-on-surface-variant font-label-md text-label-md"><span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">tag</span>Loan #LN-2024-08</span><span class="">Disbursed: ₹20,000</span></div><div class="bg-error-container text-on-error-container rounded-md px-2.5 py-1.5 flex items-center justify-between font-label-sm text-label-sm font-medium"><span class="flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">schedule</span>Original Due Date: 22 Oct 2024</span><span class="font-semibold">2 Days Late</span></div><div class="grid grid-cols-3 gap-1.5 pt-1"><div class="bg-surface-container-lowest rounded-md p-2 shadow-sm flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Regular Kist</span><span class="font-rupee-card text-rupee-card text-on-surface mt-0.5">₹2,600</span></div><div class="bg-surface-container-lowest rounded-md p-2 shadow-sm flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Penalty (₹100/d)</span><span class="font-rupee-card text-rupee-card text-error mt-0.5">+₹200</span></div><div class="bg-surface-container-lowest rounded-md p-2 shadow-sm flex flex-col border border-secondary"><span class="font-label-sm text-label-sm text-secondary uppercase tracking-wider font-semibold">Total Payable</span><span class="font-rupee-card text-rupee-card text-secondary mt-0.5 font-bold">₹2,800</span></div></div><p class="font-body-sm text-body-sm text-on-surface-variant opacity-75 mt-0.5">Optional lender late fee. Never legally mandatory.</p></div>
+<!-- Optional collection note -->
+<div class="flex flex-col gap-1.5">
+<label class="font-label-sm text-label-sm text-on-surface-variant uppercase" for="collectionNote">Collection Note (Optional)</label>
+<div class="flex items-center bg-surface-container-low rounded-lg px-3 py-2.5">
+<span class="material-symbols-outlined text-outline text-[18px] mr-2">edit_note</span>
+<input class="w-full bg-transparent text-on-surface placeholder:text-outline outline-none font-body-md text-body-md" id="collectionNote" placeholder="e.g., Paid at shop, morning collection" type="text">
+</div>
+</div>
+</div>
+<!-- Offline Resilience Banner -->
+<div class="rounded-xl p-3 bg-surface-container flex items-center gap-3">
+<div class="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-primary text-[18px]">phonelink_lock</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant leading-tight">
+<strong class="font-semibold text-on-surface">Offline Entry:</strong> Saved directly to this phone's ledger. Instant recording with zero network dependency.
+      </p>
+</div>
+</div>
+<!-- Fixed Bottom Confirmation Bar -->
+<div class="fixed bottom-0 left-0 right-0 z-40 bg-surface-container-lowest px-margin py-3 shadow-[0_-4px_12px_rgba(0,0,0,0.08)] flex flex-col gap-1">
+<div class="flex items-center justify-between text-on-surface-variant px-1 font-label-sm text-label-sm">
+<span class="">Ledger Ref: LN-2024-08/TXN</span>
+<span class="">Post Balance: <strong class="text-on-surface font-semibold" id="barRemaining">₹11,300 (₹100 credited to Kist #5)</strong></span>
+</div>
+<button class="w-full h-14 rounded-xl bg-secondary active:opacity-90 text-on-secondary font-label-lg text-label-lg flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.99]" id="confirmBtn" type="button"><span class="material-symbols-outlined text-[22px]" style="font-variation-settings: &quot;FILL&quot; 1;">check_circle</span><span class="tracking-wide" id="btnLabel">Confirm Cash Payment (₹2,700)</span></button>
+</div>
+</div>
+<script>
+  (function initPaymentScreen() {
+    const repayInput = document.getElementById('repayAmount');
+    const clearBtn = document.getElementById('clearBtn');
+    const presetBtns = document.querySelectorAll('.preset-btn');
+    const modeBtns = document.querySelectorAll('.mode-btn');
+    const allocHeadline = document.getElementById('allocationHeadline');
+    const allocSubtext = document.getElementById('allocationSubtext');
+    const btnLabel = document.getElementById('btnLabel');
+    const barRemaining = document.getElementById('barRemaining');
+    const confirmBtn = document.getElementById('confirmBtn');
+
+    const TOTAL_BALANCE = 14000;
+    const DUE_INSTALMENT = 2600;
+
+    function formatNumber(num) {
+      return num.toLocaleString('en-IN');
+    }
+
+    function parseAmount(val) {
+      if (!val) return 0;
+      const clean = val.toString().replace(/[^0-9]/g, '');
+      return parseInt(clean, 10) || 0;
+    }
+
+    function updateLedgerCalculations(amt) {
+      const remaining = Math.max(0, TOTAL_BALANCE - amt);
+      barRemaining.textContent = '₹' + formatNumber(remaining);
+      btnLabel.textContent = 'Confirm Payment (₹' + formatNumber(amt) + ')';
+
+      if (amt === DUE_INSTALMENT) {
+        allocHeadline.textContent = 'Settles current instalment #4 entirely.';
+        allocSubtext.innerHTML = 'Remaining balance will be <span class="font-semibold text-on-surface">₹' + formatNumber(remaining) + '</span>.';
+      } else if (amt < DUE_INSTALMENT) {
+        const deficit = DUE_INSTALMENT - amt;
+        allocHeadline.textContent = 'Partial instalment repayment.';
+        allocSubtext.innerHTML = 'Current instalment will still have <span class="font-semibold text-error">₹' + formatNumber(deficit) + '</span> pending.';
+      } else if (amt >= TOTAL_BALANCE) {
+        allocHeadline.textContent = 'Full loan payoff!';
+        allocSubtext.innerHTML = '<span class="font-semibold text-secondary">Zero balance remaining.</span> Loan status will close.';
+      } else {
+        const extra = amt - DUE_INSTALMENT;
+        allocHeadline.textContent = 'Instalment #4 paid with advance principal reduction.';
+        allocSubtext.innerHTML = '₹' + formatNumber(extra) + ' applied directly to loan principal. New total balance: <span class="font-semibold text-on-surface">₹' + formatNumber(remaining) + '</span>.';
+      }
+
+      // Update preset highlight states
+      presetBtns.forEach(btn => {
+        const btnVal = parseInt(btn.getAttribute('data-amount'), 10);
+        if (btnVal === amt) {
+          btn.className = 'preset-btn px-3 py-2 rounded-lg font-label-md text-label-md shrink-0 bg-secondary-container text-on-secondary-container font-semibold transition-colors flex items-center gap-1 shadow-sm';
+        } else {
+          btn.className = 'preset-btn px-3 py-2 rounded-lg font-label-md text-label-md shrink-0 bg-surface-container-high text-on-surface hover:bg-surface-container-highest transition-colors font-medium';
+        }
+      });
+    }
+
+    repayInput.addEventListener('input', (e) => {
+      const num = parseAmount(e.target.value);
+      e.target.value = num > 0 ? formatNumber(num) : '';
+      updateLedgerCalculations(num);
+    });
+
+    clearBtn.addEventListener('click', () => {
+      repayInput.value = '';
+      repayInput.focus();
+      updateLedgerCalculations(0);
+    });
+
+    presetBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const amt = parseInt(btn.getAttribute('data-amount'), 10);
+        repayInput.value = formatNumber(amt);
+        updateLedgerCalculations(amt);
+      });
+    });
+
+    modeBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        modeBtns.forEach(b => {
+          b.className = 'mode-btn flex flex-col items-center justify-center py-3 px-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-all';
+        });
+        btn.className = 'mode-btn flex flex-col items-center justify-center py-3 px-2 rounded-lg bg-secondary-container text-on-secondary-container transition-all shadow-sm';
+      });
+    });
+
+    confirmBtn.addEventListener('click', () => {
+      const amt = parseAmount(repayInput.value);
+      if (amt <= 0) {
+        repayInput.focus();
+        return;
+      }
+      
+      // Inline visual feedback for single-hand Android financier
+      confirmBtn.innerHTML = `
+        <span class="material-symbols-outlined text-[22px] animate-spin">sync</span>
+        <span class="tracking-wide">Recording to Ledger...</span>
+      `;
+      confirmBtn.setAttribute('disabled', 'true');
+
+      setTimeout(() => {
+        confirmBtn.innerHTML = `
+          <span class="material-symbols-outlined text-[22px]">task_alt</span>
+          <span class="tracking-wide">Saved in Phone Ledger!</span>
+        `;
+        confirmBtn.classList.replace('bg-secondary', 'bg-tertiary-container');
+        confirmBtn.classList.replace('text-on-secondary', 'text-on-tertiary-container');
+        
+        setTimeout(() => {
+          window.history.back();
+        }, 800);
+      }, 400);
+    });
+  })();
+</script></main>
+
+</body></html>
