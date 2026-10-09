@@ -102,4 +102,35 @@ describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
     expect(result.remainingPenalty).toBe(0);
     expect(result.updatedKists[2].amountPaid).toBe(toPaise(300));
   });
+
+  it('correctly resolves PENDING status to PAID if amountPaid >= amountDue, even with zero payment', () => {
+    const kists = [
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(2600), principalPaid: toPaise(2000), markupPaid: toPaise(600), status: 'PENDING' as any }
+    ];
+    
+    // Pay ₹0
+    const result = allocatePayment({
+      paymentAmount: toPaise(0),
+      kists,
+      outstandingPenalty: toPaise(0)
+    });
+
+    expect(result.updatedKists[0].status).toBe('PAID');
+  });
+
+  it('does not incorrectly reduce amountPaid when a kist is overpaid and status is PENDING', () => {
+    const kists = [
+      { kistNumber: 1, amountDue: toPaise(2600), principalDue: toPaise(2000), markupDue: toPaise(600), amountPaid: toPaise(3000), principalPaid: toPaise(2000), markupPaid: toPaise(1000), status: 'PENDING' as any }
+    ];
+    
+    // Pay ₹100
+    const result = allocatePayment({
+      paymentAmount: toPaise(100),
+      kists,
+      outstandingPenalty: toPaise(0)
+    });
+
+    expect(result.updatedKists[0].amountPaid).toBe(toPaise(3000));
+    expect(result.updatedKists[0].status).toBe('PAID');
+  });
 });

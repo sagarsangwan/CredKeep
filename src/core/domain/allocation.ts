@@ -52,10 +52,17 @@ export function allocatePayment(input: AllocationInput): AllocationResult {
   let remainingFunds = input.paymentAmount;
   let remainingPenalty = input.outstandingPenalty;
   
-  const updatedKists = input.kists.map(k => ({ 
-    ...k, 
-    status: k.status || (k.amountPaid >= k.amountDue ? 'PAID' : (k.amountPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID'))
-  }));
+  const updatedKists = input.kists.map(k => {
+    let resolvedStatus = k.status;
+    if (!resolvedStatus || (resolvedStatus as string) === 'PENDING' || resolvedStatus === 'UNPAID' || resolvedStatus === 'PARTIALLY_PAID') {
+      resolvedStatus = k.amountPaid >= k.amountDue ? 'PAID' : (k.amountPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID');
+    }
+    // Also auto-fix if amountPaid somehow >= amountDue but status isn't PAID
+    if (k.amountPaid >= k.amountDue && resolvedStatus !== 'PAID') {
+      resolvedStatus = 'PAID';
+    }
+    return { ...k, status: resolvedStatus };
+  });
   
   const allocations: PaymentAllocation[] = [];
   
