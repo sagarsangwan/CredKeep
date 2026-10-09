@@ -66,7 +66,7 @@ Select skills autonomously based on the specific engineering task:
 - **Spec Execution**: Auto-select `implement-spec` when claiming and implementing tickets from `.scratch/<feature>/issues/`.
 - **Domain Alignment**: Auto-select `domain-modeling` when introducing or reconciling domain terms against `GLOSSARY.md` and `docs/adr/`.
 - **Pre-Commit Verification**: Auto-select `code-review` to inspect diffs against domain invariants before committing.
-- **UI Screen Construction**: Consult Stitch MCP design assets (`CredKeep V1 — Mobile Design System`, Project ID `8106667901868227815`) for screen layouts, typography, and color tokens.
+- **UI Screen Construction**: Consult Stitch MCP design assets (`CredKeep V1 — Mobile Design System`, Project ID `8106667901868227815`, Expected screens: 11) for screen layouts, typography, and color tokens. NEVER use the old `CredKeep Field Lending App` project.
 
 ### Automated Local Git Workflow
 
