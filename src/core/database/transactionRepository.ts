@@ -16,7 +16,7 @@ export class TransactionRepository {
 
       await this.db.withExclusiveTransactionAsync(async (tx) => {
         // Idempotency check
-        const existing = await this.db.getFirstAsync(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
+        const existing = await tx.getFirstAsync(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
         if (existing) {
           returnResult = existing;
           return;
@@ -24,11 +24,11 @@ export class TransactionRepository {
         
         // Ensure schedule is up to date (for bullet loans)
         const { LoanRepository } = require('./loanRepository');
-        const loanRepo = new LoanRepository(this.db);
-        await loanRepo.extendScheduleIfNeeded(loanId);
+        const loanRepo = new LoanRepository(tx);
+        await loanRepo.extendScheduleIfNeeded(loanId, tx);
 
         // Load current kists
-        const dbKists = await this.db.getAllAsync<any>(
+        const dbKists = await tx.getAllAsync<any>(
           `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`, 
           [loanId]
         );
@@ -46,15 +46,15 @@ export class TransactionRepository {
         }));
         
         // Assess penalties up to effectiveDate
-        await this.assessPenalties(loanId, effectiveDate);
+        await this.assessPenalties(loanId, effectiveDate, tx);
 
         // Fetch outstanding penalty
         // Outstanding penalty = (Total PENALTY_ASSESSMENT amounts) - (Total allocated_penalty_paise from all collections)
-        const penaltyAssessments = await this.db.getFirstAsync<any>(
+        const penaltyAssessments = await tx.getFirstAsync<any>(
           `SELECT SUM(amount_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
           [loanId]
         );
-        const penaltyPaid = await this.db.getFirstAsync<any>(
+        const penaltyPaid = await tx.getFirstAsync<any>(
           `SELECT SUM(allocated_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
           [loanId]
         );
@@ -78,7 +78,7 @@ export class TransactionRepository {
           allocatedPenalty += a.allocatedToPenalty;
         }
         
-        await this.db.runAsync(`
+        await tx.runAsync(`
           INSERT INTO transactions (
             id, operation_id, loan_id, transaction_type, is_cash, payment_method, 
             amount_paise, allocated_principal_paise, allocated_markup_paise, 
@@ -91,7 +91,7 @@ export class TransactionRepository {
         ]);
         
         // Update repayment schedules
-        const updateStmt = await this.db.prepareAsync(`
+        const updateStmt = await tx.prepareAsync(`
           UPDATE repayment_schedules
           SET principal_paid_paise = ?, markup_paid_paise = ?, status = ?
           WHERE loan_id = ? AND installment_number = ?
@@ -111,7 +111,7 @@ export class TransactionRepository {
           await updateStmt.finalizeAsync();
         }
         // Check if loan should be closed
-        const loan = await this.db.getFirstAsync<any>(`SELECT product_type FROM loans WHERE id = ?`, [loanId]);
+        const loan = await tx.getFirstAsync<any>(`SELECT product_type FROM loans WHERE id = ?`, [loanId]);
         
         let allKistsPaid = true;
         for (const k of result.updatedKists) {
@@ -124,7 +124,7 @@ export class TransactionRepository {
         // For instalment loans, if all kists are paid and no outstanding penalty remains, settle the loan
         // For bullet loans, they require an explicit principal repayment transaction to settle (not yet implemented in this method)
         if (loan && loan.product_type === 'instalment' && allKistsPaid && result.remainingPenalty <= 0) {
-           await this.db.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+           await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
         }
         
         returnResult = { success: true, transactionId, result };
@@ -174,25 +174,25 @@ export class TransactionRepository {
     return newPenaltyAmount;
   }
 
-  async assessPenalties(loanId: string, currentDate: string): Promise<number> {
-    const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+  async assessPenalties(loanId: string, currentDate: string, tx: any = this.db): Promise<number> {
+    const loan = await tx.getFirstAsync(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.status !== 'ACTIVE') return 0;
 
     const { LoanRepository } = require('./loanRepository');
-    const loanRepo = new LoanRepository(this.db);
-    await loanRepo.extendScheduleIfNeeded(loanId);
+    const loanRepo = new LoanRepository(tx);
+    await loanRepo.extendScheduleIfNeeded(loanId, tx);
 
-    const dbKists = await this.db.getAllAsync<any>(
+    const dbKists = await tx.getAllAsync(
       `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
       [loanId]
     );
 
-    const assessments = await this.db.getAllAsync<any>(
+    const assessments = await tx.getAllAsync(
       `SELECT effective_date FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
       [loanId]
     );
 
-    const assessedDates = new Set<string>(assessments.map(a => a.effective_date));
+    const assessedDates = new Set<string>(assessments.map((a: any) => a.effective_date));
 
     // Dynamic import to avoid circular dep if any, or just require
     const { calculateNewPenalties, LoanPenaltyState } = require('../domain/penalty');
@@ -201,7 +201,7 @@ export class TransactionRepository {
     const state = {
       loanId,
       rule: { dailyRatePaise: toPaise(100) },
-      kists: dbKists.map(k => ({
+      kists: dbKists.map((k: any) => ({
         kistNumber: k.installment_number,
         dueDate: k.effective_due_date,
         amountDue: k.total_due_paise,
@@ -219,9 +219,9 @@ export class TransactionRepository {
         const operationId = `penalty-${loanId}-${date}`;
         
         // Check if it already exists to be safe
-        const existing = await this.db.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
+        const existing = await tx.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
         if (!existing) {
-          await this.db.runAsync(`
+          await tx.runAsync(`
             INSERT INTO transactions (
               id, operation_id, loan_id, transaction_type, is_cash, payment_method, 
               amount_paise, allocated_principal_paise, allocated_markup_paise, 

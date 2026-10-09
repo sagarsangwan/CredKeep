@@ -1,12 +1,9 @@
 $ErrorActionPreference = "Stop"
 $env:Path += ";$env:APPDATA\npm;$env:USERPROFILE\AppData\Roaming\Python\Python313\Scripts"
-Write-Host "Attempting to invoke Codex CLI..."
-$codexPath = Get-Command codex -ErrorAction SilentlyContinue
-if (-not $codexPath) {
-    Write-Error "Codex CLI is not installed or not in PATH."
-    exit 1
-}
-Write-Host "Running Codex CLI..."
-cmd.exe /c "codex exec `"Read AGENTS.md, .workflow/STATE.md, and .workflow/HANDOFF.md and produce a diagnostic plan.`" < NUL > .workflow\reports\codex_diagnostic_plan.md 2>&1"
-Write-Host "Saved output to .workflow/reports/codex_diagnostic_plan.md"
+Write-Host "Running Codex CLI Planner for CK-P0-001..."
+
+$prompt = "Analyze task CK-P0-001: Payment Crash and Cross-Loan Collection Isolation. Inspect the source code and relevant Git history using Graphify or direct file reads. Trace borrower/loan selection, payment screen, allocation engine, SQLite transaction, success navigation and state refresh. Determine root-cause hypotheses for the native crash and cross-loan payment issue (do not claim native root cause without logs). Provide acceptance criteria and recommended tests. Output detailed diagnostic findings and tests."
+
+cmd.exe /c "codex exec `"$prompt`" < NUL > .workflow\plans\CK-P0-001.md 2>&1"
+Write-Host "Saved output to .workflow/plans/CK-P0-001.md"
 exit 0
