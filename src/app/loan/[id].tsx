@@ -36,7 +36,7 @@ export default function LoanDetailsScreen() {
   }
 
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={{ padding: theme.spacing.lg, paddingBottom: 40 }}>
       <Stack.Screen options={{ title: 'Loan Details' }} />
       
       <Card style={styles.headerCard}>
@@ -82,7 +82,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: theme.colors.background,
-    padding: theme.spacing.lg,
   },
   center: {
     flex: 1,

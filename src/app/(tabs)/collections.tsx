@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, StyleSheet, Alert, ScrollView, FlatList, TouchableOpacity } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as crypto from 'expo-crypto';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
@@ -84,7 +85,7 @@ export default function CollectionsScreen() {
 
   if (!selectedLoanId) {
     return (
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.header}>
           <Typography variant="headlineMd" color={theme.colors.onPrimary}>Select Loan for Collection</Typography>
         </View>
@@ -107,7 +108,7 @@ export default function CollectionsScreen() {
             </View>
           }
         />
-      </View>
+      </SafeAreaView>
     );
   }
 
@@ -115,7 +116,8 @@ export default function CollectionsScreen() {
   const totalPenalty = previewPenalty + outstandingPenalty;
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <SafeAreaView style={styles.container} edges={['top']}>
+    <ScrollView contentContainerStyle={styles.content}>
       <View style={styles.row}>
         <TouchableOpacity onPress={() => { setSelectedLoanId(null); setResult(null); }}>
           <Typography color={theme.colors.primary}>← Back</Typography>
@@ -176,14 +178,15 @@ export default function CollectionsScreen() {
         </Card>
       )}
     </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.background },
-  header: { padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 60 },
+  header: { padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 16 },
   listContent: { padding: theme.spacing.md, gap: theme.spacing.md },
-  content: { padding: theme.spacing.lg, paddingTop: 60 },
+  content: { padding: theme.spacing.lg },
   row: { flexDirection: 'row', marginBottom: theme.spacing.md },
   title: { marginBottom: theme.spacing.lg },
   card: { padding: theme.spacing.lg, marginBottom: theme.spacing.lg },

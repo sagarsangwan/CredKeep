@@ -7,8 +7,13 @@ export function createEncryptedBackupPayload(key: string, dbBase64: string, pass
 
 export function decryptBackupPayload(encryptedPayload: string, password: string): { key: string, dbBase64: string } {
   const bytes = CryptoJS.AES.decrypt(encryptedPayload, password);
-  const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
-  
+  let decryptedText: string;
+  try {
+    decryptedText = bytes.toString(CryptoJS.enc.Utf8);
+  } catch (e) {
+    throw new Error('Decryption failed. Incorrect password or corrupt file.');
+  }
+
   if (!decryptedText) {
     throw new Error('Decryption failed. Incorrect password or corrupt file.');
   }

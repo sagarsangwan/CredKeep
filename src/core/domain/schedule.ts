@@ -14,7 +14,7 @@ function getDaysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
 }
 
-function calculateNextDueDate(startDateStr: string, monthsToAdd: number, targetDueDay: number): string {
+export function calculateNextDueDate(startDateStr: string, monthsToAdd: number, targetDueDay: number): string {
   const [yearStr, monthStr] = startDateStr.split('-');
   let year = parseInt(yearStr, 10);
   let month = parseInt(monthStr, 10);

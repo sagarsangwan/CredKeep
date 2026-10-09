@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, AppState } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { Typography } from './Typography';
@@ -14,6 +14,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   const [pinEntry, setPinEntry] = useState('');
   const [storedPin, setStoredPin] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const appState = React.useRef(AppState.currentState);
 
   const checkPinSetup = async () => {
     try {
@@ -45,6 +46,27 @@ export function PinLock({ children }: { children: React.ReactNode }) {
       setIsLocked(false);
     }
   };
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      if (
+        appState.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        // App has come to the foreground
+        if (storedPin) {
+          setIsLocked(true);
+          setPinEntry('');
+          checkPinSetup();
+        }
+      }
+      appState.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [storedPin]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

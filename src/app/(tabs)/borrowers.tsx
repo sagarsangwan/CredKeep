@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
 import { Card } from '../../ui/Card';
@@ -45,7 +46,7 @@ export default function BorrowersScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
         <Typography variant="headlineMd" color={theme.colors.onPrimary}>Customers</Typography>
         <Button title="Add New" onPress={() => setModalVisible(true)} style={styles.headerBtn} />
@@ -69,6 +70,7 @@ export default function BorrowersScreen() {
       />
 
       <Modal visible={isModalVisible} animationType="slide" presentationStyle="pageSheet">
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }} edges={['top']}>
         <KeyboardAvoidingView 
           style={{ flex: 1 }} 
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -104,8 +106,9 @@ export default function BorrowersScreen() {
             </View>
           </View>
         </KeyboardAvoidingView>
+        </SafeAreaView>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -113,7 +116,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.background },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 60
+    padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 16
   },
   headerBtn: { backgroundColor: theme.colors.secondary, borderRadius: 8 },
   list: { padding: theme.spacing.md, gap: theme.spacing.md },

@@ -22,6 +22,11 @@ export class TransactionRepository {
           return;
         }
         
+        // Ensure schedule is up to date (for bullet loans)
+        const { LoanRepository } = require('./loanRepository');
+        const loanRepo = new LoanRepository(this.db);
+        await loanRepo.extendScheduleIfNeeded(loanId);
+
         // Load current kists
         const dbKists = await this.db.getAllAsync<any>(
           `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`, 
@@ -132,6 +137,10 @@ export class TransactionRepository {
     const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.status !== 'ACTIVE') return 0;
 
+    const { LoanRepository } = require('./loanRepository');
+    const loanRepo = new LoanRepository(this.db);
+    await loanRepo.extendScheduleIfNeeded(loanId);
+
     const dbKists = await this.db.getAllAsync<any>(
       `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
       [loanId]
@@ -169,6 +178,10 @@ export class TransactionRepository {
     const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.status !== 'ACTIVE') return 0;
 
+    const { LoanRepository } = require('./loanRepository');
+    const loanRepo = new LoanRepository(this.db);
+    await loanRepo.extendScheduleIfNeeded(loanId);
+
     const dbKists = await this.db.getAllAsync<any>(
       `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
       [loanId]
@@ -201,27 +214,25 @@ export class TransactionRepository {
     const { newPenaltyAmount, newAssessedDates } = calculateNewPenalties(state, currentDate);
 
     if (newPenaltyAmount > 0) {
-      await this.db.withExclusiveTransactionAsync(async (tx) => {
-        for (const date of newAssessedDates) {
-          const transactionId = crypto.randomUUID();
-          const operationId = `penalty-${loanId}-${date}`;
-          
-          // Check if it already exists to be safe
-          const existing = await this.db.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
-          if (!existing) {
-            await this.db.runAsync(`
-              INSERT INTO transactions (
-                id, operation_id, loan_id, transaction_type, is_cash, payment_method, 
-                amount_paise, allocated_principal_paise, allocated_markup_paise, 
-                allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [
-              transactionId, operationId, loanId, 'PENALTY_ASSESSMENT', 0, 'SYSTEM',
-              toPaise(100), 0, 0, 0, 0, date, new Date().toISOString()
-            ]);
-          }
+      for (const date of newAssessedDates) {
+        const transactionId = crypto.randomUUID();
+        const operationId = `penalty-${loanId}-${date}`;
+        
+        // Check if it already exists to be safe
+        const existing = await this.db.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
+        if (!existing) {
+          await this.db.runAsync(`
+            INSERT INTO transactions (
+              id, operation_id, loan_id, transaction_type, is_cash, payment_method, 
+              amount_paise, allocated_principal_paise, allocated_markup_paise, 
+              allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, [
+            transactionId, operationId, loanId, 'PENALTY_ASSESSMENT', 0, 'SYSTEM',
+            toPaise(100), 0, 0, 0, 0, date, new Date().toISOString()
+          ]);
         }
-      });
+      }
     }
 
     return newPenaltyAmount;

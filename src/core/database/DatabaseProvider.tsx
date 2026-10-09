@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { SQLiteDatabase } from 'expo-sqlite';
 import { initDatabase } from './db';
 import { runMigrations } from './schema';
@@ -12,6 +12,8 @@ type DatabaseContextType = {
   loans: LoanRepository | null;
   transactions: TransactionRepository | null;
   error: Error | null;
+  refreshVersion: number;
+  triggerRefresh: () => void;
 };
 
 const DatabaseContext = createContext<DatabaseContextType>({
@@ -20,10 +22,18 @@ const DatabaseContext = createContext<DatabaseContextType>({
   loans: null,
   transactions: null,
   error: null,
+  refreshVersion: 0,
+  triggerRefresh: () => {},
 });
 
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<DatabaseContextType>({
+  const [refreshVersion, setRefreshVersion] = useState(0);
+
+  const triggerRefresh = useCallback(() => {
+    setRefreshVersion(v => v + 1);
+  }, []);
+
+  const [state, setState] = useState<Omit<DatabaseContextType, 'refreshVersion' | 'triggerRefresh'>>({
     db: null,
     borrowers: null,
     loans: null,
@@ -52,7 +62,7 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <DatabaseContext.Provider value={state}>
+    <DatabaseContext.Provider value={{ ...state, refreshVersion, triggerRefresh }}>
       {children}
     </DatabaseContext.Provider>
   );

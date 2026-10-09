@@ -65,7 +65,7 @@ export default function BorrowerDetailsScreen() {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: theme.colors.background },
   container: { flex: 1 },
-  header: { padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 40 },
+  header: { padding: theme.spacing.lg, backgroundColor: theme.colors.primary },
   content: { padding: theme.spacing.lg },
   card: { padding: theme.spacing.lg, marginBottom: theme.spacing.xl },
   sectionTitle: { marginBottom: theme.spacing.md },

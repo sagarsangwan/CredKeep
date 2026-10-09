@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, ScrollView, TouchableOpacity, TextInput } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
@@ -247,7 +248,8 @@ export default function LoansScreen() {
       />
 
       <Modal visible={isModalVisible} animationType="slide" presentationStyle="pageSheet">
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }} edges={['top']}>
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <View style={styles.modalHeader}>
             <TouchableOpacity onPress={() => setModalVisible(false)}><Typography color={theme.colors.primary}>Cancel</Typography></TouchableOpacity>
             <Typography variant="labelLg">New Loan - Step {step}/4</Typography>
@@ -258,6 +260,7 @@ export default function LoansScreen() {
           {step === 3 && renderStep3()}
           {step === 4 && renderStep4()}
         </KeyboardAvoidingView>
+        </SafeAreaView>
       </Modal>
     </View>
   );
@@ -267,7 +270,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.background },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 60
+    padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 16
   },
   headerBtn: { backgroundColor: theme.colors.secondary, borderRadius: 8 },
   list: { padding: theme.spacing.md, gap: theme.spacing.md },
