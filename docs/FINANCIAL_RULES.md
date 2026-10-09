@@ -164,8 +164,16 @@ The following parameters are documented with architect recommendations, but rema
    - *Status*: **Needs Product Decision**.
    - *Recommendation*: The ₹100 daily fee continues as long as *any* non-zero balance remains on a past-due kist.
 3. **Cash Allocation Priority (Penalties vs Kists)**:
-   - *Status*: **Needs Product Decision**.
-   - *Recommendation*: Default to clearing `Penalties` first, with a loan-origination toggle for `Kists First` to accommodate informal borrower expectations.
+   - *Status*: **Approved (INSTALMENT_FIRST)**.
+   - *Decision*: 
+     1. Apply incoming payments toward the oldest unpaid scheduled instalment first.
+     2. Only after due instalment obligations are covered, apply remaining funds toward outstanding penalties.
+     3. If the scheduled instalment is completely covered but its penalty remains unpaid, mark the instalment PAID and keep the penalty outstanding separately.
+     4. Stop further daily penalty accrual when all overdue instalment obligations are cleared, even when historical penalties remain unpaid. Example: ₹2,600 instalment + ₹500 penalty. Borrower pays ₹2,600. The instalment becomes PAID, ₹500 penalty remains outstanding, and no further penalty accrues for that overdue period.
+     5. The next month's contractual instalment remains unchanged at ₹2,600.
+     6. If a borrower pays an excess amount (e.g., ₹2,700 against a ₹2,600 instalment with no penalty), apply ₹100 toward the next unpaid instalment.
+     7. Never multiply ₹100/day by the number of missed instalments on the same loan.
+     8. Preserve principal, markup, penalty, and future-instalment allocations separately using integer paise.
 4. **Early Loan Settlement / Foreclosure Rebate**:
    - *Status*: **Needs Product Decision**.
    - *Recommendation*: Support configurable settlement options: `FLAT_NO_REBATE` (full contractual face value owed) vs `PRO_RATA_REBATE` (unearned markup credited).
