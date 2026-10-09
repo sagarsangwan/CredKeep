@@ -39,8 +39,8 @@ function calculateNextDueDate(startDateStr: string, monthsToAdd: number, targetD
 export function generateSchedule(options: ScheduleOptions): ScheduledKist[] {
   const { principal, markupFactor, termMonths, startDate, dueDay, productType } = options;
   
-  const totalRepayment = multiplyPaise(principal, markupFactor);
-  const totalMarkup = subtractPaise(totalRepayment, principal);
+  const totalMarkup = multiplyPaise(principal, markupFactor);
+  const totalRepayment = addPaise(principal, totalMarkup);
   
   const schedule: ScheduledKist[] = [];
   

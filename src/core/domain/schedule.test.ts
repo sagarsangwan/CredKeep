@@ -6,7 +6,7 @@ describe('Schedule Generation', () => {
     it('₹20,000 + 30% = ₹26,000, Ten instalments of ₹2,600', () => {
       const schedule = generateSchedule({
         principal: toPaise(20000),
-        markupFactor: 1.3,
+        markupFactor: 0.3,
         termMonths: 10,
         startDate: '2026-01-01',
         dueDay: 1,
@@ -22,7 +22,7 @@ describe('Schedule Generation', () => {
     it('allocates non-divisible totals exact paise', () => {
       const schedule = generateSchedule({
         principal: toPaise(26000),
-        markupFactor: 1.0,
+        markupFactor: 0.0,
         termMonths: 3,
         startDate: '2026-01-01',
         dueDay: 1,
@@ -44,7 +44,7 @@ describe('Schedule Generation', () => {
       // Month 3: 666.66 + 10,000.00 = 10,666.66
       const schedule = generateSchedule({
         principal: toPaise(10000),
-        markupFactor: 1.2,
+        markupFactor: 0.2,
         termMonths: 3,
         startDate: '2026-01-15',
         dueDay: 15,
@@ -62,7 +62,7 @@ describe('Schedule Generation', () => {
     it('due-day 31 correctly handles February and March (month-end clamping)', () => {
       const schedule = generateSchedule({
         principal: toPaise(10000),
-        markupFactor: 1.0,
+        markupFactor: 0.0,
         termMonths: 3,
         startDate: '2026-01-01',
         dueDay: 31,
@@ -77,7 +77,7 @@ describe('Schedule Generation', () => {
     it('leap-year handling for February 29', () => {
       const schedule = generateSchedule({
         principal: toPaise(10000),
-        markupFactor: 1.0,
+        markupFactor: 0.0,
         termMonths: 1,
         startDate: '2024-01-01', // 2024 is leap year
         dueDay: 31,

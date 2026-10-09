@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text } from 'react-native';
-import LoansScreen from './loans';
+import LoansScreen from '../app/(tabs)/loans';
 
 // A simple regression test to ensure that LoansScreen does not throw ReferenceError 
 // or any other initialization error on import and render.

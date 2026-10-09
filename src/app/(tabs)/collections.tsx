@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { View, StyleSheet, Alert, ScrollView } from 'react-native';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { View, StyleSheet, Alert, ScrollView, FlatList, TouchableOpacity } from 'react-native';
 import * as crypto from 'expo-crypto';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
@@ -8,35 +8,44 @@ import { Input } from '../../ui/Input';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
 import { Loan } from '../../core/database/loanRepository';
-import { Paise } from '../../core/domain/money';
+import { Borrower } from '../../core/database/borrowerRepository';
+import { Paise, formatINR } from '../../core/domain/money';
 
 export default function CollectionsScreen() {
-  const { loans, transactions } = useDatabase();
+  const { loans, transactions, borrowers } = useDatabase();
   const [loansList, setLoansList] = useState<Loan[]>([]);
+  const [borrowersList, setBorrowersList] = useState<Borrower[]>([]);
   
-  const [selectedLoanId, setSelectedLoanId] = useState('');
+  const [selectedLoanId, setSelectedLoanId] = useState<string | null>(null);
   const [amountInr, setAmountInr] = useState('');
   const [result, setResult] = useState<any>(null);
 
   const loadData = useCallback(async () => {
-    if (loans) {
+    if (loans && borrowers) {
       setLoansList(await loans.getAll());
+      setBorrowersList(await borrowers.getAll());
     }
-  }, [loans]);
+  }, [loans, borrowers]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
   }, [loadData]);
 
+  const activeLoans = useMemo(() => loansList.filter(l => l.status === 'ACTIVE'), [loansList]);
+
+  const getBorrowerName = (id: string) => {
+    return borrowersList.find(b => b.id === id)?.name || 'Unknown Borrower';
+  };
+
   const handlePayment = async () => {
     if (!selectedLoanId || !amountInr) {
-      Alert.alert('Error', 'Please fill in all fields');
+      Alert.alert('Error', 'Please enter an amount');
       return;
     }
     
     try {
-      const amountPaise = parseInt(amountInr) * 100 as Paise;
+      const amountPaise = (parseInt(amountInr) * 100) as Paise;
       const effectiveDate = new Date().toISOString().split('T')[0];
       const operationId = crypto.randomUUID();
       
@@ -50,35 +59,66 @@ export default function CollectionsScreen() {
       setResult(res);
       setAmountInr('');
       Alert.alert('Success', 'Payment recorded successfully!');
+      loadData();
     } catch (e: any) {
       Alert.alert('Error', e.message);
     }
   };
 
+  if (!selectedLoanId) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <Typography variant="headlineMd" color={theme.colors.onPrimary}>Select Loan for Collection</Typography>
+        </View>
+        <FlatList
+          data={activeLoans}
+          keyExtractor={item => item.id}
+          contentContainerStyle={styles.listContent}
+          renderItem={({ item }) => (
+            <TouchableOpacity onPress={() => setSelectedLoanId(item.id)}>
+              <Card elevated style={styles.loanCard}>
+                <Typography variant="headlineSm">{getBorrowerName(item.borrower_id)}</Typography>
+                <Typography variant="bodyMd">Principal: {formatINR(item.principal_paise as Paise)}</Typography>
+                <Typography variant="bodySm" color={theme.colors.textSecondary}>Loan ID: {item.id.substring(0, 8)}</Typography>
+              </Card>
+            </TouchableOpacity>
+          )}
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Typography variant="bodyLg" color={theme.colors.textSecondary}>No active loans found</Typography>
+            </View>
+          }
+        />
+      </View>
+    );
+  }
+
+  const selectedLoan = loansList.find(l => l.id === selectedLoanId);
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <View style={styles.row}>
+        <TouchableOpacity onPress={() => { setSelectedLoanId(null); setResult(null); }}>
+          <Typography color={theme.colors.primary}>← Back</Typography>
+        </TouchableOpacity>
+      </View>
+      
       <Typography variant="headlineMd" style={styles.title}>Record Collection</Typography>
       
-      <Card elevated style={styles.card}>
-        <Typography variant="labelLg" style={styles.label}>Select Loan (Copy ID)</Typography>
-        <Input
-          label="Loan ID"
-          placeholder="UUID"
-          value={selectedLoanId}
-          onChangeText={setSelectedLoanId}
-        />
-        <View style={styles.hints}>
-          {loansList.slice(0, 5).map(l => (
-            <Typography key={l.id} variant="bodySm" color={theme.colors.textSecondary}>
-              {l.id} - {(l.principal_paise / 100)} INR
-            </Typography>
-          ))}
-        </View>
+      {selectedLoan && (
+        <Card style={styles.selectedLoanCard}>
+          <Typography variant="labelLg">Borrower</Typography>
+          <Typography variant="headlineSm">{getBorrowerName(selectedLoan.borrower_id)}</Typography>
+          <Typography variant="bodyMd" style={{marginTop: 8}}>Principal: {formatINR(selectedLoan.principal_paise as Paise)}</Typography>
+        </Card>
+      )}
 
+      <Card elevated style={styles.card}>
         <Input
-          label="Amount (INR)"
+          label="Amount Received (INR)"
           keyboardType="numeric"
-          placeholder="e.g. 500"
+          placeholder="e.g. 2600"
           value={amountInr}
           onChangeText={setAmountInr}
         />
@@ -88,16 +128,12 @@ export default function CollectionsScreen() {
 
       {result && (
         <Card style={styles.resultCard}>
-          <Typography variant="headlineSm">Last Allocation Result</Typography>
-          <Typography variant="bodySm">
-            Transaction ID: {result.transactionId}
-          </Typography>
-          <Typography variant="bodySm">
-            Unallocated: {(result.result?.unallocatedFunds || 0) / 100} INR
-          </Typography>
+          <Typography variant="headlineSm">Payment Allocated</Typography>
+          <Typography variant="bodySm">Transaction ID: {result.transactionId.substring(0,8)}</Typography>
+          <Typography variant="bodySm">Unallocated: {formatINR((result.result?.unallocatedFunds || 0) as Paise)}</Typography>
           {result.result?.allocations?.map((a: any, i: number) => (
-            <Typography key={i} variant="bodySm" color={theme.colors.secondary}>
-              Kist {a.kistNumber}: {(a.allocatedToPrincipal + a.allocatedToMarkup) / 100} INR
+            <Typography key={i} variant="bodySm" color={theme.colors.success}>
+              Kist #{a.kistNumber}: {formatINR((a.allocatedToPrincipal + a.allocatedToMarkup) as Paise)}
             </Typography>
           ))}
         </Card>
@@ -107,34 +143,16 @@ export default function CollectionsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: theme.colors.background,
-  },
-  content: {
-    padding: theme.spacing.lg,
-  },
-  title: {
-    marginBottom: theme.spacing.lg,
-  },
-  card: {
-    padding: theme.spacing.lg,
-    marginBottom: theme.spacing.lg,
-  },
-  label: {
-    marginBottom: theme.spacing.xs,
-  },
-  hints: {
-    marginBottom: theme.spacing.md,
-    padding: theme.spacing.sm,
-    backgroundColor: theme.colors.surfaceTint,
-    borderRadius: theme.borderRadius.sm,
-  },
-  button: {
-    marginTop: theme.spacing.md,
-  },
-  resultCard: {
-    backgroundColor: theme.colors.successContainer,
-    borderColor: theme.colors.success,
-  }
+  container: { flex: 1, backgroundColor: theme.colors.background },
+  header: { padding: theme.spacing.lg, backgroundColor: theme.colors.primary, paddingTop: 60 },
+  listContent: { padding: theme.spacing.md, gap: theme.spacing.md },
+  content: { padding: theme.spacing.lg, paddingTop: 60 },
+  row: { flexDirection: 'row', marginBottom: theme.spacing.md },
+  title: { marginBottom: theme.spacing.lg },
+  card: { padding: theme.spacing.lg, marginBottom: theme.spacing.lg },
+  loanCard: { marginBottom: theme.spacing.sm },
+  selectedLoanCard: { backgroundColor: theme.colors.surfaceTint, padding: theme.spacing.md, marginBottom: theme.spacing.lg },
+  empty: { padding: theme.spacing.xl, alignItems: 'center' },
+  button: { marginTop: theme.spacing.md },
+  resultCard: { backgroundColor: theme.colors.successContainer, borderColor: theme.colors.success }
 });
