@@ -61,8 +61,7 @@ export function generateSchedule(options: ScheduleOptions): ScheduledKist[] {
     const markupInstalments = dividePaise(totalMarkup, termMonths);
     
     for (let i = 0; i < termMonths; i++) {
-      const isLast = i === termMonths - 1;
-      const principalDue = isLast ? principal : (0 as Paise);
+      const principalDue = 0 as Paise;
       const markupDue = markupInstalments[i];
       const amountDue = addPaise(principalDue, markupDue);
       

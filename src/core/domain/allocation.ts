@@ -13,7 +13,7 @@ export type KistAllocationState = {
   status?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
 };
 
-function allocateProportional(
+function allocateWithinKist(
   amount: Paise,
   kist: KistAllocationState
 ): { p: Paise; m: Paise } {
@@ -24,16 +24,13 @@ function allocateProportional(
     return { p: unpaidPrincipal, m: unpaidMarkup };
   }
 
-  const allocP = (amount * kist.principalDue) / kist.amountDue;
-  let p = Math.round(allocP) as Paise;
-  
-  if (p > unpaidPrincipal) p = unpaidPrincipal;
-  
-  let m = subtractPaise(amount, p);
+  // Allocate to markup first, then principal
+  let m = amount;
   if (m > unpaidMarkup) {
     m = unpaidMarkup;
-    p = subtractPaise(amount, m);
   }
+  
+  const p = subtractPaise(amount, m);
   
   return { p, m };
 }
@@ -78,7 +75,7 @@ export function allocatePayment(input: AllocationInput): AllocationResult {
       }
       
       if (allocatedToKist > 0) {
-        const { p, m } = allocateProportional(allocatedToKist, kist);
+        const { p, m } = allocateWithinKist(allocatedToKist, kist);
         kist.principalPaid = addPaise(kist.principalPaid, p);
         kist.markupPaid = addPaise(kist.markupPaid, m);
 
@@ -124,7 +121,7 @@ export function allocatePayment(input: AllocationInput): AllocationResult {
       }
       
       if (allocatedToKist > 0) {
-        const { p, m } = allocateProportional(allocatedToKist, kist);
+        const { p, m } = allocateWithinKist(allocatedToKist, kist);
         kist.principalPaid = addPaise(kist.principalPaid, p);
         kist.markupPaid = addPaise(kist.markupPaid, m);
 

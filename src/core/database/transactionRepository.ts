@@ -40,8 +40,23 @@ export class TransactionRepository {
           isDue: k.effective_due_date <= effectiveDate
         }));
         
-        // TODO: Fetch real penalty from penalty engine. For now, 0.
-        const outstandingPenalty = 0 as Paise;
+        // Assess penalties up to effectiveDate
+        await this.assessPenalties(loanId, effectiveDate);
+
+        // Fetch outstanding penalty
+        // Outstanding penalty = (Total PENALTY_ASSESSMENT amounts) - (Total allocated_penalty_paise from all collections)
+        const penaltyAssessments = await this.db.getFirstAsync<any>(
+          `SELECT SUM(amount_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
+          [loanId]
+        );
+        const penaltyPaid = await this.db.getFirstAsync<any>(
+          `SELECT SUM(allocated_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+          [loanId]
+        );
+        
+        const totalPenaltyAssessed = (penaltyAssessments?.total || 0) as number;
+        const totalPenaltyPaid = (penaltyPaid?.total || 0) as number;
+        const outstandingPenalty = Math.max(0, totalPenaltyAssessed - totalPenaltyPaid) as Paise;
   
         const result = allocatePayment({ paymentAmount, kists, outstandingPenalty });
         
@@ -90,10 +105,88 @@ export class TransactionRepository {
         } finally {
           await updateStmt.finalizeAsync();
         }
+        // Check if loan should be closed
+        const loan = await this.db.getFirstAsync<any>(`SELECT product_type FROM loans WHERE id = ?`, [loanId]);
+        
+        let allKistsPaid = true;
+        for (const k of result.updatedKists) {
+          if (k.status !== 'PAID') {
+            allKistsPaid = false;
+            break;
+          }
+        }
+        
+        // For instalment loans, if all kists are paid and no outstanding penalty remains, settle the loan
+        // For bullet loans, they require an explicit principal repayment transaction to settle (not yet implemented in this method)
+        if (loan && loan.product_type === 'instalment' && allKistsPaid && result.remainingPenalty <= 0) {
+           await this.db.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+        }
         
         returnResult = { success: true, transactionId, result };
       });
       
       return returnResult;
+  }
+
+  async assessPenalties(loanId: string, currentDate: string): Promise<number> {
+    const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+    if (!loan || loan.status !== 'ACTIVE') return 0;
+
+    const dbKists = await this.db.getAllAsync<any>(
+      `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
+      [loanId]
+    );
+
+    const assessments = await this.db.getAllAsync<any>(
+      `SELECT effective_date FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
+      [loanId]
+    );
+
+    const assessedDates = new Set<string>(assessments.map(a => a.effective_date));
+
+    // Dynamic import to avoid circular dep if any, or just require
+    const { calculateNewPenalties, LoanPenaltyState } = require('../domain/penalty');
+    const { toPaise } = require('../domain/money');
+
+    const state = {
+      loanId,
+      rule: { dailyRatePaise: toPaise(100) },
+      kists: dbKists.map(k => ({
+        kistNumber: k.installment_number,
+        dueDate: k.effective_due_date,
+        amountDue: k.total_due_paise,
+        amountPaid: k.principal_paid_paise + k.markup_paid_paise,
+        isFullyPaid: k.status === 'PAID'
+      })),
+      assessedDates
+    };
+
+    const { newPenaltyAmount, newAssessedDates } = calculateNewPenalties(state, currentDate);
+
+    if (newPenaltyAmount > 0) {
+      await this.db.withExclusiveTransactionAsync(async (tx) => {
+        for (const date of newAssessedDates) {
+          const transactionId = crypto.randomUUID();
+          const operationId = `penalty-${loanId}-${date}`;
+          
+          // Check if it already exists to be safe
+          const existing = await this.db.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
+          if (!existing) {
+            await this.db.runAsync(`
+              INSERT INTO transactions (
+                id, operation_id, loan_id, transaction_type, is_cash, payment_method, 
+                amount_paise, allocated_principal_paise, allocated_markup_paise, 
+                allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [
+              transactionId, operationId, loanId, 'PENALTY_ASSESSMENT', 0, 'SYSTEM',
+              toPaise(100), 0, 0, 0, 0, date, new Date().toISOString()
+            ]);
+          }
+        }
+      });
+    }
+
+    return newPenaltyAmount;
   }
 }

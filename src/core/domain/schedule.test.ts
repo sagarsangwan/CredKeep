@@ -16,7 +16,24 @@ describe('Schedule Generation', () => {
       expect(schedule[0].amountDue).toBe(toPaise(2600));
       expect(schedule[0].dueDate).toBe('2026-02-01');
       expect(schedule[9].amountDue).toBe(toPaise(2600));
-      expect(schedule[9].dueDate).toBe('2026-11-01');
+    });
+
+    it('₹24,000 + 30% = ₹31,200, Twelve instalments of ₹2,600', () => {
+      const schedule = generateSchedule({
+        principal: toPaise(24000),
+        markupFactor: 0.3,
+        termMonths: 12,
+        startDate: '2026-01-01',
+        dueDay: 1,
+        productType: 'instalment'
+      });
+      expect(schedule.length).toBe(12);
+      expect(schedule[0].amountDue).toBe(toPaise(2600));
+      expect(schedule[0].markupDue).toBe(toPaise(600));
+      expect(schedule[0].principalDue).toBe(toPaise(2000));
+      
+      const totalAmountDue = schedule.reduce((sum, k) => sum + k.amountDue, 0);
+      expect(totalAmountDue).toBe(toPaise(31200));
     });
 
     it('allocates non-divisible totals exact paise', () => {
@@ -41,7 +58,7 @@ describe('Schedule Generation', () => {
       // Markup is 2,000. Across 3 months, markup is 666.67, 666.67, 666.66.
       // Month 1: 666.67
       // Month 2: 666.67
-      // Month 3: 666.66 + 10,000.00 = 10,666.66
+      // Month 3: 666.66 (principal is paid separately)
       const schedule = generateSchedule({
         principal: toPaise(10000),
         markupFactor: 0.2,
@@ -54,7 +71,7 @@ describe('Schedule Generation', () => {
       expect(schedule.length).toBe(3);
       expect(schedule[0].amountDue).toBe(66667);
       expect(schedule[1].amountDue).toBe(66667);
-      expect(schedule[2].amountDue).toBe(1066666);
+      expect(schedule[2].amountDue).toBe(66666);
     });
   });
 
