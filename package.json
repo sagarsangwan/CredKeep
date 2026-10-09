@@ -1,12 +1,15 @@
 {
   "name": "credkeep",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "expo-router/entry",
   "dependencies": {
     "@react-native-community/netinfo": "12.0.1",
     "expo": "~57.0.27",
     "expo-constants": "~57.0.21",
+    "expo-crypto": "~57.0.3",
     "expo-linking": "~57.0.12",
+    "expo-router": "~57.0.25",
+    "expo-secure-store": "~57.0.4",
     "expo-sqlite": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "lucide-react-native": "^1.54.0",
@@ -16,6 +19,7 @@
     "react-native-screens": "~4.26.0"
   },
   "devDependencies": {
+    "@react-native/jest-preset": "^0.86.3",
     "@types/jest": "^30.0.0",
     "@types/react": "~19.2.2",
     "eslint": "^9.0.0",
