@@ -1,7 +1,13 @@
-# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+# --------------------------------------------------
+# React Native & Expo .gitignore for CredKeep
+# --------------------------------------------------
 
-# dependencies
+# Dependencies
 node_modules/
+package-lock.json.orig
+npm-debug.*
+yarn-debug.*
+yarn-error.*
 
 # Expo
 .expo/
@@ -9,33 +15,68 @@ dist/
 web-build/
 expo-env.d.ts
 
-# Native
+# Native builds & generated folders (Continuous Native Generation)
+/ios/
+/android/
 .kotlin/
 *.orig.*
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+credentials.json
+google-services.json
+GoogleService-Info.plist
+
+# Keystores, signing keys & certificates
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
+*.pem
 *.mobileprovision
 
-# Metro
+# Databases & local offline storage
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Encrypted backups, snapshots & user vault files
+*.bak
+*.backup
+*.enc
+*.credkeep.enc
+/vault/
+/data/
+/backups/
+
+# User documents & receipts (PDF/media exports)
+*.pdf
+/exports/
+/receipts/
+
+# Metro & Bundler
 .metro-health-check*
 
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
-
-# macOS
-.DS_Store
-*.pem
-
-# local env files
-.env*.local
-
-# typescript
+# TypeScript
 *.tsbuildinfo
 
-# generated native folders
-/ios
-/android
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Scratch & Project Tasks
+# Allow markdown issues and specs under .scratch/ while ignoring temp binaries
+.scratch/**/*.tmp
+.scratch/**/*.log
