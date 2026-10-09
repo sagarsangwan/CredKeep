@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, ScrollView, TouchableOpacity } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Typography } from '../../ui/Typography';
@@ -16,6 +16,7 @@ export default function LoansScreen() {
   const { loans, borrowers } = useDatabase();
   const [data, setData] = useState<Loan[]>([]);
   const [borrowersList, setBorrowersList] = useState<Borrower[]>([]);
+  const [error, setError] = useState<string | null>(null);
   
   const [isModalVisible, setModalVisible] = useState(false);
   const [selectedBorrowerId, setSelectedBorrowerId] = useState('');
@@ -26,8 +27,13 @@ export default function LoansScreen() {
   const [productType] = useState<'instalment' | 'bullet'>('instalment');
   const loadData = useCallback(async () => {
     if (loans && borrowers) {
-      setData(await loans.getAll());
-      setBorrowersList(await borrowers.getAll());
+      try {
+        setError(null);
+        setData(await loans.getAll());
+        setBorrowersList(await borrowers.getAll());
+      } catch (err: any) {
+        setError(err.message || 'Failed to load loans');
+      }
     }
   }, [loans, borrowers]);
 
@@ -80,7 +86,11 @@ export default function LoansScreen() {
         )}
         ListEmptyComponent={() => (
           <View style={styles.empty}>
-            <Typography variant="bodyLg" color={theme.colors.textSecondary}>No loans found</Typography>
+            {error ? (
+              <Typography variant="bodyLg" color={theme.colors.error}>{error}</Typography>
+            ) : (
+              <Typography variant="bodyLg" color={theme.colors.textSecondary}>No loans found</Typography>
+            )}
           </View>
         )}
       />
