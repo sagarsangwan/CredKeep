@@ -31,6 +31,13 @@
         }
       ],
       "expo-status-bar"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "44042971-c1f1-4f47-bec5-04950efe3bbf"
+      }
+    },
+    "owner": "sagarsangwan"
   }
 }
