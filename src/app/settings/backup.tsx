@@ -192,20 +192,24 @@ export default function BackupScreen() {
           onChangeText={setPassword}
           secureTextEntry
           placeholder="Enter a strong password"
+          editable={false}
         />
 
         <View style={styles.actions}>
+          <Typography variant="bodySm" color={theme.colors.error} style={{ marginBottom: 16 }}>
+            Note: Portable backup is currently disabled pending a cryptographic security audit for AES key derivation and integrity protection.
+          </Typography>
           <Button 
             title="Export Secure Backup (.ckb)" 
             onPress={handleBackup} 
-            disabled={loading}
+            disabled={true}
           />
           <View style={{ height: 20 }} />
           <Button 
             variant="outline" 
             title="Restore from Backup (.ckb)" 
             onPress={handleRestore}
-            disabled={loading}
+            disabled={true}
           />
         </View>
 

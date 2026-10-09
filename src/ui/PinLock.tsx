@@ -47,6 +47,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     checkPinSetup();
   }, []);
 
