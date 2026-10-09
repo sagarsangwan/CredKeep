@@ -10,7 +10,7 @@ jest.mock('expo-router', () => ({
   useRouter: () => ({ push: jest.fn() }),
 }));
 
-jest.mock('../../core/database/DatabaseProvider', () => ({
+jest.mock('../core/database/DatabaseProvider', () => ({
   useDatabase: () => ({
     loans: { getAll: jest.fn().mockResolvedValue([]) },
     borrowers: { getAll: jest.fn().mockResolvedValue([]) }
