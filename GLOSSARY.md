@@ -44,11 +44,23 @@ _Avoid_: Interest-only loan, balloon loan
 A scheduled periodic installment due on an agreed calendar date.
 _Avoid_: EMI, installment, payment slice
 
+**Original Due Date**:
+The immutable contractual calendar date on which a Kist was scheduled at loan origination.
+_Avoid_: Contract date, anchor date
+
+**Effective Due Date**:
+The active operational calendar date on which a Kist is due, modified via formal schedule modification without altering the original contractual date.
+_Avoid_: Revised date, dynamic due date
+
 **Tenure**:
 The agreed duration of the Loan Account expressed as the total count of monthly cycles.
 _Avoid_: Term, period, duration
 
-### Repayments & Allocations
+**Schedule Modification**:
+An auditable record altering the Effective Due Date of a single specific Kist with an explicit penalty treatment decision.
+_Avoid_: Reschedule, date shift, deferral
+
+### Repayments, Penalties & Overdue Lifecycle
 
 **Collection Receipt**:
 An immutable record of money received from a Borrower against a Loan Account, issued with a unique receipt number and timestamp.
@@ -62,16 +74,24 @@ _Avoid_: Payment splitting, balance deduction
 A collection where the amount received is less than the currently due Kist plus accrued penalties.
 _Avoid_: Half kist, split payment
 
-**Advance Payment**:
-A collection where the amount received exceeds currently due obligations, reducing future principal or pre-paying future kists.
-_Avoid_: Prepayment, excess credit
+**Future Kist Reduction**:
+The immediate automatic allocation of excess collection cash toward the earliest unpaid future scheduled Kists without creating a separate advance wallet.
+_Avoid_: Advance payment, wallet credit, overpayment buffer
+
+**Unallocated Surplus**:
+Cash collected in excess of the entire remaining contractual face value of a loan, held strictly for refunding.
+_Avoid_: Excess balance, float, change
+
+**Overdue Period**:
+A continuous chronological window during which a Loan Account has at least one unpaid Kist whose Effective Due Date has elapsed, accruing a maximum of one flat daily penalty per loan.
+_Avoid_: Default term, overdue cycle, aging bucket
 
 **Late Penalty**:
-A punitive fee assessed on overdue balances past the grace period to incentivize repayment.
+A punitive fee of ₹100 per calendar day assessed once per overdue Loan Account past the grace date.
 _Avoid_: Delay fee, fine, overdue charge
 
 **Penalty Waiver**:
-An explicit, recorded action by the financier to forgive an accrued Late Penalty without altering principal or markup obligations.
+An explicit, recorded noncash action by the financier to forgive an accrued Late Penalty without modifying principal, markup, or cash collections.
 _Avoid_: Discount, write-off
 
 **Foreclosure**:
@@ -79,8 +99,12 @@ The early closure of a Loan Account prior to contractual maturity, settling outs
 _Avoid_: Pre-closure, early settlement
 
 **Settlement (OTS)**:
-A negotiated compromise where the financier accepts a lump sum lower than the total outstanding receivable and writes off the remaining balance.
-_Avoid_: Haircut, default write-off, compromise
+A negotiated compromise where the financier accepts a lump sum lower than the total outstanding receivable and legally extinguishes the debt.
+_Avoid_: Haircut, write-off, compromise
+
+**Bad Debt Write-Off**:
+An accounting impairment marking an unpaid loan as uncollectible, which removes it from active portfolio balance without extinguishing legal debt claims.
+_Avoid_: Settlement, cancellation, waiver
 
 ### Security & Collateral
 
@@ -111,5 +135,5 @@ A user-provided passphrase used to derive a Key Encryption Key (KEK) via PBKDF2 
 _Avoid_: App password, login pin
 
 **Audit Correction**:
-An immutable compensating ledger entry recording a manual adjustment, correction, or waiver with an explicit timestamp and reason.
+An immutable compensating ledger entry recording a manual adjustment, correction, or reversal with an explicit timestamp and reason.
 _Avoid_: Edit, DB update, overwrite
