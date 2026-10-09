@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform } from 'react-native';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
@@ -15,16 +15,17 @@ export default function BorrowersScreen() {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
 
-  const loadBorrowers = async () => {
+  const loadBorrowers = useCallback(async () => {
     if (borrowers) {
       const result = await borrowers.getAll();
       setData(result);
     }
-  };
+  }, [borrowers]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadBorrowers();
-  }, [borrowers]);
+  }, [loadBorrowers]);
 
   const handleAdd = async () => {
     if (!name || !phone) {

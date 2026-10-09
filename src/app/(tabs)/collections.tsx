@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, StyleSheet, Alert, ScrollView } from 'react-native';
 import * as crypto from 'expo-crypto';
 import { Typography } from '../../ui/Typography';
@@ -18,15 +18,16 @@ export default function CollectionsScreen() {
   const [amountInr, setAmountInr] = useState('');
   const [result, setResult] = useState<any>(null);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     if (loans) {
       setLoansList(await loans.getAll());
     }
-  };
+  }, [loans]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
-  }, [loans]);
+  }, [loadData]);
 
   const handlePayment = async () => {
     if (!selectedLoanId || !amountInr) {

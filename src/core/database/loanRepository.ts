@@ -1,8 +1,6 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
-import { Paise, toPaise } from '../domain/money';
 import { ScheduleOptions, generateSchedule } from '../domain/schedule';
-import { ScheduledKist } from '../domain/models';
 
 export type Loan = {
   id: string;

@@ -23,18 +23,18 @@ export default function LoansScreen() {
   const [markupFactor, setMarkupFactor] = useState('0.1');
   const [termMonths, setTermMonths] = useState('6');
   const [dueDay, setDueDay] = useState('5');
-  const [productType, setProductType] = useState<'instalment' | 'bullet'>('instalment');
-
-  const loadData = async () => {
+  const [productType] = useState<'instalment' | 'bullet'>('instalment');
+  const loadData = useCallback(async () => {
     if (loans && borrowers) {
       setData(await loans.getAll());
       setBorrowersList(await borrowers.getAll());
     }
-  };
+  }, [loans, borrowers]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
-  }, [loans, borrowers]);
+  }, [loadData]);
 
   const handleCreate = async () => {
     if (!selectedBorrowerId || !principal || !markupFactor || !termMonths || !dueDay) {
