@@ -80,3 +80,8 @@ Thumbs.db
 # Allow markdown issues and specs under .scratch/ while ignoring temp binaries
 .scratch/**/*.tmp
 .scratch/**/*.log
+
+# Temporary workflow diagnostic and generated files
+graphify-out/
+test-bug.js
+.workflow/qa_prompt.txt
