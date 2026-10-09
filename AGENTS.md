@@ -53,3 +53,49 @@ Five canonical roles using default labels (`needs-triage`, `needs-info`, `ready-
 ### Domain docs
 
 Single-context layout (`GLOSSARY.md` and `docs/adr/` at repo root). See `docs/agents/domain.md`.
+
+## Autonomous Development Workflow
+
+CredKeep operates under an autonomous AI-driven development model where the user acts solely as Product Owner. Agents must autonomously write code, select skills, run validation commands, and create local Git commits without burdening the Product Owner with manual operational prompts.
+
+### Automatic Skill Selection Rules
+
+Select skills autonomously based on the specific engineering task:
+- **Financial Math & Ledger Engine**: Auto-select `tdd` for test-first implementation of money arithmetic, schedule generators, overdue periods, and allocation waterfalls.
+- **Architecture & Boundaries**: Auto-select `setup-ts-deep-modules` when defining TypeScript interfaces, domain contracts, and encapsulated module barriers.
+- **Spec Execution**: Auto-select `implement-spec` when claiming and implementing tickets from `.scratch/<feature>/issues/`.
+- **Domain Alignment**: Auto-select `domain-modeling` when introducing or reconciling domain terms against `GLOSSARY.md` and `docs/adr/`.
+- **Pre-Commit Verification**: Auto-select `code-review` to inspect diffs against domain invariants before committing.
+- **UI Screen Construction**: Consult Stitch MCP design assets (`CredKeep V1 — Mobile Design System`, Project ID `8106667901868227815`) for screen layouts, typography, and color tokens.
+
+### Automated Local Git Workflow
+
+Execute Git operations locally and autonomously under these invariants:
+1. **Preserve Working Changes**: Inspect `git status` prior to branch transitions; preserve working changes cleanly.
+2. **Scoped Feature Branches**: Create scoped branches for tickets (`feat/<feature-slug>/<ticket-slug>`).
+3. **Mandatory Quality Gates**:
+   - Run type checks (`npx tsc --noEmit`).
+   - Run linter (`npx expo lint` or configured linter).
+   - Run tests (`npm test` once configured).
+   - If any check fails, resolve the issue autonomously before attempting to commit.
+4. **Selective Staging**: Stage only files relevant to the specific ticket (`git add <paths>`). Never stage unrelated files or secrets.
+5. **Conventional Commits**: Automatically author descriptive Conventional Commit messages (`feat(...)`, `fix(...)`, `test(...)`, `refactor(...)`, `docs(...)`).
+6. **Report Commit Hash**: Always report the created commit hash and summary to the Product Owner.
+7. **Strict Non-Destructive Boundary**:
+   - **NEVER** automatically push to remote (`git push`).
+   - **NEVER** force-push (`git push --force`).
+   - **NEVER** delete branches without explicit Product Owner approval.
+
+### Agent Permissions & Boundaries
+
+- **Autonomous (Permitted)**: Reading and editing workspace files, running tests, typechecks, linters, local git branch creation, selective staging, and local commits.
+- **Prohibited Without Explicit Approval**:
+  - Pushing to remote repositories (`origin`).
+  - Deleting files or branches.
+  - Installing system-level software or machine packages.
+  - Modifying external services or production configurations.
+
+### Model Routing Policy
+
+Antigravity operates on session-level model configuration (no per-step dynamic model switching). All autonomous tasks execute on the session's active strong model without simulating unsupported routing.
+
