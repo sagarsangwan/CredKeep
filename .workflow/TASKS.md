@@ -13,7 +13,7 @@
 
 ### P0 (Critical Bugs)
 - [x] CK-P0-001: Payment crash and Wrong-loan payment isolation (Status: SOURCE_QA_APPROVED - PENDING DEVICE_VERIFIED)
-- [ ] CK-P0-002: Monthly Kist settlement (Status: PLANNED)
+- [x] CK-P0-002: Monthly Kist settlement (Status: SOURCE_QA_APPROVED)
 - [ ] Interest-Only recurring charges (Status: BACKLOG)
 - [ ] Stale Home and earnings (Status: BACKLOG)
 
