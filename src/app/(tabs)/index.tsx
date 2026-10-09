@@ -9,10 +9,11 @@ import { formatINR, Paise } from '../../core/domain/money';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { error, loans, transactions } = useDatabase();
+  const { error, loans, transactions, refreshVersion } = useDatabase();
   const [activeLoans, setActiveLoans] = useState<Loan[]>([]);
   const [totalOut, setTotalOut] = useState<Paise>(0 as Paise);
   const [collected, setCollected] = useState<Paise>(0 as Paise);
+  const [overdue, setOverdue] = useState<Paise>(0 as Paise);
 
   const loadDashboard = useCallback(async () => {
     if (loans) {
@@ -23,12 +24,20 @@ export default function HomeScreen() {
       const total = active.reduce((sum, l) => sum + l.principal_paise, 0) as Paise;
       setTotalOut(total);
     }
-  }, [loans]);
+    if (transactions) {
+      const summary = await transactions.getEarningsSummary();
+      // Collected = principalReturned + markupReceived + penaltyReceived
+      const totalCollected = summary.principalReturned + summary.markupReceived + summary.penaltyReceived;
+      setCollected(totalCollected as Paise);
+      // For overdue, just sum outstanding penalties and we could also query unpaid kists that are due.
+      setOverdue(summary.outstandingPenalty as Paise);
+    }
+  }, [loans, transactions]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadDashboard();
-  }, [loadDashboard]);
+  }, [loadDashboard, refreshVersion]);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -74,7 +83,7 @@ export default function HomeScreen() {
             </View>
             <View style={[styles.metricItem, styles.metricBorder]}>
               <Typography variant="labelLg" color={theme.colors.onPrimaryContainer}>Overdue</Typography>
-              <Typography variant="headlineSm" color={theme.colors.error}>₹0</Typography>
+              <Typography variant="headlineSm" color={theme.colors.error}>{formatINR(overdue)}</Typography>
             </View>
           </View>
         </View>

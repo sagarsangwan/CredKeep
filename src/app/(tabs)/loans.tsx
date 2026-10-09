@@ -14,7 +14,7 @@ import { generateSchedule } from '../../core/domain/schedule';
 
 export default function LoansScreen() {
   const router = useRouter();
-  const { loans, borrowers } = useDatabase();
+  const { loans, borrowers, refreshVersion, triggerRefresh } = useDatabase();
   const [data, setData] = useState<Loan[]>([]);
   const [borrowersList, setBorrowersList] = useState<Borrower[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +48,7 @@ export default function LoansScreen() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
-  }, [loadData]);
+  }, [loadData, refreshVersion]);
 
   const filteredBorrowers = useMemo(() => {
     if (!searchQuery) return borrowersList;
@@ -95,7 +95,7 @@ export default function LoansScreen() {
       });
       setModalVisible(false);
       resetForm();
-      loadData();
+      triggerRefresh(); // Automatically triggers re-fetch via useEffect
     } catch (e: any) {
       Alert.alert('Error', e.message);
     }

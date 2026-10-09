@@ -8,7 +8,11 @@ export const theme = {
     secondaryFixed: '#94f3e7',
     onSecondary: '#ffffff',
     background: '#f7f9fb',
+    onBackground: '#191c1e',
     surface: '#f7f9fb',
+    onSurface: '#191c1e',
+    surfaceVariant: '#e0e3e5',
+    onSurfaceVariant: '#44474d',
     surfaceTint: '#4d6079',
     surfaceContainerHighest: '#e0e3e5',
     surfaceContainerHigh: '#e6e8ea',
@@ -32,6 +36,12 @@ export const theme = {
       fontWeight: '700' as const,
       letterSpacing: -0.03 * 30,
     },
+    headlineLg: {
+      fontFamily: 'Inter',
+      fontSize: 32,
+      fontWeight: '700' as const,
+      letterSpacing: -0.02 * 32,
+    },
     headlineMd: {
       fontFamily: 'Inter',
       fontSize: 22,
@@ -42,6 +52,11 @@ export const theme = {
       fontFamily: 'Inter',
       fontSize: 18,
       fontWeight: '600' as const,
+    },
+    titleMd: {
+      fontFamily: 'Inter',
+      fontSize: 16,
+      fontWeight: '500' as const,
     },
     bodyLg: {
       fontFamily: 'Inter',
@@ -63,6 +78,12 @@ export const theme = {
       fontSize: 14,
       fontWeight: '600' as const,
       letterSpacing: 0.01 * 14,
+    },
+    labelMd: {
+      fontFamily: 'Inter',
+      fontSize: 12,
+      fontWeight: '600' as const,
+      letterSpacing: 0.02 * 12,
     },
     labelSm: {
       fontFamily: 'Inter',

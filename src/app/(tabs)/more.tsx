@@ -1,46 +1,70 @@
 import React from 'react';
-import { View, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, TouchableOpacity } from 'react-native';
+import { useRouter } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Typography } from '../../ui/Typography';
-import { Card } from '../../ui/Card';
 import { theme } from '../../ui/theme';
-import { useDatabase } from '../../core/database/DatabaseProvider';
 
 export default function MoreScreen() {
-  const { error } = useDatabase();
+  const router = useRouter();
+
+  const menuItems = [
+    { title: 'Earnings & Reports', route: '/reports' },
+    { title: 'App Security (PIN Lock)', route: '/settings/security' },
+    { title: 'Backup & Restore', route: '/settings/backup' },
+  ];
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Typography variant="headlineMd" style={styles.title}>Settings</Typography>
-      
-      <Card elevated style={styles.card}>
-        <TouchableOpacity style={styles.item}>
-          <Typography variant="bodyLg">Data & Backup</Typography>
-          <Typography variant="bodySm" color={theme.colors.textSecondary}>Manage your encrypted local database</Typography>
-        </TouchableOpacity>
-        <View style={styles.divider} />
-        <TouchableOpacity style={styles.item}>
-          <Typography variant="bodyLg">Security</Typography>
-          <Typography variant="bodySm" color={theme.colors.textSecondary}>App lock and PIN settings</Typography>
-        </TouchableOpacity>
-        <View style={styles.divider} />
-        <TouchableOpacity style={styles.item}>
-          <Typography variant="bodyLg">About Bharat Ledger</Typography>
-          <Typography variant="bodySm" color={theme.colors.textSecondary}>Version 1.0.0 (Local First)</Typography>
-        </TouchableOpacity>
-      </Card>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <Typography variant="headlineMd" color={theme.colors.onBackground} style={styles.title}>
+          More Settings
+        </Typography>
 
-      <Typography variant="bodySm" color={theme.colors.textSecondary} align="center" style={{marginTop: 40}}>
-        Your data is fully encrypted and stored locally.
-      </Typography>
-    </ScrollView>
+        <View style={styles.list}>
+          {menuItems.map((item, index) => (
+            <TouchableOpacity 
+              key={index} 
+              style={styles.listItem}
+              onPress={() => router.push(item.route as any)}
+            >
+              <Typography variant="titleMd" color={theme.colors.onSurface}>{item.title}</Typography>
+              <Typography variant="titleMd" color={theme.colors.onSurfaceVariant}>›</Typography>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <Typography variant="bodySm" color={theme.colors.onSurfaceVariant} align="center" style={{marginTop: 40}}>
+          CredKeep V1 — Local First
+        </Typography>
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: theme.colors.background },
-  content: { padding: theme.spacing.lg, paddingTop: 60 },
-  title: { marginBottom: theme.spacing.xl },
-  card: { padding: 0, overflow: 'hidden' },
-  item: { padding: theme.spacing.lg },
-  divider: { height: 1, backgroundColor: theme.colors.outline, marginLeft: theme.spacing.lg }
+  safeArea: {
+    flex: 1,
+    backgroundColor: theme.colors.background,
+  },
+  container: {
+    padding: theme.spacing.xl,
+  },
+  title: {
+    marginBottom: theme.spacing.xl,
+  },
+  list: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.outline,
+    overflow: 'hidden',
+  },
+  listItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.outline,
+  }
 });

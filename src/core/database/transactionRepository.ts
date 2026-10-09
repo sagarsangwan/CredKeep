@@ -128,6 +128,43 @@ export class TransactionRepository {
       return returnResult;
   }
 
+  async previewPenalties(loanId: string, currentDate: string): Promise<number> {
+    const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+    if (!loan || loan.status !== 'ACTIVE') return 0;
+
+    const dbKists = await this.db.getAllAsync<any>(
+      `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
+      [loanId]
+    );
+
+    const assessments = await this.db.getAllAsync<any>(
+      `SELECT effective_date FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
+      [loanId]
+    );
+
+    const assessedDates = new Set<string>(assessments.map(a => a.effective_date));
+
+    // Dynamic import to avoid circular dep
+    const { calculateNewPenalties } = require('../domain/penalty');
+    const { toPaise } = require('../domain/money');
+
+    const state = {
+      loanId,
+      rule: { dailyRatePaise: toPaise(100) },
+      kists: dbKists.map(k => ({
+        kistNumber: k.installment_number,
+        dueDate: k.effective_due_date,
+        amountDue: k.total_due_paise,
+        amountPaid: k.principal_paid_paise + k.markup_paid_paise,
+        isFullyPaid: k.status === 'PAID'
+      })),
+      assessedDates
+    };
+
+    const { newPenaltyAmount } = calculateNewPenalties(state, currentDate);
+    return newPenaltyAmount;
+  }
+
   async assessPenalties(loanId: string, currentDate: string): Promise<number> {
     const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.status !== 'ACTIVE') return 0;
@@ -188,5 +225,64 @@ export class TransactionRepository {
     }
 
     return newPenaltyAmount;
+  }
+
+  async getEarningsSummary(filter?: { loanId?: string, borrowerId?: string, loanStatus?: string }) {
+    let whereClauses: string[] = [];
+    let params: any[] = [];
+
+    if (filter?.loanId) {
+      whereClauses.push('t.loan_id = ?');
+      params.push(filter.loanId);
+    }
+    if (filter?.borrowerId) {
+      whereClauses.push('l.borrower_id = ?');
+      params.push(filter.borrowerId);
+    }
+    if (filter?.loanStatus) {
+      whereClauses.push('l.status = ?');
+      params.push(filter.loanStatus);
+    }
+
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    // Calculate actual cash received
+    const collectedQuery = await this.db.getFirstAsync<any>(`
+      SELECT 
+        SUM(t.allocated_principal_paise) as principal_returned,
+        SUM(t.allocated_markup_paise) as markup_received,
+        SUM(t.allocated_penalty_paise) as penalty_received,
+        SUM(t.forgiven_principal_paise) as principal_waived,
+        SUM(t.forgiven_markup_paise) as markup_waived,
+        SUM(t.forgiven_penalty_paise) as penalty_waived
+      FROM transactions t
+      JOIN loans l ON t.loan_id = l.id
+      ${whereStr} AND t.transaction_type = 'COLLECTION'
+    `, params);
+
+    // Calculate outstanding (what is due but not paid)
+    // For outstanding penalty, sum PENALTY_ASSESSMENT minus collected penalty
+    const penaltyAssessments = await this.db.getFirstAsync<any>(`
+      SELECT SUM(t.amount_paise) as total
+      FROM transactions t
+      JOIN loans l ON t.loan_id = l.id
+      ${whereStr} AND t.transaction_type = 'PENALTY_ASSESSMENT'
+    `, params);
+
+    const totalPenaltyAssessed = penaltyAssessments?.total || 0;
+    const penaltyReceived = collectedQuery?.penalty_received || 0;
+    const penaltyWaived = collectedQuery?.penalty_waived || 0;
+    const outstandingPenalty = Math.max(0, totalPenaltyAssessed - penaltyReceived - penaltyWaived);
+
+    return {
+      principalReturned: collectedQuery?.principal_returned || 0,
+      markupReceived: collectedQuery?.markup_received || 0,
+      penaltyReceived,
+      principalWaived: collectedQuery?.principal_waived || 0,
+      markupWaived: collectedQuery?.markup_waived || 0,
+      penaltyWaived,
+      outstandingPenalty,
+      totalEarnings: (collectedQuery?.markup_received || 0) + penaltyReceived
+    };
   }
 }

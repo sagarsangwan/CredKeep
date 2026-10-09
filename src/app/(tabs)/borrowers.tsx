@@ -9,7 +9,7 @@ import { useDatabase } from '../../core/database/DatabaseProvider';
 import { Borrower } from '../../core/database/borrowerRepository';
 
 export default function BorrowersScreen() {
-  const { borrowers, loans } = useDatabase();
+  const { borrowers, loans, refreshVersion, triggerRefresh } = useDatabase();
   const [data, setData] = useState<Borrower[]>([]);
   const [isModalVisible, setModalVisible] = useState(false);
   const [name, setName] = useState('');
@@ -25,7 +25,7 @@ export default function BorrowersScreen() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadBorrowers();
-  }, [loadBorrowers]);
+  }, [loadBorrowers, refreshVersion]);
 
   const handleAdd = async () => {
     if (!name || !phone) {
@@ -38,7 +38,7 @@ export default function BorrowersScreen() {
       setModalVisible(false);
       setName('');
       setPhone('');
-      loadBorrowers();
+      triggerRefresh();
     } catch (e: any) {
       Alert.alert('Error', e.message);
     }
