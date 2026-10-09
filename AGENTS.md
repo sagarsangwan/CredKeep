@@ -209,3 +209,15 @@ Use profiling and measurement before making invasive optimizations.
 Perform safe, low-risk optimization during development.
 
 Reserve intensive APK analysis and performance tuning for the final V1 stabilization phase.
+
+## Multi-Agent Workflow Integration
+This project uses a split-agent model:
+- **Codex:** Planner, Tester, Reviewer. Operates independently.
+- **Gemini / Antigravity:** Implementer and Orchestrator.
+
+**Coordination Rules:**
+1. All agents MUST read `.workflow/STATE.md` before taking action.
+2. Agents MUST read `AGENTS.md` before every action.
+3. Hand-offs occur by updating `.workflow/HANDOFF.md` and invoking the next agent.
+4. Codex is the final arbiter of QA and tests.
+5. All completed work MUST have local Git commits with conventional commit messages.
