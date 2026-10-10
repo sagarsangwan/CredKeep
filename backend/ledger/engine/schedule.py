@@ -87,5 +87,7 @@ def generate_schedule(
                 principal_due=0,
                 markup_due=markup_instalments[i]
             ))
+    else:
+        raise ValueError(f"Unsupported product_type '{product_type}'. Must be 'instalment' or 'bullet'.")
 
     return schedule

@@ -337,6 +337,49 @@ describe('SyncService & OutboxManager', () => {
       expect(hasDuplicatePen).toBe(false);
     });
 
+    it('replicates incoming COLLECTION transactions without dropping them when a penalty exists on the same date', async () => {
+      // Mock existing penalty assessment on same date
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM transactions WHERE operation_id = ?')) {
+          // New collection operation_id does not exist locally
+          return null;
+        }
+        return null;
+      });
+
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        next_cursor: 24,
+        has_more: false,
+        changes: [
+          {
+            id: 'change-coll',
+            record_type: 'TRANSACTION',
+            operation_type: 'INSERT',
+            payload: {
+              id: 'server-coll-uuid',
+              operation_id: 'server-coll-op-id',
+              loan_id: 'loan-1',
+              transaction_type: 'COLLECTION',
+              amount_paise: 50000,
+              allocated_principal_paise: 30000,
+              allocated_markup_paise: 20000,
+              allocated_penalty_paise: 0,
+              unallocated_surplus_paise: 0,
+              effective_date: '2026-01-02', // Same date as penalty
+            },
+          },
+        ],
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(1);
+      // Collection must be inserted, not dropped!
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO transactions'),
+        expect.arrayContaining(['server-coll-uuid', 'server-coll-op-id', 'loan-1', 'COLLECTION'])
+      );
+    });
+
     it('deduplicates KIST installments matching (loan_id, installment_number) without duplicating rows', async () => {
       // Mock existing kist check to match by installment_number
       mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {

@@ -211,10 +211,18 @@ export class SyncService {
       if (operation_type === 'INSERT') {
         const isCash = payload.is_cash !== undefined ? (payload.is_cash ? 1 : 0) : 1;
         const paymentMethod = payload.payment_method || (isCash ? 'CASH' : 'ONLINE');
-        const existing = await tx.getFirstAsync<any>(
-          `SELECT * FROM transactions WHERE operation_id = ? OR (loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT' AND effective_date = ?)`,
-          [payload.operation_id, payload.loan_id, payload.effective_date]
-        );
+        let existing: any = null;
+        if (payload.transaction_type === 'PENALTY_ASSESSMENT') {
+          existing = await tx.getFirstAsync<any>(
+            `SELECT * FROM transactions WHERE operation_id = ? OR (loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT' AND effective_date = ?)`,
+            [payload.operation_id, payload.loan_id, payload.effective_date]
+          );
+        } else {
+          existing = await tx.getFirstAsync<any>(
+            `SELECT * FROM transactions WHERE operation_id = ?`,
+            [payload.operation_id]
+          );
+        }
         if (!existing) {
           await tx.runAsync(
             `INSERT INTO transactions (

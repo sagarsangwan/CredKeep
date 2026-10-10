@@ -248,15 +248,33 @@ class SyncPushView(APIView):
             loan_id_raw = payload.get('id')
             loan_id = uuid.UUID(str(loan_id_raw)) if loan_id_raw else uuid.uuid4()
 
-            principal_paise = int(payload.get('principal_paise', 0))
-            markup_factor = Decimal(str(payload.get('markup_factor', '0')))
-            term_months = int(payload.get('term_months', 0))
-            start_date = str(payload.get('start_date', ''))
-            due_day = int(payload.get('due_day', 1))
-            product_type = payload.get('product_type', 'instalment')
+            raw_principal = payload.get('principal_paise')
+            if raw_principal is None or isinstance(raw_principal, bool) or not isinstance(raw_principal, int) or raw_principal <= 0:
+                return 'REJECTED', 'principal_paise must be an exact positive integer in paise.'
+            principal_paise = raw_principal
 
-            if principal_paise <= 0 or term_months <= 0 or not start_date:
-                return 'REJECTED', 'Invalid loan parameters (principal, term, or start_date).'
+            try:
+                markup_factor = Decimal(str(payload.get('markup_factor', '0')))
+            except Exception:
+                return 'REJECTED', 'Invalid markup_factor.'
+
+            raw_term = payload.get('term_months')
+            if raw_term is None or isinstance(raw_term, bool) or not isinstance(raw_term, int) or raw_term <= 0:
+                return 'REJECTED', 'term_months must be an exact positive integer.'
+            term_months = raw_term
+
+            start_date = str(payload.get('start_date', ''))
+            if not start_date:
+                return 'REJECTED', 'Missing start_date.'
+
+            raw_due_day = payload.get('due_day', 1)
+            if raw_due_day is None or isinstance(raw_due_day, bool) or not isinstance(raw_due_day, int) or raw_due_day < 1 or raw_due_day > 31:
+                return 'REJECTED', 'due_day must be an integer between 1 and 31.'
+            due_day = raw_due_day
+
+            product_type = payload.get('product_type', 'instalment')
+            if product_type not in ('instalment', 'bullet'):
+                return 'REJECTED', f"Unsupported product_type '{product_type}'. Must be 'instalment' or 'bullet'."
 
             loan = LoanAccount.objects.create(
                 id=loan_id,
@@ -337,13 +355,16 @@ class SyncPushView(APIView):
                 return 'REJECTED', 'Missing loan_id.'
 
             try:
-                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+                loan = LoanAccount.objects.select_for_update().get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
             except (LoanAccount.DoesNotExist, ValueError):
                 return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
 
-            amount_paise = int(payload.get('amount_paise', 0))
-            if amount_paise <= 0:
+            raw_amount = payload.get('amount_paise')
+            if raw_amount is None or isinstance(raw_amount, bool) or not isinstance(raw_amount, int):
+                return 'REJECTED', 'Payment amount_paise must be an exact positive integer in paise.'
+            if raw_amount <= 0:
                 return 'REJECTED', 'Payment amount must be greater than zero.'
+            amount_paise = raw_amount
 
             effective_date = (
                 payload.get('effective_date') or
@@ -438,6 +459,11 @@ class SyncPushView(APIView):
             if not revised_date:
                 return 'REJECTED', 'Missing revised_effective_due_date.'
 
+            raw_waived_pen = payload.get('waived_penalty_paise', 0)
+            if raw_waived_pen is not None and (isinstance(raw_waived_pen, bool) or not isinstance(raw_waived_pen, int) or raw_waived_pen < 0):
+                return 'REJECTED', 'waived_penalty_paise must be an exact non-negative integer.'
+            waived_pen = int(raw_waived_pen or 0)
+
             ScheduleModification.objects.create(
                 tenant=tenant,
                 loan=loan,
@@ -448,7 +474,7 @@ class SyncPushView(APIView):
                 revised_effective_due_date=revised_date,
                 reason=payload.get('reason', ''),
                 accrued_penalty_action=payload.get('accrued_penalty_action', 'NONE'),
-                waived_penalty_paise=int(payload.get('waived_penalty_paise', 0))
+                waived_penalty_paise=waived_pen
             )
 
             kist.effective_due_date = revised_date
@@ -478,9 +504,10 @@ class SyncPushView(APIView):
             except (LoanAccount.DoesNotExist, ValueError):
                 return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
 
-            waive_amount = int(payload.get('amount_paise', 0))
-            if waive_amount <= 0:
-                return 'REJECTED', 'Waiver amount must be greater than zero.'
+            raw_waive = payload.get('amount_paise')
+            if raw_waive is None or isinstance(raw_waive, bool) or not isinstance(raw_waive, int) or raw_waive <= 0:
+                return 'REJECTED', 'Waiver amount must be an exact positive integer in paise.'
+            waive_amount = raw_waive
 
             eff_date = str(payload.get('effective_date') or timezone.now().date())
             if 'T' in eff_date:

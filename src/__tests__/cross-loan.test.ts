@@ -36,6 +36,7 @@ interface TransactionRow {
   allocated_markup_paise: Paise;
   allocated_penalty_paise: Paise;
   unallocated_surplus_paise: Paise;
+  forgiven_penalty_paise?: Paise;
   effective_date: string;
   created_at: string;
 }
@@ -174,13 +175,19 @@ describe('Cross-Loan Isolation', () => {
         }
         if (query.includes('SUM(allocated_penalty_paise)')) {
           const sum = state.transactions
-            .filter(t => t.loan_id === params[0] && t.transaction_type === 'COLLECTION')
-            .reduce((acc, t) => acc + t.allocated_penalty_paise, 0);
+            .filter(t => t.loan_id === params[0] && (t.transaction_type === 'COLLECTION' || t.transaction_type === 'REVERSAL'))
+            .reduce((acc, t) => acc + (t.allocated_penalty_paise || 0), 0);
+          return { total: sum };
+        }
+        if (query.includes('SUM(forgiven_penalty_paise)')) {
+          const sum = state.transactions
+            .filter(t => t.loan_id === params[0] && t.transaction_type === 'REVERSAL')
+            .reduce((acc, t) => acc + (t.forgiven_penalty_paise || 0), 0);
           return { total: sum };
         }
         if (query.includes('SUM(allocated_principal_paise)')) {
           const sum = state.transactions
-            .filter(t => t.loan_id === params[0] && t.transaction_type === 'COLLECTION')
+            .filter(t => t.loan_id === params[0] && (t.transaction_type === 'COLLECTION' || t.transaction_type === 'REVERSAL'))
             .reduce((acc, t) => acc + (t.allocated_principal_paise || 0), 0);
           return { total: sum };
         }
@@ -372,8 +379,59 @@ describe('Cross-Loan Isolation', () => {
   it('Constraint enforcement: inserting duplicate installment number for same loan throws UNIQUE constraint error', async () => {
     const mock = createDbMock(dbState);
     const stmt = await mock.prepareAsync('INSERT INTO repayment_schedules VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-    // First installment for loan-a already exists in dbState
     await expect(stmt.executeAsync(['sched-2', 'loan-a', 1, '2026-01-01', '2026-01-01', toPaise(1000), toPaise(100), toPaise(1100)]))
       .rejects.toThrow('UNIQUE constraint failed: repayment_schedules.loan_id, repayment_schedules.installment_number');
+  });
+
+  it('Subsequent payment respects REVERSAL reconciliation deltas and forgiven penalties', async () => {
+    // Simulate an assessed penalty of ₹100 (10,000 paise)
+    dbState.transactions.push({
+      id: 'tx-pen-1',
+      operation_id: 'op-pen-1',
+      loan_id: 'loan-a',
+      transaction_type: 'PENALTY_ASSESSMENT',
+      is_cash: 0,
+      payment_method: 'SYSTEM',
+      amount_paise: toPaise(100),
+      allocated_principal_paise: toPaise(0),
+      allocated_markup_paise: toPaise(0),
+      allocated_penalty_paise: toPaise(0),
+      unallocated_surplus_paise: toPaise(0),
+      effective_date: '2026-01-02',
+      created_at: new Date().toISOString()
+    });
+
+    // Simulate an append-only REVERSAL penalty waiver of ₹100
+    dbState.transactions.push({
+      id: 'tx-waiver-1',
+      operation_id: 'op-waiver-1',
+      loan_id: 'loan-a',
+      transaction_type: 'REVERSAL',
+      is_cash: 0,
+      payment_method: 'SYSTEM',
+      amount_paise: toPaise(0),
+      allocated_principal_paise: toPaise(0),
+      allocated_markup_paise: toPaise(0),
+      allocated_penalty_paise: toPaise(0),
+      unallocated_surplus_paise: toPaise(0),
+      forgiven_penalty_paise: toPaise(100),
+      effective_date: '2026-01-02',
+      created_at: new Date().toISOString()
+    });
+
+    // Pay full kist amount (₹2,600).
+    // Because the penalty was forgiven via REVERSAL, 0 should go to penalty and all funds go to kist!
+    const res = await txRepo.recordCashPayment('loan-a', toPaise(2600), 'pay-after-waiver', '2026-01-02');
+    expect(res.success).toBe(true);
+
+    const payTx = dbState.transactions.find(t => t.operation_id === 'pay-after-waiver');
+    expect(payTx).toBeDefined();
+    expect(payTx!.allocated_penalty_paise).toBe(0);
+    expect(payTx!.allocated_principal_paise).toBe(toPaise(2000));
+    expect(payTx!.allocated_markup_paise).toBe(toPaise(600));
+
+    // Loan should be settled since kist is fully paid and remaining penalty is 0!
+    const loan = dbState.loans.find(l => l.id === 'loan-a');
+    expect(loan?.status).toBe('SETTLED');
   });
 });

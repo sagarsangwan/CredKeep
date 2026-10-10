@@ -54,19 +54,24 @@ export class TransactionRepository {
         await this.assessPenalties(loanId, effectiveDate, tx);
 
         // Fetch outstanding penalty
-        // Outstanding penalty = (Total PENALTY_ASSESSMENT amounts) - (Total allocated_penalty_paise from all collections)
+        // Outstanding penalty = (Total PENALTY_ASSESSMENT amounts) - (Total allocated_penalty_paise from collections and reversals) - (forgiven_penalty_paise from waivers)
         const penaltyAssessments = await tx.getFirstAsync<any>(
           `SELECT SUM(amount_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
           [loanId]
         );
         const penaltyPaid = await tx.getFirstAsync<any>(
-          `SELECT SUM(allocated_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+          `SELECT SUM(allocated_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+          [loanId]
+        );
+        const penaltyForgiven = await tx.getFirstAsync<any>(
+          `SELECT SUM(forgiven_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'REVERSAL'`,
           [loanId]
         );
         
         const totalPenaltyAssessed = (penaltyAssessments?.total || 0) as number;
         const totalPenaltyPaid = (penaltyPaid?.total || 0) as number;
-        const outstandingPenalty = Math.max(0, totalPenaltyAssessed - totalPenaltyPaid) as Paise;
+        const totalPenaltyForgiven = (penaltyForgiven?.total || 0) as number;
+        const outstandingPenalty = Math.max(0, totalPenaltyAssessed - totalPenaltyPaid - totalPenaltyForgiven) as Paise;
   
         const result = allocatePayment({ paymentAmount, kists, outstandingPenalty });
         
@@ -86,7 +91,7 @@ export class TransactionRepository {
         let pastPrincipalPaid = 0;
         if (loan.product_type === 'bullet') {
           const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
-            `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+            `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
             [loanId]
           );
           pastPrincipalPaid = pastPrincipalPaidRes?.total || 0;
@@ -296,7 +301,7 @@ export class TransactionRepository {
         SUM(t.forgiven_penalty_paise) as penalty_waived
       FROM transactions t
       JOIN loans l ON t.loan_id = l.id
-      ${whereStr} AND t.transaction_type = 'COLLECTION'
+      ${whereStr} AND t.transaction_type IN ('COLLECTION', 'REVERSAL')
     `, params);
 
     // Calculate outstanding (what is due but not paid)
@@ -362,7 +367,7 @@ export class TransactionRepository {
         const paidQuery = await this.db.getFirstAsync<any>(`
           SELECT SUM(allocated_principal_paise) as paid_principal, SUM(forgiven_principal_paise) as waived_principal
           FROM transactions 
-          WHERE loan_id = ?
+          WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
         `, [loan.id]);
         const paid = paidQuery?.paid_principal || 0;
         const waived = paidQuery?.waived_principal || 0;

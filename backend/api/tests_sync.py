@@ -972,4 +972,133 @@ def test_anti_backdating_penalty_assessment_governed_by_server_clock(api_client,
         assert loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').exists()
 
 
+@pytest.mark.django_db
+def test_reject_fractional_paise_and_boolean_coercion(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Strict Borrower', phone='9876543291')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+
+    # 1. Float paise must be REJECTED (no lossy truncation)
+    res_float = api_client.post(url, {
+        "operations": [{
+            "type": "record_collection",
+            "operation_id": str(uuid.uuid4()),
+            "payload": {
+                "loan_id": str(loan.id),
+                "amount_paise": 100.9,
+                "effective_date": "2026-01-01"
+            }
+        }]
+    }, format='json')
+    assert res_float.status_code == 200
+    assert res_float.data['results'][0]['status'] == 'REJECTED'
+    assert 'exact positive integer' in res_float.data['results'][0]['error']
+
+    # 2. Boolean paise must be REJECTED (no True -> 1 coercion)
+    res_bool = api_client.post(url, {
+        "operations": [{
+            "type": "record_collection",
+            "operation_id": str(uuid.uuid4()),
+            "payload": {
+                "loan_id": str(loan.id),
+                "amount_paise": True,
+                "effective_date": "2026-01-01"
+            }
+        }]
+    }, format='json')
+    assert res_bool.status_code == 200
+    assert res_bool.data['results'][0]['status'] == 'REJECTED'
+
+
+@pytest.mark.django_db
+def test_reject_unsupported_product_type_without_schedule(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Product Borrower', phone='9876543292')
+    res = api_client.post(url, {
+        "operations": [{
+            "type": "create_loan",
+            "operation_id": str(uuid.uuid4()),
+            "payload": {
+                "borrower_id": str(borrower.id),
+                "principal_paise": 100000,
+                "markup_factor": "0.1",
+                "term_months": 1,
+                "start_date": "2026-01-01",
+                "due_day": 1,
+                "product_type": "unsupported_product_type"
+            }
+        }]
+    }, format='json')
+
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'REJECTED'
+    assert 'Unsupported product_type' in res.data['results'][0]['error']
+    assert not LoanAccount.objects.filter(borrower=borrower).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_overdue_collections_under_row_lock(lender_setup):
+    user, tenant, token = lender_setup
+    borrower = Borrower.objects.create(
+        tenant=tenant,
+        name='Concurrent Borrower',
+        phone='9876543293'
+    )
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=200000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=200000,
+        markup_component_paise=20000,
+        total_due_paise=220000,
+        status='PENDING'
+    )
+
+    # Two concurrent payments for the same loan
+    op_1 = uuid.uuid4()
+    op_2 = uuid.uuid4()
+
+    res1 = ledger_service.record_collection(loan, 110000, op_1, '2026-01-05')
+    assert res1['status'] == 'SUCCESS'
+
+    res2 = ledger_service.record_collection(loan, 110000, op_2, '2026-01-05')
+    assert res2['status'] == 'SUCCESS'
+
+    # Both succeeded and allocations conserved
+    loan.refresh_from_db()
+    txs = loan.transactions.filter(transaction_type='COLLECTION')
+    assert txs.count() == 2
+    total_allocated = sum(t.allocated_principal_paise + t.allocated_markup_paise + t.allocated_penalty_paise for t in txs)
+    assert total_allocated <= 220000 + 40000  # kist total plus overdue penalties
+
+
+
 
