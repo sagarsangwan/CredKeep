@@ -2,6 +2,7 @@ import { SQLiteDatabase } from 'expo-sqlite';
 import { TransactionRepository } from '../core/database/transactionRepository';
 import { Paise, toPaise } from '../core/domain/money';
 import { OutboxManager } from '../core/sync/outbox';
+import { SyncService } from '../core/sync/syncService';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 
@@ -475,6 +476,9 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         principal_paid_paise INTEGER NOT NULL DEFAULT 0,
         markup_paid_paise INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'PENDING',
+        server_principal_paid_paise INTEGER NOT NULL DEFAULT 0,
+        server_markup_paid_paise INTEGER NOT NULL DEFAULT 0,
+        server_status TEXT NOT NULL DEFAULT 'PENDING',
         UNIQUE (loan_id, installment_number)
       );
       CREATE TABLE transactions (
@@ -514,6 +518,10 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         status TEXT NOT NULL DEFAULT 'PENDING',
         error_message TEXT,
         created_at TEXT NOT NULL
+      );
+      CREATE TABLE sync_meta (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
       );
     `);
 
@@ -569,7 +577,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     // Seed baseline
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
     await db.runAsync(`INSERT INTO loans VALUES ('loan-real', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO repayment_schedules VALUES ('kist-real', 'loan-real', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-real', 'loan-real', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
 
     const repo = new TransactionRepository(db);
 
@@ -676,7 +684,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
     await db.runAsync(`INSERT INTO loans VALUES ('loan-e2e', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO repayment_schedules VALUES ('kist-e2e', 'loan-e2e', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-e2e', 'loan-e2e', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
 
     const res = await repo.recordCashPayment('loan-e2e', 260000 as Paise, 'op-e2e-1', '2026-01-01');
     expect(res.success).toBe(true);
@@ -701,5 +709,224 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const outboxRow = await db.getFirstAsync<any>(`SELECT * FROM sync_outbox WHERE operation_id = 'op-e2e-1'`);
     expect(outboxRow).toBeDefined();
     expect(outboxRow.operation_type).toBe('record_collection');
+  });
+
+  it('recovers from push rejection atomically in real SQLite (outbox, REVERSAL transaction, schedule rollback, status restoration)', async () => {
+    const db = createRealSqliteDb();
+    const repo = new TransactionRepository(db);
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-rej', 'Borrower Rej', '9876543211', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-rej', 'b-rej', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-rej', 'loan-rej', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
+
+    // 1. Record cash collection that settles loan
+    const res = await repo.recordCashPayment('loan-rej', 260000 as Paise, 'op-rej-1', '2026-01-01');
+    expect(res.success).toBe(true);
+
+    const loanAfterPay = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-rej'`);
+    expect(loanAfterPay?.status).toBe('SETTLED');
+
+    const kistAfterPay = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rej'`);
+    expect(kistAfterPay?.principal_paid_paise).toBe(200000);
+    expect(kistAfterPay?.markup_paid_paise).toBe(60000);
+    expect(kistAfterPay?.status).toBe('PAID');
+
+    // 2. Trigger atomic rejection recovery
+    await SyncService.revertRejectedPayment(db, 'op-rej-1', 'Borrower limit exceeded on server');
+
+    // 3. Verify outbox marked REJECTED with error
+    const outboxRow = await db.getFirstAsync<any>(`SELECT * FROM sync_outbox WHERE operation_id = 'op-rej-1'`);
+    expect(outboxRow?.status).toBe('REJECTED');
+    expect(outboxRow?.error_message).toBe('Borrower limit exceeded on server');
+
+    // 4. Verify compensating REVERSAL transaction was appended
+    const revTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'reversal-op-rej-1'`);
+    expect(revTx).toBeDefined();
+    expect(revTx.transaction_type).toBe('REVERSAL');
+    expect(revTx.amount_paise).toBe(-260000);
+    expect(revTx.allocated_principal_paise).toBe(-200000);
+    expect(revTx.allocated_markup_paise).toBe(-60000);
+
+    // 5. Verify repayment schedule was rolled back
+    const kistAfterRevert = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rej'`);
+    expect(kistAfterRevert?.principal_paid_paise).toBe(0);
+    expect(kistAfterRevert?.markup_paid_paise).toBe(0);
+    expect(kistAfterRevert?.status).toBe('PENDING');
+
+    // 6. Verify loan status restored to ACTIVE
+    const loanAfterRevert = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-rej'`);
+    expect(loanAfterRevert?.status).toBe('ACTIVE');
+  });
+
+  it('ensures schedule replay across multi-page pulls is strictly idempotent in real SQLite without inflating paid amounts', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-replay', 'Borrower Replay', '9876543212', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-replay', 'b-replay', 200000, 0.2, 2, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rep-1', 'loan-replay', 1, '2026-01-01', '2026-01-01', 100000, 20000, 120000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rep-2', 'loan-replay', 2, '2026-02-01', '2026-02-01', 100000, 20000, 120000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // User made a pending collection of 120000 paise (pays kist 1)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-rep-1', 'op-rep-1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-replay', amount_paise: 120000, effective_date: '2026-01-01' })}', 'PENDING', '2026-01-01T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-rep-1', 'op-rep-1', 'loan-replay', 'COLLECTION', 120000, 100000, 20000, '2026-01-01', '2026-01-01')
+    `);
+
+    // Replay pending collection initial run
+    await SyncService.reapplyPendingCollections(db, 'loan-replay');
+
+    const k1 = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rep-1'`);
+    const k2 = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rep-2'`);
+    expect(k1?.principal_paid_paise).toBe(100000);
+    expect(k1?.markup_paid_paise).toBe(20000);
+    expect(k1?.status).toBe('PAID');
+    expect(k2?.principal_paid_paise).toBe(0);
+    expect(k2?.markup_paid_paise).toBe(0);
+    expect(k2?.status).toBe('UNPAID');
+
+    // Page 1 arrives from server with KIST 1 snapshot (server has not acknowledged op-rep-1 yet)
+    const modifiedLoansPage1 = new Set<string>();
+    await SyncService.applyServerChange(db, {
+      record_type: 'KIST',
+      operation_type: 'UPDATE',
+      payload: {
+        id: 'kist-rep-1',
+        loan_id: 'loan-replay',
+        installment_number: 1,
+        principal_paid_paise: 0,
+        markup_paid_paise: 0,
+        status: 'PENDING',
+      }
+    }, modifiedLoansPage1);
+
+    expect(modifiedLoansPage1.has('loan-replay')).toBe(true);
+    for (const lid of modifiedLoansPage1) {
+      await SyncService.reapplyPendingCollections(db, lid);
+    }
+
+    // Page 2 arrives from server with KIST 2 snapshot
+    const modifiedLoansPage2 = new Set<string>();
+    await SyncService.applyServerChange(db, {
+      record_type: 'KIST',
+      operation_type: 'UPDATE',
+      payload: {
+        id: 'kist-rep-2',
+        loan_id: 'loan-replay',
+        installment_number: 2,
+        principal_paid_paise: 0,
+        markup_paid_paise: 0,
+        status: 'PENDING',
+      }
+    }, modifiedLoansPage2);
+
+    expect(modifiedLoansPage2.has('loan-replay')).toBe(true);
+    for (const lid of modifiedLoansPage2) {
+      await SyncService.reapplyPendingCollections(db, lid);
+    }
+
+    // Page 3 arrives with non-KIST TRANSACTION delta
+    const modifiedLoansPage3 = new Set<string>();
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'tx-server-some',
+        operation_id: 'op-some',
+        loan_id: 'loan-replay',
+        transaction_type: 'COLLECTION',
+        amount_paise: 0,
+        effective_date: '2026-01-01'
+      }
+    }, modifiedLoansPage3);
+
+    // Verified: non-KIST change does NOT touch modifiedLoansPage3
+    expect(modifiedLoansPage3.size).toBe(0);
+
+    // CRITICAL INVARIANT: Multi-page replay did NOT credit kist 2 or double-credit kist 1
+    const k1Final = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rep-1'`);
+    const k2Final = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rep-2'`);
+    expect(k1Final?.principal_paid_paise).toBe(100000);
+    expect(k1Final?.markup_paid_paise).toBe(20000);
+    expect(k1Final?.status).toBe('PAID');
+    expect(k2Final?.principal_paid_paise).toBe(0);
+    expect(k2Final?.markup_paid_paise).toBe(0);
+    expect(k2Final?.status).toBe('UNPAID');
+  });
+
+  it('preserves penalty money allocations during pending replay without diverting into principal or markup', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-pen', 'Borrower Pen', '9876543213', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-pen', 'b-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pen-1', 'loan-pen', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Penalty assessment of 5000 paise
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-pen-assess', 'pen-assess-1', 'loan-pen', 'PENALTY_ASSESSMENT', 5000, '2026-01-05', '2026-01-05')
+    `);
+
+    // Pending payment of 5000 paise (recorded locally to pay late penalty)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-pen-1', 'op-pen-pay', 'record_collection', '${JSON.stringify({ loan_id: 'loan-pen', amount_paise: 5000, effective_date: '2026-01-06' })}', 'PENDING', '2026-01-06T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-pen-col', 'op-pen-pay', 'loan-pen', 'COLLECTION', 5000, 0, 0, 5000, '2026-01-06', '2026-01-06')
+    `);
+
+    // Replay pending collections
+    await SyncService.reapplyPendingCollections(db, 'loan-pen');
+
+    // VERIFICATION: The 5000 paise was allocated to penalty, NOT diverted to principal or markup!
+    const kistPen = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-pen-1'`);
+    expect(kistPen?.principal_paid_paise).toBe(0);
+    expect(kistPen?.markup_paid_paise).toBe(0);
+    expect(kistPen?.status).toBe('UNPAID');
+  });
+
+  it('properly accounts for REVERSAL penalty forgiveness during replay without charging forgiven fees', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-forg', 'Borrower Forg', '9876543214', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-forg', 'b-forg', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-forg-1', 'loan-forg', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Penalty assessment of 3000 paise
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-forg-assess', 'pen-forg-1', 'loan-forg', 'PENALTY_ASSESSMENT', 3000, '2026-01-05', '2026-01-05')
+    `);
+
+    // REVERSAL penalty forgiveness of 3000 paise
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, forgiven_penalty_paise, effective_date, created_at)
+      VALUES ('tx-forg-rev', 'pen-forg-rev', 'loan-forg', 'REVERSAL', 0, 3000, '2026-01-05', '2026-01-05')
+    `);
+
+    // Pending payment of 110000 paise (full installment)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-forg-1', 'op-forg-pay', 'record_collection', '${JSON.stringify({ loan_id: 'loan-forg', amount_paise: 110000, effective_date: '2026-01-06' })}', 'PENDING', '2026-01-06T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-forg-pay', 'op-forg-pay', 'loan-forg', 'COLLECTION', 110000, 100000, 10000, '2026-01-06', '2026-01-06')
+    `);
+
+    // Replay pending collections
+    await SyncService.reapplyPendingCollections(db, 'loan-forg');
+
+    // Because penalty of 3000 was forgiven via REVERSAL, remaining penalty was 0!
+    // So all 110000 paise pays the installment in full!
+    const kistForg = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-forg-1'`);
+    expect(kistForg?.principal_paid_paise).toBe(100000);
+    expect(kistForg?.markup_paid_paise).toBe(10000);
+    expect(kistForg?.status).toBe('PAID');
   });
 });

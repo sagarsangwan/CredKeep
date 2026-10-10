@@ -1,6 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { ScheduleOptions, generateSchedule, calculateNextDueDate } from '../domain/schedule';
+import { multiplyPaise, Paise } from '../domain/money';
 import { OutboxManager } from '../sync/outbox';
 
 export type Loan = {
@@ -116,7 +117,7 @@ export class LoanRepository {
     
     // If the last kist's due date is in the past, generate new ones until we pass currentDate
     if (lastKist.effective_due_date < currentDate) {
-      const totalMarkup = loan.principal_paise * loan.markup_factor;
+      const totalMarkup = multiplyPaise(loan.principal_paise as Paise, loan.markup_factor);
       const markupDuePerMonth = Math.floor(totalMarkup / loan.term_months);
       
       let nextInstalmentNumber = lastKist.installment_number + 1;

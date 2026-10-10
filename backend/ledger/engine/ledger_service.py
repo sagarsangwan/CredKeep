@@ -1,6 +1,6 @@
 import time
 import uuid
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Optional
 from django.db import transaction, models
 from django.db.utils import OperationalError
@@ -35,7 +35,11 @@ def extend_bullet_schedule_if_needed(loan: LoanAccount, current_date_str: str) -
     last_due_date_str = last_kist.effective_due_date.strftime("%Y-%m-%d")
 
     if last_due_date_str < current_date_str:
-        total_markup = int(round(Decimal(loan.principal_paise) * loan.markup_factor))
+        if isinstance(loan.markup_factor, float):
+            markup_dec = Decimal(str(loan.markup_factor))
+        else:
+            markup_dec = Decimal(loan.markup_factor)
+        total_markup = int((Decimal(loan.principal_paise) * markup_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
         markup_due_per_month = total_markup // loan.term_months
 
         next_installment_number = last_kist.installment_number + 1

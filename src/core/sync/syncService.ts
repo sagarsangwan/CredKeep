@@ -48,7 +48,6 @@ export class SyncService {
             await OutboxManager.markSynced(db, [res.operation_id]);
             totalPushed++;
           } else if (res.status === 'REJECTED') {
-            await OutboxManager.markStatus(db, res.operation_id, 'REJECTED', res.error);
             await this.revertRejectedPayment(db, res.operation_id, res.error);
             batchFailed++;
           } else if (res.status === 'FAILED') {
@@ -93,21 +92,24 @@ export class SyncService {
       const changes = response.changes || [];
 
       if (changes.length > 0) {
+        cursor = response.next_cursor;
+        hasMore = Boolean(response.has_more);
         await db.withExclusiveTransactionAsync(async (tx) => {
-          const modifiedLoanIds = new Set<string>();
+          const modifiedScheduleLoanIds = new Set<string>();
           for (const change of changes) {
-            await this.applyServerChange(tx, change, modifiedLoanIds);
+            await this.applyServerChange(tx, change, modifiedScheduleLoanIds);
           }
-          for (const loanId of modifiedLoanIds) {
+          for (const loanId of modifiedScheduleLoanIds) {
             await this.reapplyPendingCollections(tx, loanId);
           }
+          await OutboxManager.setMeta(tx, 'last_pull_cursor', String(cursor));
         });
         totalPulled += changes.length;
+      } else {
+        cursor = response.next_cursor;
+        hasMore = Boolean(response.has_more);
+        await OutboxManager.setMeta(db, 'last_pull_cursor', String(cursor));
       }
-
-      cursor = response.next_cursor;
-      hasMore = Boolean(response.has_more);
-      await OutboxManager.setMeta(db, 'last_pull_cursor', String(cursor));
     }
 
     await OutboxManager.setMeta(db, 'last_synced_at', new Date().toISOString());
@@ -121,10 +123,8 @@ export class SyncService {
     const { record_type, operation_type, payload } = change;
     if (!payload) return;
 
-    if (payload.loan_id && modifiedLoanIds) {
+    if (record_type === 'KIST' && payload.loan_id && modifiedLoanIds) {
       modifiedLoanIds.add(payload.loan_id);
-    } else if (record_type === 'LOAN' && payload.id && modifiedLoanIds) {
-      modifiedLoanIds.add(payload.id);
     }
 
     if (record_type === 'BORROWER') {
@@ -180,13 +180,19 @@ export class SyncService {
                effective_due_date = ?,
                principal_paid_paise = ?,
                markup_paid_paise = ?,
-               status = ?
+               status = ?,
+               server_principal_paid_paise = ?,
+               server_markup_paid_paise = ?,
+               server_status = ?
              WHERE id = ?`,
             [
               payload.principal_component_paise || 0,
               payload.markup_component_paise || 0,
               payload.total_due_paise,
               payload.effective_due_date,
+              payload.principal_paid_paise || 0,
+              payload.markup_paid_paise || 0,
+              payload.status || 'PENDING',
               payload.principal_paid_paise || 0,
               payload.markup_paid_paise || 0,
               payload.status || 'PENDING',
@@ -198,8 +204,9 @@ export class SyncService {
             `INSERT INTO repayment_schedules (
                id, loan_id, installment_number, original_due_date, effective_due_date,
                principal_component_paise, markup_component_paise, total_due_paise,
-               principal_paid_paise, markup_paid_paise, status
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               principal_paid_paise, markup_paid_paise, status,
+               server_principal_paid_paise, server_markup_paid_paise, server_status
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               payload.id,
               payload.loan_id,
@@ -209,6 +216,9 @@ export class SyncService {
               payload.principal_component_paise || 0,
               payload.markup_component_paise || 0,
               payload.total_due_paise,
+              payload.principal_paid_paise || 0,
+              payload.markup_paid_paise || 0,
+              payload.status || 'PENDING',
               payload.principal_paid_paise || 0,
               payload.markup_paid_paise || 0,
               payload.status || 'PENDING',
@@ -242,9 +252,16 @@ export class SyncService {
             `UPDATE repayment_schedules SET
                principal_paid_paise = COALESCE(?, principal_paid_paise),
                markup_paid_paise = COALESCE(?, markup_paid_paise),
-               status = COALESCE(?, status)
+               status = COALESCE(?, status),
+               server_principal_paid_paise = COALESCE(?, server_principal_paid_paise),
+               server_markup_paid_paise = COALESCE(?, server_markup_paid_paise),
+               server_status = COALESCE(?, server_status)
              WHERE id = ?`,
-            [payload.principal_paid_paise, payload.markup_paid_paise, payload.status, kistId]
+            [
+              payload.principal_paid_paise, payload.markup_paid_paise, payload.status,
+              payload.principal_paid_paise, payload.markup_paid_paise, payload.status,
+              kistId
+            ]
           );
         }
       }
@@ -339,6 +356,16 @@ export class SyncService {
   static async reapplyPendingCollections(tx: SQLiteDatabase, loanId: string): Promise<void> {
     if (!loanId) return;
 
+    // Reset kists to authoritative server baseline before replaying pending collections
+    await tx.runAsync(
+      `UPDATE repayment_schedules SET
+         principal_paid_paise = COALESCE(server_principal_paid_paise, 0),
+         markup_paid_paise = COALESCE(server_markup_paid_paise, 0),
+         status = COALESCE(server_status, 'PENDING')
+       WHERE loan_id = ?`,
+      [loanId]
+    );
+
     const pendingOutbox = await tx.getAllAsync<{ operation_id: string; payload: string }>(
       `SELECT operation_id, payload FROM sync_outbox WHERE status = 'PENDING' AND operation_type = 'record_collection' ORDER BY created_at ASC`
     );
@@ -354,12 +381,14 @@ export class SyncService {
 
     if (relevant.length === 0) return;
 
-    // Calculate actual outstanding penalties dynamically
+    // Calculate actual outstanding penalties dynamically (excluding pending collections and including REVERSAL waivers)
     const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
       `SELECT
          COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' THEN amount_paise ELSE 0 END), 0) as assessed,
-         COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
-         COALESCE(SUM(CASE WHEN transaction_type = 'WAIVER' THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
+         COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' AND operation_id NOT IN (
+           SELECT operation_id FROM sync_outbox WHERE status = 'PENDING'
+         ) THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
+         COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
        FROM transactions WHERE loan_id = ?`,
       [loanId]
     );
@@ -413,8 +442,10 @@ export class SyncService {
    * Inserts an append-only compensating REVERSAL ledger entry,
    * reverses affected kist paid amounts, and restores loan status.
    */
-  static async revertRejectedPayment(db: SQLiteDatabase, operationId: string, _errorReason?: string): Promise<void> {
+  static async revertRejectedPayment(db: SQLiteDatabase, operationId: string, errorReason?: string): Promise<void> {
     await db.withExclusiveTransactionAsync(async (tx) => {
+      await OutboxManager.markStatus(tx, operationId, 'REJECTED', errorReason);
+
       const origTx = await tx.getFirstAsync<any>(
         `SELECT * FROM transactions WHERE operation_id = ? AND transaction_type = 'COLLECTION'`,
         [operationId]
@@ -428,7 +459,7 @@ export class SyncService {
       );
       if (existingReversal) return;
 
-      const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+      const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
       await tx.runAsync(
         `INSERT INTO transactions (
            id, operation_id, loan_id, transaction_type, is_cash, payment_method,
@@ -442,13 +473,13 @@ export class SyncService {
           'REVERSAL',
           0,
           'SYSTEM',
-          0,
+          -origTx.amount_paise,
           -origTx.allocated_principal_paise,
           -origTx.allocated_markup_paise,
           -origTx.allocated_penalty_paise,
           -origTx.unallocated_surplus_paise,
           0,
-          new Date().toISOString().split('T')[0],
+          origTx.effective_date || new Date().toISOString().split('T')[0],
           new Date().toISOString(),
         ]
       );
@@ -492,7 +523,7 @@ export class SyncService {
         `SELECT
            COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' AND effective_date <= ? THEN amount_paise ELSE 0 END), 0) as assessed,
            COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' AND sequence_number < ? THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
-           COALESCE(SUM(CASE WHEN transaction_type = 'WAIVER' AND effective_date <= ? THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
+           COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') AND effective_date <= ? THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
          FROM transactions WHERE loan_id = ?`,
         [col.effective_date, col.sequence_number, col.effective_date, loanId]
       );

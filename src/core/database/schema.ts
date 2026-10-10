@@ -43,10 +43,23 @@ export async function runMigrations(db: SQLiteDatabase) {
         principal_paid_paise INTEGER NOT NULL DEFAULT 0,
         markup_paid_paise INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'PENDING',
+        server_principal_paid_paise INTEGER NOT NULL DEFAULT 0,
+        server_markup_paid_paise INTEGER NOT NULL DEFAULT 0,
+        server_status TEXT NOT NULL DEFAULT 'PENDING',
         UNIQUE (loan_id, installment_number),
         FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE RESTRICT
       );
     `);
+
+    try {
+      await db.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_principal_paid_paise INTEGER NOT NULL DEFAULT 0;`);
+    } catch {}
+    try {
+      await db.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_markup_paid_paise INTEGER NOT NULL DEFAULT 0;`);
+    } catch {}
+    try {
+      await db.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_status TEXT NOT NULL DEFAULT 'PENDING';`);
+    } catch {}
 
     // 4. Transactions table (Fixing the duplicate PK defect)
     await db.execAsync(`
