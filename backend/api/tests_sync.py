@@ -8,6 +8,7 @@ from rest_framework.authtoken.models import Token
 
 from tenants.models import Tenant, Device
 from ledger.models import Borrower, LoanAccount, Kist, Transaction as LedgerTx, SyncLog, SyncOutbox
+from ledger.engine import ledger_service
 
 
 @pytest.fixture
@@ -437,3 +438,190 @@ def test_sync_pull_cursor_pagination_and_isolation(api_client, lender_setup, oth
     assert len(response_other.data['changes']) == 2
     for change in response_other.data['changes']:
         assert 'other_tenant_index' in change['payload']
+
+
+@pytest.mark.django_db
+def test_create_loan_emits_parent_loan_outbox_before_child_kists(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Ordering Borrower', phone='9876543210')
+    loan_id = str(uuid.uuid4())
+    op_id = str(uuid.uuid4())
+
+    push_payload = {
+        "operations": [
+            {
+                "type": "create_loan",
+                "operation_id": op_id,
+                "payload": {
+                    "id": loan_id,
+                    "borrower_id": str(borrower.id),
+                    "principal_paise": 100000,
+                    "markup_factor": 0.2,
+                    "term_months": 2,
+                    "start_date": "2026-01-01",
+                    "due_day": 5,
+                    "product_type": "instalment"
+                }
+            }
+        ]
+    }
+    url = reverse('sync-push')
+    res = api_client.post(url, push_payload, format='json')
+    assert res.status_code == 200
+
+    outbox_entries = list(SyncOutbox.objects.filter(tenant=tenant).order_by('sequence_number'))
+    assert len(outbox_entries) >= 3  # 1 LOAN + 2 KISTs
+    # The first entry must be LOAN
+    assert outbox_entries[0].record_type == 'LOAN'
+    assert outbox_entries[0].payload['id'] == loan_id
+    # Subsequent entries are KISTs
+    assert outbox_entries[1].record_type == 'KIST'
+    assert outbox_entries[2].record_type == 'KIST'
+
+
+@pytest.mark.django_db
+def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Waiver Borrower', phone='9876543211')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    # Late by 5 days: assess ₹500 penalty (50,000 paise)
+    ledger_service.assess_penalties(loan, '2026-01-06')
+    assert loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').count() == 5
+
+    # Waive ₹500 penalty via push
+    waive_op = str(uuid.uuid4())
+    push_payload = {
+        "operations": [
+            {
+                "type": "waive_penalty",
+                "operation_id": waive_op,
+                "payload": {
+                    "loan_id": str(loan.id),
+                    "amount_paise": 50000,
+                    "effective_date": "2026-01-06"
+                }
+            }
+        ]
+    }
+    url = reverse('sync-push')
+    res = api_client.post(url, push_payload, format='json')
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Pay full principal + markup (110,000 paise).
+    # Since penalty was waived, this should settle the loan!
+    pay_op = str(uuid.uuid4())
+    pay_payload = {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": pay_op,
+                "payload": {
+                    "loan_id": str(loan.id),
+                    "amount_paise": 110000,
+                    "effective_date": "2026-01-06",
+                    "payment_method": "CASH",
+                    "is_cash": True
+                }
+            }
+        ]
+    }
+    res2 = api_client.post(url, pay_payload, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'ACCEPTED'
+
+    loan.refresh_from_db()
+    assert loan.status == 'SETTLED'
+
+
+@pytest.mark.django_db
+def test_concurrent_payment_retries_idempotency_recovery(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Retry Borrower', phone='9876543212')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    op_id = str(uuid.uuid4())
+    payload = {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": op_id,
+                "payload": {
+                    "loan_id": str(loan.id),
+                    "amount_paise": 50000,
+                    "effective_date": "2026-01-01",
+                    "payment_method": "UPI",
+                    "is_cash": False
+                }
+            }
+        ]
+    }
+
+    url = reverse('sync-push')
+    # First submission
+    res1 = api_client.post(url, payload, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Duplicate submission with identical op_id
+    res2 = api_client.post(url, payload, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Exactly 1 transaction recorded in ledger
+    tx_count = loan.transactions.filter(transaction_type='COLLECTION').count()
+    assert tx_count == 1
+    # Cash classification preserved
+    tx = loan.transactions.filter(transaction_type='COLLECTION').first()
+    assert tx.is_cash is False
+    assert tx.payment_method == 'UPI'
+

@@ -42,7 +42,7 @@ def extend_bullet_schedule_if_needed(loan: LoanAccount, current_date_str: str) -
         next_due_date = calculate_next_due_date(start_date_str, months_to_add, loan.due_day)
 
         while next_due_date <= current_date_str or next_installment_number == last_kist.installment_number + 1:
-            Kist.objects.create(
+            new_kist = Kist.objects.create(
                 tenant=loan.tenant,
                 loan=loan,
                 installment_number=next_installment_number,
@@ -52,6 +52,23 @@ def extend_bullet_schedule_if_needed(loan: LoanAccount, current_date_str: str) -
                 markup_component_paise=markup_due_per_month,
                 total_due_paise=markup_due_per_month,
                 status='PENDING'
+            )
+            SyncOutbox.objects.create(
+                tenant=loan.tenant,
+                record_type='KIST',
+                record_id=new_kist.id,
+                operation_type='INSERT',
+                payload={
+                    'id': str(new_kist.id),
+                    'loan_id': str(loan.id),
+                    'installment_number': new_kist.installment_number,
+                    'original_due_date': str(new_kist.original_due_date),
+                    'effective_due_date': str(new_kist.effective_due_date),
+                    'principal_component_paise': new_kist.principal_component_paise,
+                    'markup_component_paise': new_kist.markup_component_paise,
+                    'total_due_paise': new_kist.total_due_paise,
+                    'status': new_kist.status,
+                }
             )
 
             if next_due_date > current_date_str:
@@ -102,13 +119,34 @@ def assess_penalties(loan: LoanAccount, current_date_str: str) -> int:
 
     # Record penalty assessment transactions for each new date
     for d in new_assessed_dates:
-        LedgerTx.objects.create(
+        pen_tx = LedgerTx.objects.create(
             tenant=loan.tenant,
             operation_id=uuid.uuid4(),
             loan=loan,
             transaction_type='PENALTY_ASSESSMENT',
             amount_paise=10000,
             effective_date=d
+        )
+        SyncOutbox.objects.create(
+            tenant=loan.tenant,
+            record_type='TRANSACTION',
+            record_id=pen_tx.id,
+            operation_type='INSERT',
+            payload={
+                'id': str(pen_tx.id),
+                'operation_id': str(pen_tx.operation_id),
+                'loan_id': str(loan.id),
+                'transaction_type': pen_tx.transaction_type,
+                'is_cash': pen_tx.is_cash,
+                'payment_method': pen_tx.payment_method,
+                'amount_paise': pen_tx.amount_paise,
+                'allocated_principal_paise': pen_tx.allocated_principal_paise,
+                'allocated_markup_paise': pen_tx.allocated_markup_paise,
+                'allocated_penalty_paise': pen_tx.allocated_penalty_paise,
+                'unallocated_surplus_paise': pen_tx.unallocated_surplus_paise,
+                'forgiven_penalty_paise': pen_tx.forgiven_penalty_paise,
+                'effective_date': str(pen_tx.effective_date),
+            }
         )
 
     return new_penalty_amount
@@ -143,13 +181,18 @@ def record_collection(
         # Lock loan row for update
         locked_loan = LoanAccount.objects.select_for_update().get(id=loan.id)
 
+        # Recheck idempotency under lock to prevent concurrent duplicates from double-processing
+        existing_locked = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
+        if existing_locked:
+            return {'status': 'ALREADY_EXISTS', 'transaction': existing_locked}
+
         # Extend schedule for bullet loans if applicable
         extend_bullet_schedule_if_needed(locked_loan, effective_date_str)
 
         # Assess late penalties up to collection date
         assess_penalties(locked_loan, effective_date_str)
 
-        # Calculate outstanding penalties
+        # Calculate outstanding penalties (accounting for collections and waivers)
         total_assessed = (
             LedgerTx.objects
             .filter(loan=locked_loan, transaction_type='PENALTY_ASSESSMENT')
@@ -160,7 +203,12 @@ def record_collection(
             .filter(loan=locked_loan, transaction_type='COLLECTION')
             .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
         )
-        outstanding_penalty = max(0, total_assessed - total_penalty_paid)
+        total_penalty_waived = (
+            LedgerTx.objects
+            .filter(loan=locked_loan, transaction_type='REVERSAL')
+            .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+        )
+        outstanding_penalty = max(0, total_assessed - total_penalty_paid - total_penalty_waived)
 
         # Prepare kist states
         db_kists = list(locked_loan.schedules.all().order_by('installment_number'))
@@ -288,11 +336,14 @@ def record_collection(
                 'operation_id': str(tx_obj.operation_id),
                 'loan_id': str(locked_loan.id),
                 'transaction_type': tx_obj.transaction_type,
+                'is_cash': tx_obj.is_cash,
+                'payment_method': tx_obj.payment_method,
                 'amount_paise': tx_obj.amount_paise,
                 'allocated_principal_paise': tx_obj.allocated_principal_paise,
                 'allocated_markup_paise': tx_obj.allocated_markup_paise,
                 'allocated_penalty_paise': tx_obj.allocated_penalty_paise,
                 'unallocated_surplus_paise': tx_obj.unallocated_surplus_paise,
+                'forgiven_penalty_paise': tx_obj.forgiven_penalty_paise,
                 'effective_date': str(tx_obj.effective_date)
             }
         )

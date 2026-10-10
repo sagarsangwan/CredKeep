@@ -19,8 +19,15 @@ export interface EnqueueParams {
   payload: Record<string, any>;
 }
 
+export type DatabaseHandle = {
+  runAsync: (sql: string, ...params: any[]) => Promise<any>;
+};
+
 export class OutboxManager {
-  static async enqueue(db: SQLiteDatabase, params: EnqueueParams): Promise<OutboxRecord> {
+  static async enqueue(
+    db: SQLiteDatabase | DatabaseHandle,
+    params: EnqueueParams
+  ): Promise<OutboxRecord> {
     const id = crypto.randomUUID();
     const operationId = params.operationId || crypto.randomUUID();
     const createdAt = new Date().toISOString();

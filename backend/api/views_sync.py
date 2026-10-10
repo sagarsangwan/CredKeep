@@ -1,6 +1,6 @@
 import uuid
 from decimal import Decimal
-from django.db import transaction
+from django.db import transaction, IntegrityError, models
 from django.utils import timezone
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from rest_framework import status
@@ -132,13 +132,19 @@ class SyncPushView(APIView):
                         payload=payload
                     )
 
-                    SyncLog.objects.create(
-                        tenant=tenant,
-                        device=device,
-                        operation_id=operation_id,
-                        status=res_status,
-                        error_message=err_msg or ''
-                    )
+                    try:
+                        SyncLog.objects.create(
+                            tenant=tenant,
+                            device=device,
+                            operation_id=operation_id,
+                            status=res_status,
+                            error_message=err_msg or ''
+                        )
+                    except IntegrityError:
+                        existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                        if existing_log:
+                            res_status = existing_log.status
+                            err_msg = existing_log.error_message
 
                     res_item = {
                         "operation_id": str(operation_id),
@@ -149,20 +155,36 @@ class SyncPushView(APIView):
                     results.append(res_item)
 
             except Exception as e:
-                # Top-level failure for this operation: record REJECTED
+                # Top-level failure for this operation: recover if concurrent duplicate or record REJECTED
                 err_text = str(e)
-                SyncLog.objects.create(
-                    tenant=tenant,
-                    device=device,
-                    operation_id=operation_id,
-                    status='REJECTED',
-                    error_message=err_text
-                )
-                results.append({
-                    "operation_id": str(operation_id),
-                    "status": "REJECTED",
-                    "error": err_text
-                })
+                existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                if existing_log:
+                    results.append({
+                        "operation_id": str(operation_id),
+                        "status": existing_log.status,
+                        "error": existing_log.error_message or None
+                    })
+                else:
+                    try:
+                        SyncLog.objects.create(
+                            tenant=tenant,
+                            device=device,
+                            operation_id=operation_id,
+                            status='REJECTED',
+                            error_message=err_text
+                        )
+                        results.append({
+                            "operation_id": str(operation_id),
+                            "status": "REJECTED",
+                            "error": err_text
+                        })
+                    except IntegrityError:
+                        existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                        results.append({
+                            "operation_id": str(operation_id),
+                            "status": existing_log.status if existing_log else "REJECTED",
+                            "error": existing_log.error_message if existing_log else err_text
+                        })
 
         return Response({"results": results}, status=status.HTTP_200_OK)
 
@@ -238,6 +260,25 @@ class SyncPushView(APIView):
                 status='ACTIVE'
             )
 
+            # Emit LOAN outbox record FIRST so replica devices process parent loan before child kists
+            SyncOutbox.objects.create(
+                tenant=tenant,
+                record_type='LOAN',
+                record_id=loan.id,
+                operation_type='INSERT',
+                payload={
+                    'id': str(loan.id),
+                    'borrower_id': str(loan.borrower_id),
+                    'principal_paise': loan.principal_paise,
+                    'markup_factor': str(loan.markup_factor),
+                    'term_months': loan.term_months,
+                    'start_date': str(loan.start_date),
+                    'due_day': loan.due_day,
+                    'product_type': loan.product_type,
+                    'status': loan.status
+                }
+            )
+
             # Generate initial kist schedule
             schedule_items = generate_schedule(
                 principal_paise=principal_paise,
@@ -277,24 +318,6 @@ class SyncPushView(APIView):
                         'status': kist.status
                     }
                 )
-
-            SyncOutbox.objects.create(
-                tenant=tenant,
-                record_type='LOAN',
-                record_id=loan.id,
-                operation_type='INSERT',
-                payload={
-                    'id': str(loan.id),
-                    'borrower_id': str(loan.borrower_id),
-                    'principal_paise': loan.principal_paise,
-                    'markup_factor': str(loan.markup_factor),
-                    'term_months': loan.term_months,
-                    'start_date': str(loan.start_date),
-                    'due_day': loan.due_day,
-                    'product_type': loan.product_type,
-                    'status': loan.status
-                }
-            )
             return 'ACCEPTED', None
 
         elif op_type == 'record_collection':
@@ -434,6 +457,53 @@ class SyncPushView(APIView):
                     'effective_date': str(tx.effective_date)
                 }
             )
+
+            # Check if loan settles as a result of penalty waiver
+            total_assessed = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+                .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+            )
+            total_penalty_paid = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type='COLLECTION')
+                .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
+            )
+            total_penalty_waived = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type='REVERSAL')
+                .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+            )
+            outstanding_pen = max(0, total_assessed - total_penalty_paid - total_penalty_waived)
+            all_kists_paid = not loan.schedules.exclude(status='PAID').exists()
+            settled = False
+            if loan.product_type == 'instalment' and all_kists_paid and outstanding_pen <= 0:
+                loan.status = 'SETTLED'
+                loan.save(update_fields=['status'])
+                settled = True
+            elif loan.product_type == 'bullet' and all_kists_paid and outstanding_pen <= 0:
+                past_p = (
+                    LedgerTx.objects
+                    .filter(loan=loan, transaction_type='COLLECTION')
+                    .aggregate(total=models.Sum('allocated_principal_paise'))['total'] or 0
+                )
+                if past_p >= loan.principal_paise:
+                    loan.status = 'SETTLED'
+                    loan.save(update_fields=['status'])
+                    settled = True
+
+            if settled:
+                SyncOutbox.objects.create(
+                    tenant=tenant,
+                    record_type='LOAN',
+                    record_id=loan.id,
+                    operation_type='UPDATE',
+                    payload={
+                        'id': str(loan.id),
+                        'status': 'SETTLED'
+                    }
+                )
+
             return 'ACCEPTED', None
 
         else:

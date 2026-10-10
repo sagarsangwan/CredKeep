@@ -200,5 +200,58 @@ describe('SyncService & OutboxManager', () => {
       expect(metaRows['last_pull_cursor']).toBe('15');
       expect(metaRows['last_synced_at']).toBeDefined();
     });
+
+    it('reconciles authoritative allocations and payment metadata on existing transaction', async () => {
+      // Mock existing transaction check to return an existing id
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM transactions WHERE operation_id = ?')) {
+          if (params[0] === 'op-existing-tx') return { id: 'tx-local-1' };
+        }
+        return null;
+      });
+
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        next_cursor: 20,
+        has_more: false,
+        changes: [
+          {
+            id: 'change-tx',
+            record_type: 'TRANSACTION',
+            operation_type: 'INSERT',
+            payload: {
+              id: 'tx-server-1',
+              operation_id: 'op-existing-tx',
+              loan_id: 'loan-1',
+              transaction_type: 'COLLECTION',
+              is_cash: false,
+              payment_method: 'UPI',
+              amount_paise: 50000,
+              allocated_principal_paise: 30000,
+              allocated_markup_paise: 15000,
+              allocated_penalty_paise: 5000,
+              unallocated_surplus_paise: 0,
+              forgiven_penalty_paise: 0,
+              effective_date: '2026-01-05',
+            },
+          },
+        ],
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(1);
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE transactions SET'),
+        [
+          30000, // allocated_principal_paise
+          15000, // allocated_markup_paise
+          5000,  // allocated_penalty_paise
+          0,     // unallocated_surplus_paise
+          0,     // forgiven_penalty_paise
+          0,     // is_cash (false -> 0)
+          'UPI', // payment_method
+          'op-existing-tx',
+        ]
+      );
+    });
   });
 });

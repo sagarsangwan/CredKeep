@@ -150,21 +150,17 @@ export class TransactionRepository {
           }
         }
 
-        try {
-          await OutboxManager.enqueue(this.db, {
-            operationId,
-            operationType: 'record_collection',
-            payload: {
-              loan_id: loanId,
-              amount_paise: paymentAmount,
-              effective_date: effectiveDate,
-              payment_method: 'CASH',
-              is_cash: true,
-            },
-          });
-        } catch {
-          // Non-blocking
-        }
+        await OutboxManager.enqueue(tx || this.db, {
+          operationId,
+          operationType: 'record_collection',
+          payload: {
+            loan_id: loanId,
+            amount_paise: paymentAmount,
+            effective_date: effectiveDate,
+            payment_method: 'CASH',
+            is_cash: true,
+          },
+        });
         
         returnResult = { success: true, transactionId, result };
       });

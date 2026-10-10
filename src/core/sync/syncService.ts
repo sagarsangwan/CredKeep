@@ -179,6 +179,8 @@ export class SyncService {
       }
     } else if (record_type === 'TRANSACTION') {
       if (operation_type === 'INSERT') {
+        const isCash = payload.is_cash !== undefined ? (payload.is_cash ? 1 : 0) : 1;
+        const paymentMethod = payload.payment_method || (isCash ? 'CASH' : 'ONLINE');
         const existing = await tx.getFirstAsync<{ id: string }>(
           `SELECT id FROM transactions WHERE operation_id = ?`,
           [payload.operation_id]
@@ -195,8 +197,8 @@ export class SyncService {
               payload.operation_id,
               payload.loan_id,
               payload.transaction_type,
-              payload.is_cash ? 1 : 0,
-              payload.payment_method || 'CASH',
+              isCash,
+              paymentMethod,
               payload.amount_paise || 0,
               payload.allocated_principal_paise || 0,
               payload.allocated_markup_paise || 0,
@@ -205,6 +207,29 @@ export class SyncService {
               payload.forgiven_penalty_paise || 0,
               payload.effective_date,
               payload.created_at || new Date().toISOString(),
+            ]
+          );
+        } else {
+          // Reconcile authoritative server allocations onto local record
+          await tx.runAsync(
+            `UPDATE transactions SET
+               allocated_principal_paise = ?,
+               allocated_markup_paise = ?,
+               allocated_penalty_paise = ?,
+               unallocated_surplus_paise = ?,
+               forgiven_penalty_paise = ?,
+               is_cash = ?,
+               payment_method = ?
+             WHERE operation_id = ?`,
+            [
+              payload.allocated_principal_paise || 0,
+              payload.allocated_markup_paise || 0,
+              payload.allocated_penalty_paise || 0,
+              payload.unallocated_surplus_paise || 0,
+              payload.forgiven_penalty_paise || 0,
+              isCash,
+              paymentMethod,
+              payload.operation_id,
             ]
           );
         }

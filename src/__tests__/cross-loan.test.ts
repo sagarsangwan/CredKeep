@@ -40,10 +40,20 @@ interface TransactionRow {
   created_at: string;
 }
 
+interface OutboxRow {
+  id: string;
+  operation_id: string;
+  operation_type: string;
+  payload: string;
+  status: string;
+  created_at: string;
+}
+
 interface DbState {
   loans: LoanRow[];
   schedules: ScheduleRow[];
   transactions: TransactionRow[];
+  outbox: OutboxRow[];
 }
 
 describe('Cross-Loan Isolation', () => {
@@ -109,7 +119,8 @@ describe('Cross-Loan Isolation', () => {
           status: 'PENDING'
         }
       ],
-      transactions: []
+      transactions: [],
+      outbox: []
     };
 
     txRepo = new TransactionRepository(createDbMock(dbState, null));
@@ -122,7 +133,8 @@ describe('Cross-Loan Isolation', () => {
         const txState: DbState = {
           loans: JSON.parse(JSON.stringify(state.loans)),
           schedules: JSON.parse(JSON.stringify(state.schedules)),
-          transactions: JSON.parse(JSON.stringify(state.transactions))
+          transactions: JSON.parse(JSON.stringify(state.transactions)),
+          outbox: JSON.parse(JSON.stringify(state.outbox))
         };
         const tx = createDbMock(txState, throwOnUpdateId);
         
@@ -132,6 +144,7 @@ describe('Cross-Loan Isolation', () => {
           state.loans = txState.loans;
           state.schedules = txState.schedules;
           state.transactions = txState.transactions;
+          state.outbox = txState.outbox;
         } catch (e) {
           // Rollback (do nothing to outer state)
           throw e;
@@ -198,6 +211,16 @@ describe('Cross-Loan Isolation', () => {
         if (query.includes("UPDATE loans SET status = 'SETTLED'")) {
           const loan = state.loans.find(l => l.id === params[0]);
           if (loan) loan.status = 'SETTLED';
+        }
+        if (query.includes('INSERT INTO sync_outbox')) {
+          state.outbox.push({
+            id: params[0],
+            operation_id: params[1],
+            operation_type: params[2],
+            payload: params[3],
+            status: 'PENDING',
+            created_at: params[4]
+          });
         }
       }),
       prepareAsync: jest.fn(async (query: string) => {
@@ -292,17 +315,35 @@ describe('Cross-Loan Isolation', () => {
     await expect(errorRepo.recordCashPayment('loan-a', toPaise(2600), 'fail-op', '2026-01-02'))
       .rejects.toThrow('DB failure during update');
       
-    // Verify that the global dbState remains completely unchanged (rollback worked)
+    // Verify that the global dbState remains completely unchanged (both financial tx and outbox rolled back)
     expect(dbState.transactions.length).toBe(0);
+    expect(dbState.outbox.length).toBe(0);
     const loanA = dbState.loans.find(l => l.id === 'loan-a');
     expect(loanA?.status).toBe('ACTIVE');
     const scheduleA = dbState.schedules.find(s => s.loan_id === 'loan-a');
     expect(scheduleA?.principal_paid_paise).toBe(0);
     
     // Successful retry using the normal mock with the SAME operation ID,
-    // proving that rollback cleanly aborted the first attempt and did not persist the operation ID
+    // proving that rollback cleanly aborted the first attempt and did not persist either the financial tx or outbox
     await txRepo.recordCashPayment('loan-a', toPaise(2600), 'fail-op', '2026-01-02');
     expect(dbState.transactions.filter(t => t.transaction_type === 'COLLECTION').length).toBe(1);
+    expect(dbState.outbox.length).toBe(1);
+    expect(dbState.outbox[0].operation_id).toBe('fail-op');
+    expect(dbState.outbox[0].operation_type).toBe('record_collection');
     expect(dbState.schedules.find(s => s.loan_id === 'loan-a')?.status).toBe('PAID');
+  });
+
+  it('Concurrent duplicate payments resolve safely without duplicating ledger entries', async () => {
+    const p1 = txRepo.recordCashPayment('loan-b', toPaise(1000), 'concurrent-op', '2026-01-02');
+    const p2 = txRepo.recordCashPayment('loan-b', toPaise(1000), 'concurrent-op', '2026-01-02');
+
+    const [res1, res2] = await Promise.all([p1, p2]);
+    expect(res1.success).toBe(true);
+    expect(res2.success).toBe(true);
+
+    const txs = dbState.transactions.filter(t => t.operation_id === 'concurrent-op');
+    expect(txs.length).toBe(1);
+    const outboxOps = dbState.outbox.filter(o => o.operation_id === 'concurrent-op');
+    expect(outboxOps.length).toBe(1);
   });
 });

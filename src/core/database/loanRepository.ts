@@ -30,13 +30,14 @@ export class LoanRepository {
     const schedule = generateSchedule(options);
 
     await this.db.withExclusiveTransactionAsync(async (tx) => {
-      await this.db.runAsync(
+      const txHandle = tx || this.db;
+      await txHandle.runAsync(
         `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [loanId, borrowerId, options.principal, options.markupFactor, options.termMonths, options.startDate, options.dueDay, options.productType, created_at]
       );
       
-      const statement = await this.db.prepareAsync(`
+      const statement = await txHandle.prepareAsync(`
         INSERT INTO repayment_schedules 
         (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -59,24 +60,20 @@ export class LoanRepository {
         await statement.finalizeAsync();
       }
 
-      try {
-        await OutboxManager.enqueue(this.db, {
-          operationId: clientOpId,
-          operationType: 'create_loan',
-          payload: {
-            id: loanId,
-            borrower_id: borrowerId,
-            principal_paise: options.principal,
-            markup_factor: options.markupFactor,
-            term_months: options.termMonths,
-            start_date: options.startDate,
-            due_day: options.dueDay,
-            product_type: options.productType,
-          },
-        });
-      } catch {
-        // Non-blocking
-      }
+      await OutboxManager.enqueue(txHandle, {
+        operationId: clientOpId,
+        operationType: 'create_loan',
+        payload: {
+          id: loanId,
+          borrower_id: borrowerId,
+          principal_paise: options.principal,
+          markup_factor: options.markupFactor,
+          term_months: options.termMonths,
+          start_date: options.startDate,
+          due_day: options.dueDay,
+          product_type: options.productType,
+        },
+      });
     });
 
     return (await this.getById(loanId))!;
