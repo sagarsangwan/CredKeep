@@ -1,5 +1,6 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
+import { OutboxManager } from '../sync/outbox';
 
 export type Borrower = {
   id: string;
@@ -11,7 +12,7 @@ export type Borrower = {
 export class BorrowerRepository {
   constructor(private db: SQLiteDatabase) {}
 
-  async create(name: string, phone: string): Promise<Borrower> {
+  async create(name: string, phone: string, clientOpId?: string): Promise<Borrower> {
     const id = crypto.randomUUID();
     const created_at = new Date().toISOString();
     
@@ -19,6 +20,16 @@ export class BorrowerRepository {
       `INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, ?, ?, ?)`,
       [id, name, phone, created_at]
     );
+
+    try {
+      await OutboxManager.enqueue(this.db, {
+        operationId: clientOpId,
+        operationType: 'create_borrower',
+        payload: { id, name, phone },
+      });
+    } catch {
+      // Outbox failure should not block local borrower creation
+    }
     
     return { id, name, phone, created_at };
   }

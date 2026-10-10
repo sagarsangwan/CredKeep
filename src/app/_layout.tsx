@@ -11,6 +11,7 @@ export default function RootLayout() {
         <PinLock>
           <Stack>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="auth" options={{ headerShown: false }} />
             <Stack.Screen name="borrower" options={{ headerShown: false }} />
             <Stack.Screen name="loan" options={{ headerShown: false }} />
           </Stack>

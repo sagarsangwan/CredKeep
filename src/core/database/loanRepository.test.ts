@@ -50,9 +50,10 @@ describe('LoanRepository Integration', () => {
     });
 
     // Check loan creation query
-    expect(queries.length).toBe(1);
-    expect(queries[0].params[2]).toBe(toPaise(24000)); // principal
-    expect(queries[0].params[3]).toBe(0.3); // markupFactor
+    const loanQuery = queries.find(q => q.query.includes('INSERT INTO loans'));
+    expect(loanQuery).toBeDefined();
+    expect(loanQuery.params[2]).toBe(toPaise(24000)); // principal
+    expect(loanQuery.params[3]).toBe(0.3); // markupFactor
 
     // Check schedules created
     expect(statements.length).toBe(12); // 12 months

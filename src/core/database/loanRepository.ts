@@ -1,6 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { ScheduleOptions, generateSchedule, calculateNextDueDate } from '../domain/schedule';
+import { OutboxManager } from '../sync/outbox';
 
 export type Loan = {
   id: string;
@@ -20,7 +21,8 @@ export class LoanRepository {
 
   async createLoanWithSchedule(
     borrowerId: string, 
-    options: ScheduleOptions
+    options: ScheduleOptions,
+    clientOpId?: string
   ): Promise<Loan> {
     const loanId = crypto.randomUUID();
     const created_at = new Date().toISOString();
@@ -55,6 +57,25 @@ export class LoanRepository {
         }
       } finally {
         await statement.finalizeAsync();
+      }
+
+      try {
+        await OutboxManager.enqueue(this.db, {
+          operationId: clientOpId,
+          operationType: 'create_loan',
+          payload: {
+            id: loanId,
+            borrower_id: borrowerId,
+            principal_paise: options.principal,
+            markup_factor: options.markupFactor,
+            term_months: options.termMonths,
+            start_date: options.startDate,
+            due_day: options.dueDay,
+            product_type: options.productType,
+          },
+        });
+      } catch {
+        // Non-blocking
       }
     });
 

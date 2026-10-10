@@ -105,5 +105,26 @@ export async function runMigrations(db: SQLiteDatabase) {
         FOREIGN KEY (kist_id) REFERENCES repayment_schedules(id) ON DELETE RESTRICT
       );
     `);
+
+    // 6. Sync Outbox (Offline-first client mutations queue)
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS sync_outbox (
+        id TEXT PRIMARY KEY NOT NULL,
+        operation_id TEXT UNIQUE NOT NULL,
+        operation_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        error_message TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    // 7. Sync Meta (Sync state, cursors, timestamps)
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS sync_meta (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+      );
+    `);
   });
 }
