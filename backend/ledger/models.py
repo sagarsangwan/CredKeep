@@ -61,6 +61,7 @@ class LoanAccount(models.Model):
             CheckConstraint(condition=Q(principal_paise__gt=0), name='check_loan_positive_principal'),
             CheckConstraint(condition=Q(due_day__gte=1) & Q(due_day__lte=31), name='check_loan_valid_due_day'),
             CheckConstraint(condition=Q(term_months__gt=0), name='check_loan_positive_term'),
+            CheckConstraint(condition=Q(markup_factor__gte=0), name='check_loan_markup_factor_non_negative'),
         ]
 
     def __str__(self):
@@ -109,6 +110,12 @@ class Kist(models.Model):
 class TransactionQuerySet(models.QuerySet):
     def delete(self):
         raise ValidationError("Transaction records are append-only: bulk deletions are prohibited.")
+
+    def update(self, **kwargs):
+        raise ValidationError("Transaction records are append-only: bulk updates are prohibited.")
+
+    def bulk_update(self, objs, fields, **kwargs):
+        raise ValidationError("Transaction records are append-only: bulk updates are prohibited.")
 
 
 class Transaction(models.Model):
@@ -165,6 +172,15 @@ class Transaction(models.Model):
                     unallocated_surplus_paise__gte=0,
                 ),
                 name='check_transaction_allocations_non_negative'
+            ),
+            CheckConstraint(
+                condition=~Q(transaction_type='COLLECTION') | Q(
+                    amount_paise=models.F('allocated_principal_paise') +
+                                 models.F('allocated_markup_paise') +
+                                 models.F('allocated_penalty_paise') +
+                                 models.F('unallocated_surplus_paise')
+                ),
+                name='check_transaction_collection_conservation'
             ),
         ]
 

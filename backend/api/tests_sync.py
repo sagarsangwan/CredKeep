@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 from django.utils import timezone
 from django.db import models
+from django.core.exceptions import ValidationError
 from django.urls import reverse
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
@@ -1098,6 +1099,203 @@ def test_concurrent_overdue_collections_under_row_lock(lender_setup):
     assert txs.count() == 2
     total_allocated = sum(t.allocated_principal_paise + t.allocated_markup_paise + t.allocated_penalty_paise for t in txs)
     assert total_allocated <= 220000 + 40000  # kist total plus overdue penalties
+
+
+@pytest.mark.django_db
+def test_negative_and_nan_markup_factor_rejected(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+    borrower = Borrower.objects.create(tenant=tenant, name='Test Borrower', phone='9876543201')
+
+    # 1. Negative markup factor
+    res_neg = api_client.post(reverse('sync-push'), {
+        'device_id': str(uuid.uuid4()),
+        'operations': [{
+            'operation_id': str(uuid.uuid4()),
+            'type': 'create_loan',
+            'timestamp': timezone.now().isoformat(),
+            'payload': {
+                'borrower_id': str(borrower.id),
+                'principal_paise': 10000,
+                'markup_factor': '-2',
+                'term_months': 1,
+                'start_date': '2026-01-01',
+                'due_day': 1,
+                'product_type': 'instalment'
+            }
+        }]
+    }, format='json')
+    assert res_neg.status_code == 200
+    assert res_neg.data['results'][0]['status'] == 'REJECTED'
+    assert 'markup_factor must be a finite non-negative number' in res_neg.data['results'][0]['error']
+
+    # 2. NaN markup factor
+    res_nan = api_client.post(reverse('sync-push'), {
+        'device_id': str(uuid.uuid4()),
+        'operations': [{
+            'operation_id': str(uuid.uuid4()),
+            'type': 'create_loan',
+            'timestamp': timezone.now().isoformat(),
+            'payload': {
+                'borrower_id': str(borrower.id),
+                'principal_paise': 10000,
+                'markup_factor': 'NaN',
+                'term_months': 1,
+                'start_date': '2026-01-01',
+                'due_day': 1,
+                'product_type': 'instalment'
+            }
+        }]
+    }, format='json')
+    assert res_nan.status_code == 200
+    assert res_nan.data['results'][0]['status'] == 'REJECTED'
+    assert 'markup_factor must be a finite non-negative number' in res_nan.data['results'][0]['error']
+    assert not LoanAccount.objects.filter(borrower=borrower).exists()
+
+
+@pytest.mark.django_db
+def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Waiver', phone='9876543202')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=200000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=200000,
+        markup_component_paise=20000,
+        total_due_paise=220000,
+        status='PENDING'
+    )
+
+    # Assess penalty of 20,000 paise
+    LedgerTx.objects.create(
+        tenant=tenant,
+        operation_id=uuid.uuid4(),
+        loan=loan,
+        transaction_type='PENALTY_ASSESSMENT',
+        amount_paise=20000,
+        effective_date='2026-01-05'
+    )
+
+    # Modify schedule with penalty waiver
+    res = api_client.post(reverse('sync-push'), {
+        'device_id': str(uuid.uuid4()),
+        'operations': [{
+            'operation_id': str(uuid.uuid4()),
+            'type': 'modify_schedule',
+            'timestamp': timezone.now().isoformat(),
+            'payload': {
+                'loan_id': str(loan.id),
+                'installment_number': 1,
+                'revised_effective_due_date': '2026-01-15',
+                'accrued_penalty_action': 'WAIVE',
+                'waived_penalty_paise': 20000
+            }
+        }]
+    }, format='json')
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Compensating REVERSAL transaction created in ledger
+    reversal_tx = loan.transactions.filter(transaction_type='REVERSAL').first()
+    assert reversal_tx is not None
+    assert reversal_tx.forgiven_penalty_paise == 20000
+
+    # Subsequent collection does not charge waived penalty
+    loan.refresh_from_db()
+    res_coll = ledger_service.record_collection(loan, 220000, uuid.uuid4(), '2026-01-10')
+    assert res_coll['status'] == 'SUCCESS'
+    loan.refresh_from_db()
+    coll_tx = loan.transactions.filter(transaction_type='COLLECTION').first()
+    assert coll_tx.allocated_penalty_paise == 0
+    assert coll_tx.allocated_principal_paise == 200000
+    assert coll_tx.allocated_markup_paise == 20000
+    assert loan.status == 'SETTLED'
+
+
+@pytest.mark.django_db
+def test_settlement_blocked_when_principal_unpaid(lender_setup):
+    user, tenant, token = lender_setup
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Partial', phone='9876543203')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=200000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=200000,
+        markup_component_paise=20000,
+        total_due_paise=220000,
+        status='PENDING'
+    )
+
+    # Pay only partial amount (110,000 paise)
+    res = ledger_service.record_collection(loan, 110000, uuid.uuid4(), '2026-01-01')
+    assert res['status'] == 'SUCCESS'
+    loan.refresh_from_db()
+    assert loan.status == 'ACTIVE'
+
+
+@pytest.mark.django_db
+def test_transaction_queryset_update_bulk_update_prohibited(lender_setup):
+    user, tenant, token = lender_setup
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Immutability', phone='9876543204')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    tx = LedgerTx.objects.create(
+        tenant=tenant,
+        operation_id=uuid.uuid4(),
+        loan=loan,
+        transaction_type='COLLECTION',
+        amount_paise=110000,
+        allocated_principal_paise=100000,
+        allocated_markup_paise=10000,
+        effective_date='2026-01-01'
+    )
+
+    # QuerySet.update() prohibited
+    with pytest.raises(ValidationError, match="Transaction records are append-only: bulk updates are prohibited"):
+        LedgerTx.objects.filter(id=tx.id).update(amount_paise=99999)
+
+    # QuerySet.bulk_update() prohibited
+    with pytest.raises(ValidationError, match="Transaction records are append-only: bulk updates are prohibited"):
+        LedgerTx.objects.bulk_update([tx], ['amount_paise'])
+
+    # QuerySet.delete() prohibited
+    with pytest.raises(ValidationError, match="Transaction records are append-only: bulk deletions are prohibited"):
+        LedgerTx.objects.filter(id=tx.id).delete()
+
 
 
 

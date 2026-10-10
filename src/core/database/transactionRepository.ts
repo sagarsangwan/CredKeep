@@ -75,7 +75,7 @@ export class TransactionRepository {
   
         const result = allocatePayment({ paymentAmount, kists, outstandingPenalty });
         
-        const transactionId = crypto.randomUUID();
+        const transactionId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('tx-' + Date.now() + '-' + Math.random().toString(36).substring(2));
         const createdAt = new Date().toISOString();
         
         let allocatedPrincipal = 0;
@@ -145,8 +145,9 @@ export class TransactionRepository {
           }
         }
         
+        const totalPrincipalPaid = result.updatedKists.reduce((acc, k) => acc + k.principalPaid, 0);
         if (loan.product_type === 'instalment') {
-          if (allKistsPaid && result.remainingPenalty <= 0) {
+          if (totalPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
              await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
           }
         } else if (loan.product_type === 'bullet') {

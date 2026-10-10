@@ -28,8 +28,8 @@ export class OutboxManager {
     db: SQLiteDatabase | DatabaseHandle,
     params: EnqueueParams
   ): Promise<OutboxRecord> {
-    const id = crypto.randomUUID();
-    const operationId = params.operationId || crypto.randomUUID();
+    const id = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('outbox-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+    const operationId = params.operationId || (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('op-' + Date.now() + '-' + Math.random().toString(36).substring(2));
     const createdAt = new Date().toISOString();
     const payloadStr = JSON.stringify(params.payload);
 

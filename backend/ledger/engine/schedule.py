@@ -57,6 +57,11 @@ def generate_schedule(
     - Instalment loans: both principal and markup divided across term_months.
     - Bullet loans: only markup due in monthly kists (principal due at settlement).
     """
+    if markup_factor is None or markup_factor < 0:
+        raise ValueError("markup_factor must be non-negative")
+    if isinstance(markup_factor, Decimal) and (markup_factor.is_nan() or markup_factor.is_infinite()):
+        raise ValueError("markup_factor must be a finite number")
+
     if isinstance(markup_factor, float):
         total_markup = round(principal_paise * markup_factor)
     else:

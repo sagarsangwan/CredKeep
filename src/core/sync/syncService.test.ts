@@ -422,14 +422,113 @@ describe('SyncService & OutboxManager', () => {
       );
     });
 
-    it('reports failure and error messages when push has failed operations', async () => {
+    it('reports failure, halts pull, and protects local state when push has failed operations', async () => {
       jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
-      jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });
+      const pullSpy = jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });
 
       const res = await SyncService.syncAll(mockDb);
       expect(res.success).toBe(false);
+      expect(res.pulledCount).toBe(0);
+      expect(pullSpy).not.toHaveBeenCalled();
       expect(res.errors).toBeDefined();
-      expect(res.errors![0]).toContain('1 operations failed to push');
+      expect(res.errors![0]).toContain('failed to push to server; pull halted to protect local state');
+    });
+
+    it('pushes pending outbox queues exceeding 50 items in successive batches', async () => {
+      // Create 65 outbox items
+      for (let i = 0; i < 65; i++) {
+        outboxRows.push({
+          id: `outbox-${i}`,
+          operation_id: `op-${i}`,
+          operation_type: 'record_collection',
+          payload: JSON.stringify({ loan_id: 'loan-1', amount_paise: 1000 }),
+          status: 'PENDING',
+          created_at: new Date().toISOString()
+        });
+      }
+
+      (ApiClient.post as jest.Mock)
+        .mockResolvedValueOnce({
+          results: Array.from({ length: 50 }, (_, i) => ({
+            operation_id: `op-${i}`,
+            status: 'ACCEPTED'
+          }))
+        })
+        .mockResolvedValueOnce({
+          results: Array.from({ length: 15 }, (_, i) => ({
+            operation_id: `op-${50 + i}`,
+            status: 'ACCEPTED'
+          }))
+        });
+
+      const pushRes = await SyncService.pushPending(mockDb);
+      expect(pushRes.pushed).toBe(65);
+      expect(pushRes.failed).toBe(0);
+      expect(ApiClient.post).toHaveBeenCalledTimes(2);
+    });
+
+    it('preserves local pending collections when server pulls schedule updates', async () => {
+      // Local pending collection exists in outbox
+      outboxRows.push({
+        id: 'outbox-pen-1',
+        operation_id: 'op-local-coll',
+        operation_type: 'record_collection',
+        payload: JSON.stringify({
+          loan_id: 'loan-1',
+          amount_paise: 110000,
+          effective_date: '2026-01-05'
+        }),
+        status: 'PENDING',
+        created_at: new Date().toISOString()
+      });
+
+      // Server sends a stale snapshot (0 paid)
+      mockDb.getAllAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('sync_outbox WHERE status = \'PENDING\'')) {
+          return outboxRows.filter(r => r.status === 'PENDING');
+        }
+        if (sql.includes('repayment_schedules WHERE loan_id = ?')) {
+          return [{
+            id: 'kist-1',
+            loan_id: 'loan-1',
+            installment_number: 1,
+            effective_due_date: '2026-01-01',
+            total_due_paise: 110000,
+            principal_component_paise: 100000,
+            markup_component_paise: 10000,
+            principal_paid_paise: 0,
+            markup_paid_paise: 0,
+            status: 'PENDING'
+          }];
+        }
+        return [];
+      });
+
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('repayment_schedules WHERE id = ?')) {
+          return { id: 'kist-1' };
+        }
+        return null;
+      });
+
+      await SyncService.applyServerChange(mockDb, {
+        record_type: 'KIST',
+        operation_type: 'UPDATE',
+        payload: {
+          id: 'kist-1',
+          loan_id: 'loan-1',
+          installment_number: 1,
+          principal_paid_paise: 0,
+          markup_paid_paise: 0,
+          status: 'PENDING'
+        }
+      });
+
+      // Verification: local pending collection was reapplied on top of server snapshot!
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE repayment_schedules SET'),
+        expect.arrayContaining([100000, 10000, 'PAID', 'loan-1', 1])
+      );
     });
   });
 });

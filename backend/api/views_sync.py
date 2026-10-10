@@ -255,6 +255,8 @@ class SyncPushView(APIView):
 
             try:
                 markup_factor = Decimal(str(payload.get('markup_factor', '0')))
+                if markup_factor.is_nan() or markup_factor.is_infinite() or markup_factor < 0:
+                    return 'REJECTED', 'markup_factor must be a finite non-negative number.'
             except Exception:
                 return 'REJECTED', 'Invalid markup_factor.'
 
@@ -464,6 +466,66 @@ class SyncPushView(APIView):
                 return 'REJECTED', 'waived_penalty_paise must be an exact non-negative integer.'
             waived_pen = int(raw_waived_pen or 0)
 
+            accrued_penalty_action = payload.get('accrued_penalty_action', 'NONE')
+            if accrued_penalty_action not in ('NONE', 'WAIVE', 'CAP'):
+                return 'REJECTED', f"Unsupported accrued_penalty_action '{accrued_penalty_action}'."
+
+            actual_waived = 0
+            outstanding_pen = 0
+            if accrued_penalty_action == 'WAIVE' or waived_pen > 0:
+                eff_today = str(payload.get('effective_date') or kist.effective_due_date)
+                if 'T' in eff_today:
+                    eff_today = eff_today.split('T')[0]
+                ledger_service.assess_penalties(loan, eff_today)
+
+                total_assessed = (
+                    LedgerTx.objects
+                    .filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+                    .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+                )
+                total_penalty_paid = (
+                    LedgerTx.objects
+                    .filter(loan=loan, transaction_type='COLLECTION')
+                    .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
+                )
+                total_penalty_waived = (
+                    LedgerTx.objects
+                    .filter(loan=loan, transaction_type='REVERSAL')
+                    .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+                )
+                outstanding_pen = max(0, total_assessed - total_penalty_paid - total_penalty_waived)
+
+                if accrued_penalty_action == 'WAIVE' and waived_pen == 0:
+                    actual_waived = outstanding_pen
+                else:
+                    actual_waived = min(waived_pen, outstanding_pen)
+
+                if actual_waived > 0:
+                    recon_op_id = uuid.uuid4()
+                    tx = LedgerTx.objects.create(
+                        tenant=tenant,
+                        operation_id=recon_op_id,
+                        loan=loan,
+                        transaction_type='REVERSAL',
+                        amount_paise=0,
+                        forgiven_penalty_paise=actual_waived,
+                        effective_date=eff_today
+                    )
+                    SyncOutbox.objects.create(
+                        tenant=tenant,
+                        record_type='TRANSACTION',
+                        record_id=tx.id,
+                        operation_type='INSERT',
+                        payload={
+                            'id': str(tx.id),
+                            'operation_id': str(tx.operation_id),
+                            'loan_id': str(loan.id),
+                            'transaction_type': tx.transaction_type,
+                            'forgiven_penalty_paise': tx.forgiven_penalty_paise,
+                            'effective_date': str(tx.effective_date)
+                        }
+                    )
+
             ScheduleModification.objects.create(
                 tenant=tenant,
                 loan=loan,
@@ -473,8 +535,8 @@ class SyncPushView(APIView):
                 prior_effective_due_date=kist.effective_due_date,
                 revised_effective_due_date=revised_date,
                 reason=payload.get('reason', ''),
-                accrued_penalty_action=payload.get('accrued_penalty_action', 'NONE'),
-                waived_penalty_paise=waived_pen
+                accrued_penalty_action=accrued_penalty_action,
+                waived_penalty_paise=actual_waived
             )
 
             kist.effective_due_date = revised_date
@@ -492,6 +554,30 @@ class SyncPushView(APIView):
                     'effective_due_date': str(kist.effective_due_date)
                 }
             )
+
+            # Check if loan settles as a result of penalty waiver
+            if actual_waived > 0:
+                all_kists_paid = not loan.schedules.exclude(status='PAID').exists()
+                past_p = (
+                    LedgerTx.objects
+                    .filter(loan=loan, transaction_type__in=('COLLECTION', 'REVERSAL'))
+                    .aggregate(total=models.Sum('allocated_principal_paise'))['total'] or 0
+                )
+                remaining_pen = max(0, outstanding_pen - actual_waived)
+                if all_kists_paid and remaining_pen <= 0 and past_p >= loan.principal_paise:
+                    loan.status = 'SETTLED'
+                    loan.save(update_fields=['status'])
+                    SyncOutbox.objects.create(
+                        tenant=tenant,
+                        record_type='LOAN',
+                        record_id=loan.id,
+                        operation_type='UPDATE',
+                        payload={
+                            'id': str(loan.id),
+                            'status': 'SETTLED'
+                        }
+                    )
+
             return 'ACCEPTED', None
 
         elif op_type == 'waive_penalty':
@@ -566,21 +652,16 @@ class SyncPushView(APIView):
             # Check if loan settles as a result of penalty waiver
             remaining_pen = outstanding_pen - actual_waived
             all_kists_paid = not loan.schedules.exclude(status='PAID').exists()
+            past_p = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type__in=('COLLECTION', 'REVERSAL'))
+                .aggregate(total=models.Sum('allocated_principal_paise'))['total'] or 0
+            )
             settled = False
-            if loan.product_type == 'instalment' and all_kists_paid and remaining_pen <= 0:
+            if all_kists_paid and remaining_pen <= 0 and past_p >= loan.principal_paise:
                 loan.status = 'SETTLED'
                 loan.save(update_fields=['status'])
                 settled = True
-            elif loan.product_type == 'bullet' and all_kists_paid and remaining_pen <= 0:
-                past_p = (
-                    LedgerTx.objects
-                    .filter(loan=loan, transaction_type='COLLECTION')
-                    .aggregate(total=models.Sum('allocated_principal_paise'))['total'] or 0
-                )
-                if past_p >= loan.principal_paise:
-                    loan.status = 'SETTLED'
-                    loan.save(update_fields=['status'])
-                    settled = True
 
             if settled:
                 SyncOutbox.objects.create(

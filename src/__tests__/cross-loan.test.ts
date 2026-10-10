@@ -1,5 +1,8 @@
+import { SQLiteDatabase } from 'expo-sqlite';
 import { TransactionRepository } from '../core/database/transactionRepository';
 import { Paise, toPaise } from '../core/domain/money';
+// @ts-ignore
+import { DatabaseSync } from 'node:sqlite';
 
 interface LoanRow {
   id: string;
@@ -433,5 +436,245 @@ describe('Cross-Loan Isolation', () => {
     // Loan should be settled since kist is fully paid and remaining penalty is 0!
     const loan = dbState.loans.find(l => l.id === 'loan-a');
     expect(loan?.status).toBe('SETTLED');
+  });
+});
+
+describe('Real SQLite Engine Integration Guarantees', () => {
+  function createRealSqliteDb(): SQLiteDatabase {
+    const sqlite = new DatabaseSync(':memory:');
+
+    sqlite.exec(`
+      CREATE TABLE borrowers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        phone TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE loans (
+        id TEXT PRIMARY KEY NOT NULL,
+        borrower_id TEXT NOT NULL,
+        principal_paise INTEGER NOT NULL,
+        markup_factor REAL NOT NULL,
+        term_months INTEGER NOT NULL,
+        start_date TEXT NOT NULL,
+        due_day INTEGER NOT NULL,
+        product_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE repayment_schedules (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        installment_number INTEGER NOT NULL,
+        original_due_date TEXT NOT NULL,
+        effective_due_date TEXT NOT NULL,
+        principal_component_paise INTEGER NOT NULL,
+        markup_component_paise INTEGER NOT NULL,
+        total_due_paise INTEGER NOT NULL,
+        principal_paid_paise INTEGER NOT NULL DEFAULT 0,
+        markup_paid_paise INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        UNIQUE (loan_id, installment_number)
+      );
+      CREATE TABLE transactions (
+        id TEXT UNIQUE NOT NULL,
+        operation_id TEXT UNIQUE NOT NULL,
+        loan_id TEXT NOT NULL,
+        sequence_number INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_type TEXT NOT NULL,
+        is_cash INTEGER NOT NULL DEFAULT 1,
+        payment_method TEXT NOT NULL DEFAULT 'CASH',
+        amount_paise INTEGER NOT NULL DEFAULT 0,
+        allocated_principal_paise INTEGER NOT NULL DEFAULT 0,
+        allocated_markup_paise INTEGER NOT NULL DEFAULT 0,
+        allocated_penalty_paise INTEGER NOT NULL DEFAULT 0,
+        unallocated_surplus_paise INTEGER NOT NULL DEFAULT 0,
+        forgiven_principal_paise INTEGER NOT NULL DEFAULT 0,
+        forgiven_markup_paise INTEGER NOT NULL DEFAULT 0,
+        forgiven_penalty_paise INTEGER NOT NULL DEFAULT 0,
+        effective_date TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER prevent_transactions_update
+      BEFORE UPDATE ON transactions
+      BEGIN
+        SELECT RAISE(ABORT, 'Transactions table is append-only: updates are prohibited');
+      END;
+      CREATE TRIGGER prevent_transactions_delete
+      BEFORE DELETE ON transactions
+      BEGIN
+        SELECT RAISE(ABORT, 'Transactions table is append-only: deletions are prohibited');
+      END;
+      CREATE TABLE sync_outbox (
+        id TEXT PRIMARY KEY NOT NULL,
+        operation_id TEXT UNIQUE NOT NULL,
+        operation_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        error_message TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    const adapter: any = {
+      sqlite,
+      async execAsync(sql: string) {
+        sqlite.exec(sql);
+      },
+      async runAsync(sql: string, params: any[] = []) {
+        const bound = params.map(p => p === undefined ? null : p);
+        const stmt = sqlite.prepare(sql);
+        stmt.run(...bound);
+      },
+      async getFirstAsync<T>(sql: string, params: any[] = []): Promise<T | null> {
+        const bound = params.map(p => p === undefined ? null : p);
+        const stmt = sqlite.prepare(sql);
+        const row = stmt.get(...bound) as T | undefined;
+        return row ?? null;
+      },
+      async getAllAsync<T>(sql: string, params: any[] = []): Promise<T[]> {
+        const bound = params.map(p => p === undefined ? null : p);
+        const stmt = sqlite.prepare(sql);
+        return stmt.all(...bound) as T[];
+      },
+      async prepareAsync(sql: string) {
+        const stmt = sqlite.prepare(sql);
+        return {
+          async executeAsync(params: any[] = []) {
+            const bound = params.map(p => p === undefined ? null : p);
+            stmt.run(...bound);
+          },
+          async finalizeAsync() {}
+        };
+      },
+      async withExclusiveTransactionAsync(cb: (tx: any) => Promise<void>) {
+        sqlite.exec('BEGIN IMMEDIATE');
+        try {
+          await cb(adapter);
+          sqlite.exec('COMMIT');
+        } catch (err) {
+          sqlite.exec('ROLLBACK');
+          throw err;
+        }
+      }
+    };
+
+    return adapter as unknown as SQLiteDatabase;
+  }
+
+  it('enforces atomic rollback of ledger, schedules, loan status, and outbox in real SQLite engine on failure', async () => {
+    const db = createRealSqliteDb();
+
+    // Seed baseline
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-real', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules VALUES ('kist-real', 'loan-real', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
+
+    // Verify atomic rollback when an unhandled error happens late in the transaction
+    await expect(
+      db.withExclusiveTransactionAsync(async (tx: any) => {
+        await tx.runAsync(
+          `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+           VALUES ('tx-1', 'op-fail', 'loan-real', 'COLLECTION', 260000, '2026-01-01', '2026-01-01')`
+        );
+        await tx.runAsync(
+          `UPDATE repayment_schedules SET principal_paid_paise = 200000, markup_paid_paise = 60000, status = 'PAID' WHERE id = 'kist-real'`
+        );
+        await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = 'loan-real'`);
+        await tx.runAsync(
+          `INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+           VALUES ('out-1', 'op-fail', 'record_collection', '{}', 'PENDING', '2026-01-01')`
+        );
+
+        // Late failure after all writes
+        throw new Error('Simulated network/disk crash before commit');
+      })
+    ).rejects.toThrow('Simulated network/disk crash before commit');
+
+    // In real SQLite, ALL changes must be completely rolled back:
+    const txCount = (await db.getFirstAsync<{ cnt: number }>(`SELECT count(*) as cnt FROM transactions`))?.cnt;
+    expect(txCount).toBe(0);
+
+    const schedule = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-real'`);
+    expect(schedule?.principal_paid_paise).toBe(0);
+    expect(schedule?.markup_paid_paise).toBe(0);
+    expect(schedule?.status).toBe('PENDING');
+
+    const loan = await db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = 'loan-real'`);
+    expect(loan?.status).toBe('ACTIVE');
+
+    const outboxCount = (await db.getFirstAsync<{ cnt: number }>(`SELECT count(*) as cnt FROM sync_outbox`))?.cnt;
+    expect(outboxCount).toBe(0);
+  });
+
+  it('enforces real SQLite unique constraint preventing duplicate operation_ids', async () => {
+    const db = createRealSqliteDb();
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-1', 'b-1', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+
+    await db.runAsync(
+      `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+       VALUES ('tx-1', 'op-duplicate-check', 'loan-1', 'COLLECTION', 50000, '2026-01-01', '2026-01-01')`
+    );
+
+    await expect(
+      db.runAsync(
+        `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+         VALUES ('tx-2', 'op-duplicate-check', 'loan-1', 'COLLECTION', 50000, '2026-01-01', '2026-01-01')`
+      )
+    ).rejects.toThrow(/UNIQUE constraint failed: transactions\.operation_id/);
+  });
+
+  it('enforces real SQLite trigger prohibiting update and delete on transactions table', async () => {
+    const db = createRealSqliteDb();
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-1', 'b-1', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(
+      `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+       VALUES ('tx-immutability', 'op-immut', 'loan-1', 'COLLECTION', 50000, '2026-01-01', '2026-01-01')`
+    );
+
+    // UPDATE prohibited by trigger
+    await expect(
+      db.runAsync(`UPDATE transactions SET amount_paise = 99999 WHERE id = 'tx-immutability'`)
+    ).rejects.toThrow(/Transactions table is append-only: updates are prohibited/);
+
+    // DELETE prohibited by trigger
+    await expect(
+      db.runAsync(`DELETE FROM transactions WHERE id = 'tx-immutability'`)
+    ).rejects.toThrow(/Transactions table is append-only: deletions are prohibited/);
+  });
+
+  it('executes real end-to-end collection in SQLite with sequence counter and conservation', async () => {
+    const db = createRealSqliteDb();
+    const repo = new TransactionRepository(db);
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-e2e', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules VALUES ('kist-e2e', 'loan-e2e', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
+
+    const res = await repo.recordCashPayment('loan-e2e', 260000 as Paise, 'op-e2e-1', '2026-01-01');
+    expect(res.success).toBe(true);
+
+    const txRow = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-e2e-1'`);
+    expect(txRow).toBeDefined();
+    expect(txRow.sequence_number).toBe(1);
+    expect(txRow.amount_paise).toBe(260000);
+    expect(txRow.allocated_principal_paise).toBe(200000);
+    expect(txRow.allocated_markup_paise).toBe(60000);
+
+    // Conservation check
+    expect(txRow.amount_paise).toBe(
+      txRow.allocated_principal_paise + txRow.allocated_markup_paise + txRow.allocated_penalty_paise + txRow.unallocated_surplus_paise
+    );
+
+    // Loan status transitioned to SETTLED
+    const loanRow = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-e2e'`);
+    expect(loanRow.status).toBe('SETTLED');
+
+    // Outbox record created
+    const outboxRow = await db.getFirstAsync<any>(`SELECT * FROM sync_outbox WHERE operation_id = 'op-e2e-1'`);
+    expect(outboxRow).toBeDefined();
+    expect(outboxRow.operation_type).toBe('record_collection');
   });
 });

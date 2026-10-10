@@ -3,6 +3,7 @@ import * as crypto from 'expo-crypto';
 import { ApiClient } from '../api/client';
 import { AuthStore } from '../auth/authStore';
 import { OutboxManager } from './outbox';
+import { allocatePayment } from '../domain/allocation';
 
 export interface SyncResult {
   pushedCount: number;
@@ -19,44 +20,53 @@ export class SyncService {
     const token = await AuthStore.getToken();
     if (!token) return { pushed: 0, failed: 0 };
 
-    const pending = await OutboxManager.getPending(db, 50);
-    if (pending.length === 0) return { pushed: 0, failed: 0 };
+    let totalPushed = 0;
+    let totalFailed = 0;
 
-    const deviceId = await AuthStore.getDeviceId();
-    const operations = pending.map((record) => ({
-      operation_id: record.operation_id,
-      type: record.operation_type,
-      timestamp: record.created_at,
-      payload: JSON.parse(record.payload),
-    }));
+    while (true) {
+      const pending = await OutboxManager.getPending(db, 50);
+      if (pending.length === 0) break;
 
-    try {
-      const response = await ApiClient.post('/sync/push/', {
-        device_id: deviceId,
-        operations,
-      });
+      const deviceId = await AuthStore.getDeviceId();
+      const operations = pending.map((record) => ({
+        operation_id: record.operation_id,
+        type: record.operation_type,
+        timestamp: record.created_at,
+        payload: JSON.parse(record.payload),
+      }));
 
-      let pushed = 0;
-      let failed = 0;
+      try {
+        const response = await ApiClient.post('/sync/push/', {
+          device_id: deviceId,
+          operations,
+        });
 
-      for (const res of response.results || []) {
-        if (res.status === 'ACCEPTED') {
-          await OutboxManager.markSynced(db, [res.operation_id]);
-          pushed++;
-        } else if (res.status === 'FAILED') {
-          // Transient failure: keep status as 'PENDING' so it remains in queue for retry
-          await OutboxManager.markStatus(db, res.operation_id, 'PENDING', res.error);
-          failed++;
-        } else {
-          await OutboxManager.markStatus(db, res.operation_id, res.status, res.error);
-          failed++;
+        let batchFailed = 0;
+        for (const res of response.results || []) {
+          if (res.status === 'ACCEPTED') {
+            await OutboxManager.markSynced(db, [res.operation_id]);
+            totalPushed++;
+          } else if (res.status === 'FAILED') {
+            await OutboxManager.markStatus(db, res.operation_id, 'PENDING', res.error);
+            batchFailed++;
+          } else {
+            await OutboxManager.markStatus(db, res.operation_id, res.status, res.error);
+            batchFailed++;
+          }
         }
-      }
 
-      return { pushed, failed };
-    } catch {
-      return { pushed: 0, failed: pending.length };
+        totalFailed += batchFailed;
+        if (batchFailed > 0) {
+          // Stop further batch execution on failure to preserve sequential dependency
+          break;
+        }
+      } catch {
+        totalFailed += pending.length;
+        break;
+      }
     }
+
+    return { pushed: totalPushed, failed: totalFailed };
   }
 
   /**
@@ -205,6 +215,9 @@ export class SyncService {
              WHERE id = ?`,
             [payload.principal_paid_paise, payload.markup_paid_paise, payload.status, kistId]
           );
+          if (payload.loan_id) {
+            await this.reapplyPendingCollections(tx, payload.loan_id);
+          }
         }
       }
     } else if (record_type === 'TRANSACTION') {
@@ -292,18 +305,87 @@ export class SyncService {
   }
 
   /**
+   * Reapplies unacknowledged local collection allocations after server schedule snapshots
+   * to ensure local pending payments are never erased.
+   */
+  static async reapplyPendingCollections(tx: SQLiteDatabase, loanId: string): Promise<void> {
+    if (!loanId) return;
+
+    const pendingOutbox = await tx.getAllAsync<{ operation_id: string; payload: string }>(
+      `SELECT operation_id, payload FROM sync_outbox WHERE status = 'PENDING' AND operation_type = 'record_collection' ORDER BY created_at ASC`
+    );
+
+    const relevant = pendingOutbox.filter((item) => {
+      try {
+        const p = JSON.parse(item.payload);
+        return p.loan_id === loanId;
+      } catch {
+        return false;
+      }
+    });
+
+    if (relevant.length === 0) return;
+
+    for (const item of relevant) {
+      const p = JSON.parse(item.payload);
+      const paymentAmount = p.amount_paise || 0;
+      const effectiveDate = p.effective_date || new Date().toISOString().split('T')[0];
+
+      const kists = await tx.getAllAsync<any>(
+        `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
+        [loanId]
+      );
+      if (!kists || kists.length === 0) continue;
+
+      const allocInput = {
+        paymentAmount,
+        kists: kists.map((k) => ({
+          kistNumber: k.installment_number,
+          amountDue: k.total_due_paise,
+          principalDue: k.principal_component_paise,
+          markupDue: k.markup_component_paise,
+          amountPaid: k.principal_paid_paise + k.markup_paid_paise,
+          principalPaid: k.principal_paid_paise,
+          markupPaid: k.markup_paid_paise,
+          isDue: k.effective_due_date <= effectiveDate,
+          status: k.status,
+        })),
+        outstandingPenalty: 0 as any,
+      };
+
+      const result = allocatePayment(allocInput);
+      for (const uk of result.updatedKists) {
+        await tx.runAsync(
+          `UPDATE repayment_schedules SET
+             principal_paid_paise = ?,
+             markup_paid_paise = ?,
+             status = ?
+           WHERE loan_id = ? AND installment_number = ?`,
+          [uk.principalPaid, uk.markupPaid, uk.status || 'PENDING', loanId, uk.kistNumber]
+        );
+      }
+    }
+  }
+
+  /**
    * Full Sync: Pushes pending operations then pulls authoritative state
    */
   static async syncAll(db: SQLiteDatabase): Promise<SyncResult> {
     try {
       const pushRes = await this.pushPending(db);
+      if (pushRes.failed > 0) {
+        return {
+          pushedCount: pushRes.pushed,
+          pulledCount: 0,
+          success: false,
+          errors: [`${pushRes.failed} operations failed to push to server; pull halted to protect local state`],
+        };
+      }
       const pullRes = await this.pullChanges(db);
-      const isSuccess = pushRes.failed === 0;
       return {
         pushedCount: pushRes.pushed,
         pulledCount: pullRes.pulled,
-        success: isSuccess,
-        errors: pushRes.failed > 0 ? [`${pushRes.failed} operations failed to push to server`] : undefined,
+        success: true,
       };
     } catch (err: any) {
       return {

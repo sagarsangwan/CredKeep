@@ -304,7 +304,10 @@ def record_collection(
         all_kists_paid = all(k.status == 'PAID' for k in alloc_result.updated_kists)
         settled_now = False
         if locked_loan.product_type == 'instalment':
-            if all_kists_paid and alloc_result.remaining_penalty <= 0:
+            total_principal_paid = sum(k.principal_paid for k in alloc_result.updated_kists)
+            if (total_principal_paid >= locked_loan.principal_paise and
+                all_kists_paid and
+                alloc_result.remaining_penalty <= 0):
                 locked_loan.status = 'SETTLED'
                 locked_loan.save(update_fields=['status'])
                 settled_now = True
