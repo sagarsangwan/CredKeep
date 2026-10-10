@@ -1,0 +1,1 @@
+﻿Based on the CredKeep V2 product requirements in the user prompt, please propose an independent V2 architecture for the Django/DRF backend, multi-tenant database, threat model, and the offline-to-online sync protocol. Focus on the core system topology and the fundamental challenges. Output your proposal as a technical markdown document.

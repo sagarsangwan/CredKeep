@@ -85,3 +85,17 @@ Thumbs.db
 graphify-out/
 test-bug.js
 .workflow/qa_prompt.txt
+
+# Python & Django
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+backend/.venv/
+*.sqlite3
+.pytest_cache/
+.coverage
+htmlcov/
+

@@ -81,8 +81,9 @@ Execute Git operations locally and autonomously under these invariants:
 4. **Selective Staging**: Stage only files relevant to the specific ticket (`git add <paths>`). Never stage unrelated files or secrets.
 5. **Conventional Commits**: Automatically author descriptive Conventional Commit messages (`feat(...)`, `fix(...)`, `test(...)`, `refactor(...)`, `docs(...)`).
 6. **Report Commit Hash**: Always report the created commit hash and summary to the Product Owner.
-7. **Strict Non-Destructive Boundary**:
-   - **NEVER** automatically push to remote (`git push`).
+7. **Push Before Checkout (Product Owner Standing Rule)**:
+   - Always push the active feature branch to GitHub (`git push origin <branch>`) before checking out or transitioning to another branch.
+8. **Strict Non-Destructive Boundary**:
    - **NEVER** force-push (`git push --force`).
    - **NEVER** delete branches without explicit Product Owner approval.
 
@@ -98,6 +99,7 @@ Execute Git operations locally and autonomously under these invariants:
   - Running verified project-scoped Graphify commands.
   - Installing normal, necessary, compatible project development dependencies.
   - Creating task-specific local Git commits and staging selective changes.
+  - Pushing active branch before checkout to keep GitHub in sync (Product Owner standing rule).
   - Updating `.workflow` state, reports, and handoff documentation.
   - Transitioning between planning, implementation, testing, and code review autonomously.
 
@@ -107,7 +109,7 @@ Execute Git operations locally and autonomously under these invariants:
   - Exposing or changing credentials.
   - Changing system-wide security settings.
   - Running untrusted scripts requiring elevated privileges.
-  - Pushing code to remote repositories (GitHub/`origin`).
+  - Arbitrary or unprompted remote push outside standing rules.
   - Publishing the app or triggering an EAS cloud build.
   - Bypassing operating-system security, fabricating approvals, or using unrestricted command execution to defeat safety controls.
   - Installing system-level software or machine packages.
@@ -230,15 +232,15 @@ Reserve intensive APK analysis and performance tuning for the final V1 stabiliza
 
 ## Multi-Agent Workflow Integration
 This project uses a split-agent model:
-- **Codex:** Planner, Tester, Reviewer. Operates independently.
+- **Codex:** Independent Reviewer for phase boundaries and critical security changes.
 - **Gemini / Antigravity:** Implementer and Orchestrator.
 
-**Coordination Rules:**
-1. All agents MUST read `.workflow/STATE.md` before taking action.
-2. Agents MUST read `AGENTS.md` before every action.
-3. Hand-offs occur by updating `.workflow/HANDOFF.md` and invoking the next agent.
-4. Codex is the final arbiter of QA and tests.
-5. All completed work MUST have local Git commits with conventional commit messages.
+**Coordination Rules (Lightweight V2 Policy):**
+1. Stop requiring Codex planning for every task. Follow the executable backlog in `.workflow/V2_TASKS.md` directly.
+2. Use Gemini for continuous implementation.
+3. Invoke Codex via WSL only for a meaningful independent review at completed phase boundaries (e.g., End of Phase 1).
+4. No redundant full-repository reads or verbose reporting. Use Graphify selectively for unfamiliar code.
+5. All completed work MUST have local Git commits with conventional commit messages following an APPROVED status.
 
 ## graphify
 

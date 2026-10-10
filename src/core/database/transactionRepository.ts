@@ -1,7 +1,9 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { allocatePayment, KistAllocationState } from '../domain/allocation';
-import { Paise } from '../domain/money';
+import { Paise, toPaise } from '../domain/money';
+import { LoanRepository } from './loanRepository';
+import { calculateNewPenalties } from '../domain/penalty';
 
 export class TransactionRepository {
   constructor(private db: SQLiteDatabase) {}
@@ -26,7 +28,6 @@ export class TransactionRepository {
         if (!loan) throw new Error('Loan not found');
         
         // Ensure schedule is up to date (for bullet loans)
-        const { LoanRepository } = require('./loanRepository');
         const loanRepo = new LoanRepository(tx);
         await loanRepo.extendScheduleIfNeeded(loanId, tx);
 
@@ -81,20 +82,19 @@ export class TransactionRepository {
           allocatedPenalty += a.allocatedToPenalty;
         }
 
-        let bulletPrincipalPaid = 0;
+        let pastPrincipalPaid = 0;
         if (loan.product_type === 'bullet') {
           const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
             `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
             [loanId]
           );
-          bulletPrincipalPaid = pastPrincipalPaidRes?.total || 0;
-          const remainingPrincipal = loan.principal_paise - bulletPrincipalPaid;
+          pastPrincipalPaid = pastPrincipalPaidRes?.total || 0;
+          const remainingPrincipal = loan.principal_paise - pastPrincipalPaid;
           
           if (remainingPrincipal > 0 && result.unallocatedFunds > 0) {
             const payPrincipal = Math.min(result.unallocatedFunds, remainingPrincipal) as Paise;
             allocatedPrincipal += payPrincipal;
             result.unallocatedFunds = (result.unallocatedFunds - payPrincipal) as Paise;
-            bulletPrincipalPaid += payPrincipal;
           }
         }
         
@@ -144,7 +144,7 @@ export class TransactionRepository {
              await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
           }
         } else if (loan.product_type === 'bullet') {
-          if (bulletPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+          if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
              await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
           }
         }
@@ -159,7 +159,6 @@ export class TransactionRepository {
     const loan = await this.db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.status !== 'ACTIVE') return 0;
 
-    const { LoanRepository } = require('./loanRepository');
     const loanRepo = new LoanRepository(this.db);
     await loanRepo.extendScheduleIfNeeded(loanId);
 
@@ -174,10 +173,6 @@ export class TransactionRepository {
     );
 
     const assessedDates = new Set<string>(assessments.map(a => a.effective_date));
-
-    // Dynamic import to avoid circular dep
-    const { calculateNewPenalties } = require('../domain/penalty');
-    const { toPaise } = require('../domain/money');
 
     const state = {
       loanId,
@@ -200,7 +195,6 @@ export class TransactionRepository {
     const loan = await tx.getFirstAsync(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.status !== 'ACTIVE') return 0;
 
-    const { LoanRepository } = require('./loanRepository');
     const loanRepo = new LoanRepository(tx);
     await loanRepo.extendScheduleIfNeeded(loanId, tx);
 
@@ -215,10 +209,6 @@ export class TransactionRepository {
     );
 
     const assessedDates = new Set<string>(assessments.map((a: any) => a.effective_date));
-
-    // Dynamic import to avoid circular dep if any, or just require
-    const { calculateNewPenalties, LoanPenaltyState } = require('../domain/penalty');
-    const { toPaise } = require('../domain/money');
 
     const state = {
       loanId,

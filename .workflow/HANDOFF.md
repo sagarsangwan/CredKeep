@@ -1,17 +1,41 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** Borrower profile
-- **Completed Changes:** 
-  - Implemented `getBorrowerSummary` in `TransactionRepository` to aggregate multi-loan balances accurately (including bullet vs instalment rules).
-  - Built out the Borrower Profile UI in `src/app/borrower/[id].tsx` featuring a rich navy summary card, identity details, and active loan list with product badges.
-  - Wired up "Record Payment" and "New Loan" quick actions by passing navigation parameters to `loans.tsx` and `collections.tsx`.
-  - Added support for pre-selecting the borrower in the new loan wizard and collections screen.
-  - Addressed lint errors and verified tests.
-- **Files Modified:** `src/app/borrower/[id].tsx`, `src/app/(tabs)/loans.tsx`, `src/app/(tabs)/collections.tsx`, `src/core/database/transactionRepository.ts`.
-- **Commands Run:** `npm test`, `npx tsc --noEmit`, `npx expo lint`
-- **Test Results:** 35 tests passed.
-- **Git Commit Hashes:** `82c53f8`
-- **Remaining Problems:** None.
-- **Next Agent:** Gemini
-- **Next Action:** Implement PIN/app lock feature.
+- **Task ID:** V2 Phase 4: Sync API (CK-V2-API-001, CK-V2-SYNC-001, CK-V2-SYNC-002)
+- **Completed Changes:**
+  - Implemented Authentication endpoints in `backend/api/views_auth.py` and `backend/api/authentication.py`:
+    - `POST /api/v2/auth/register/`: Registers user, creates owned tenant workspace, generates and returns token.
+    - `POST /api/v2/auth/login/`: Validates credentials, returns token and tenant profile.
+    - `POST /api/v2/auth/device/`: Registers/updates device push token tied to the tenant.
+    - `BearerTokenAuthentication`: Accepts both `Bearer <token>` and `Token <token>` headers.
+    - `TenantMiddleware`: Extracts user from Authorization header to automatically enforce tenant context and PostgreSQL RLS.
+  - Implemented Sync PUSH endpoint in `backend/api/views_sync.py`:
+    - `POST /api/v2/sync/push/`: Accepts ordered batches of offline operations (`create_borrower`, `create_loan`, `record_collection`, `modify_schedule`, `waive_penalty`).
+    - Enforces idempotency via `SyncLog` (returns previous status on repeated `operation_id`).
+    - Triggers waterfall allocation and penalty assessment via `ledger_service.record_collection`.
+    - Handles stale updates (settled loans return `NEEDS_REVIEW`).
+    - Records outbox events for all mutations (`SyncOutbox`).
+  - Implemented Sync PULL endpoint in `backend/api/views_sync.py`:
+    - `GET /api/v2/sync/pull/?cursor={cursor}&limit={limit}`: Sequentially pages tenant state changes from `SyncOutbox`.
+    - Strictly isolates changes by `tenant_id`.
+  - Wired routes in `backend/api/urls.py`.
+  - Added comprehensive test suite in `backend/api/tests_sync.py` covering all auth, push idempotency, financial mutation sync, stale loan review, and pull pagination/isolation scenarios (11 tests).
+- **Files Created/Modified:**
+  - `backend/credkeep_backend/settings.py`
+  - `backend/tenants/middleware.py`
+  - `backend/api/authentication.py`
+  - `backend/api/views_auth.py`
+  - `backend/api/views_sync.py`
+  - `backend/api/urls.py`
+  - `backend/api/tests_sync.py`
+  - `backend/ledger/engine/ledger_service.py`
+  - `backend/pytest.ini`
+  - `.workflow/V2_TASKS.md`
+  - `.workflow/STATE.md`
+- **Commands Run:**
+  - `.venv\Scripts\pytest.exe`: 37 passed, 3 skipped
+  - `.venv\Scripts\python.exe manage.py check`: 0 issues
+  - `npm test`: 38/38 passed
+  - `npx tsc --noEmit`: 0 errors
+  - `npx expo lint`: 0 errors
+- **Next Stage:** Phase 5: Mobile Integration (CK-V2-MOB-001, CK-V2-MOB-002, CK-V2-MOB-003) - awaiting Product Owner authorization

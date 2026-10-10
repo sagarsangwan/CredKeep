@@ -1,0 +1,439 @@
+import uuid
+from decimal import Decimal
+import pytest
+from django.urls import reverse
+from django.contrib.auth.models import User
+from rest_framework.test import APIClient
+from rest_framework.authtoken.models import Token
+
+from tenants.models import Tenant, Device
+from ledger.models import Borrower, LoanAccount, Kist, Transaction as LedgerTx, SyncLog, SyncOutbox
+
+
+@pytest.fixture
+def api_client():
+    return APIClient()
+
+
+@pytest.fixture
+def lender_setup():
+    user = User.objects.create_user(username='lender_api_1', password='secretpassword123')
+    tenant = Tenant.objects.create(name='Lender 1 Workspace', owner=user)
+    token = Token.objects.create(user=user)
+    return user, tenant, token
+
+
+@pytest.fixture
+def other_lender_setup():
+    user = User.objects.create_user(username='lender_api_2', password='secretpassword456')
+    tenant = Tenant.objects.create(name='Lender 2 Workspace', owner=user)
+    token = Token.objects.create(user=user)
+    return user, tenant, token
+
+
+# ============================================================================
+# Authentication API Tests (CK-V2-API-001)
+# ============================================================================
+
+@pytest.mark.django_db
+def test_auth_register_success(api_client):
+    url = reverse('auth-register')
+    payload = {
+        'username': 'new_lender',
+        'password': 'StrongPassword!99',
+        'workspace_name': 'New Lender Microfinance',
+        'email': 'new@lender.com'
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 201
+    assert 'token' in response.data
+    assert response.data['user']['username'] == 'new_lender'
+    assert response.data['tenant']['name'] == 'New Lender Microfinance'
+
+    user = User.objects.get(username='new_lender')
+    assert user.owned_tenant.name == 'New Lender Microfinance'
+    assert Token.objects.filter(user=user).exists()
+
+
+@pytest.mark.django_db
+def test_auth_register_duplicate_username(api_client, lender_setup):
+    url = reverse('auth-register')
+    payload = {
+        'username': 'lender_api_1',
+        'password': 'any_password',
+        'workspace_name': 'Duplicate Test'
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 400
+    assert 'already exists' in response.data['error']
+
+
+@pytest.mark.django_db
+def test_auth_login_success(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    url = reverse('auth-login')
+    payload = {
+        'username': 'lender_api_1',
+        'password': 'secretpassword123'
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['token'] == token.key
+    assert response.data['tenant']['id'] == str(tenant.id)
+
+
+@pytest.mark.django_db
+def test_auth_login_invalid_credentials(api_client, lender_setup):
+    url = reverse('auth-login')
+    payload = {
+        'username': 'lender_api_1',
+        'password': 'wrong_password'
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 401
+    assert 'Invalid credentials' in response.data['error']
+
+
+@pytest.mark.django_db
+def test_auth_device_register(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('auth-device')
+    device_id = str(uuid.uuid4())
+    payload = {
+        'device_id': device_id,
+        'push_token': 'fcm-sample-token-12345'
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['device_id'] == device_id
+    assert response.data['push_token'] == 'fcm-sample-token-12345'
+
+    device = Device.objects.get(id=device_id)
+    assert device.tenant == tenant
+    assert device.push_token == 'fcm-sample-token-12345'
+
+
+# ============================================================================
+# Sync PUSH API Tests (CK-V2-SYNC-001)
+# ============================================================================
+
+@pytest.mark.django_db
+def test_sync_push_create_borrower_and_idempotency(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower_id = str(uuid.uuid4())
+    op_id = str(uuid.uuid4())
+    device_id = str(uuid.uuid4())
+
+    payload = {
+        'device_id': device_id,
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'create_borrower',
+                'payload': {
+                    'id': borrower_id,
+                    'name': 'Ramesh Kumar',
+                    'phone': '9876543210'
+                }
+            }
+        ]
+    }
+
+    # 1. First push
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['operation_id'] == op_id
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Check Borrower in DB
+    borrower = Borrower.objects.get(id=borrower_id)
+    assert borrower.tenant == tenant
+    assert borrower.name == 'Ramesh Kumar'
+    assert borrower.phone == '9876543210'
+
+    # Check SyncLog
+    log = SyncLog.objects.get(tenant=tenant, operation_id=op_id)
+    assert log.status == 'ACCEPTED'
+
+    # Check Outbox
+    outbox = SyncOutbox.objects.filter(tenant=tenant, record_type='BORROWER', record_id=borrower_id).first()
+    assert outbox is not None
+    assert outbox.payload['name'] == 'Ramesh Kumar'
+
+    # 2. Second push with same operation_id (Idempotency)
+    response2 = api_client.post(url, payload, format='json')
+    assert response2.status_code == 200
+    assert response2.data['results'][0]['operation_id'] == op_id
+    assert response2.data['results'][0]['status'] == 'ACCEPTED'
+    assert Borrower.objects.filter(tenant=tenant).count() == 1
+
+
+@pytest.mark.django_db
+def test_sync_push_create_loan_and_kist_generation(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Sunita Devi', phone='9123456780')
+    loan_id = str(uuid.uuid4())
+    op_id = str(uuid.uuid4())
+
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'create_loan',
+                'payload': {
+                    'id': loan_id,
+                    'borrower_id': str(borrower.id),
+                    'principal_paise': 3000000,      # ₹30,000
+                    'markup_factor': '0.1000',       # 10%
+                    'term_months': 3,
+                    'start_date': '2026-01-01',
+                    'due_day': 10,
+                    'product_type': 'instalment'
+                }
+            }
+        ]
+    }
+
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    loan = LoanAccount.objects.get(id=loan_id)
+    assert loan.tenant == tenant
+    assert loan.status == 'ACTIVE'
+
+    # Verify 3 Kists created
+    kists = list(loan.schedules.all().order_by('installment_number'))
+    assert len(kists) == 3
+    assert sum(k.principal_component_paise for k in kists) == 3000000
+    assert sum(k.markup_component_paise for k in kists) == 300000
+
+    # Verify Outbox entries created
+    outbox_loans = SyncOutbox.objects.filter(tenant=tenant, record_type='LOAN', record_id=loan.id)
+    assert outbox_loans.exists()
+    outbox_kists = SyncOutbox.objects.filter(tenant=tenant, record_type='KIST')
+    assert outbox_kists.count() == 3
+
+
+@pytest.mark.django_db
+def test_sync_push_record_collection_and_settlement(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Kavita Patel', phone='9988776655')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=15,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-15',
+        effective_due_date='2026-01-15',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 110000,
+                    'effective_date': '2026-01-15',
+                    'payment_method': 'CASH'
+                }
+            }
+        ]
+    }
+
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Check Transaction created
+    tx = LedgerTx.objects.get(tenant=tenant, operation_id=op_id)
+    assert tx.amount_paise == 110000
+    assert tx.allocated_principal_paise == 100000
+    assert tx.allocated_markup_paise == 10000
+
+    # Check Kist and Loan settled
+    kist.refresh_from_db()
+    assert kist.status == 'PAID'
+    loan.refresh_from_db()
+    assert loan.status == 'SETTLED'
+
+
+@pytest.mark.django_db
+def test_sync_push_stale_settled_loan_needs_review(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Anita', phone='9811223344')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=15,
+        product_type='instalment',
+        status='SETTLED'  # Already settled
+    )
+
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 50000,
+                    'effective_date': '2026-01-20'
+                }
+            }
+        ]
+    }
+
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'NEEDS_REVIEW'
+
+    # Verify no collection transaction was added
+    assert not LedgerTx.objects.filter(tenant=tenant, operation_id=op_id).exists()
+
+
+@pytest.mark.django_db
+def test_sync_push_modify_schedule(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Vikas', phone='9811223355')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=15,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-15',
+        effective_due_date='2026-01-15',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'kist_id': str(kist.id),
+                    'revised_effective_due_date': '2026-01-25',
+                    'reason': 'Borrower requested 10 days grace'
+                }
+            }
+        ]
+    }
+
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    kist.refresh_from_db()
+    assert str(kist.effective_due_date) == '2026-01-25'
+
+
+# ============================================================================
+# Sync PULL API Tests (CK-V2-SYNC-002)
+# ============================================================================
+
+@pytest.mark.django_db
+def test_sync_pull_cursor_pagination_and_isolation(api_client, lender_setup, other_lender_setup):
+    user1, tenant1, token1 = lender_setup
+    user2, tenant2, token2 = other_lender_setup
+
+    # Create 5 outbox entries for Tenant 1
+    for i in range(1, 6):
+        SyncOutbox.objects.create(
+            tenant=tenant1,
+            record_type='BORROWER',
+            record_id=uuid.uuid4(),
+            operation_type='INSERT',
+            payload={'index': i}
+        )
+
+    # Create 2 outbox entries for Tenant 2
+    for i in range(1, 3):
+        SyncOutbox.objects.create(
+            tenant=tenant2,
+            record_type='BORROWER',
+            record_id=uuid.uuid4(),
+            operation_type='INSERT',
+            payload={'other_tenant_index': i}
+        )
+
+    # Lender 1 pulls with limit 2
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token1.key}')
+    url = reverse('sync-pull')
+    response = api_client.get(f"{url}?cursor=0&limit=2")
+    assert response.status_code == 200
+    assert len(response.data['changes']) == 2
+    assert response.data['has_more'] is True
+    next_cursor = response.data['next_cursor']
+
+    # Pull remaining changes for Lender 1
+    response2 = api_client.get(f"{url}?cursor={next_cursor}&limit=10")
+    assert response2.status_code == 200
+    assert len(response2.data['changes']) == 3
+    assert response2.data['has_more'] is False
+
+    # Check all changes belong to tenant1
+    for change in response.data['changes'] + response2.data['changes']:
+        assert 'index' in change['payload']
+        assert 'other_tenant_index' not in change['payload']
+
+    # Lender 2 pulls: only sees their 2 items
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token2.key}')
+    response_other = api_client.get(f"{url}?cursor=0&limit=10")
+    assert response_other.status_code == 200
+    assert len(response_other.data['changes']) == 2
+    for change in response_other.data['changes']:
+        assert 'other_tenant_index' in change['payload']
