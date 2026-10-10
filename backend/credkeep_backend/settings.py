@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     
     # Local apps
     'tenants',
+    'ledger',
     'api',
 ]
 
