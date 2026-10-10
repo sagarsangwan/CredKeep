@@ -1,41 +1,50 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** V2 Phase 4: Sync API (CK-V2-API-001, CK-V2-SYNC-001, CK-V2-SYNC-002)
+- **Task ID:** V2 Phase 5: Mobile Integration (CK-V2-MOB-001, CK-V2-MOB-002, CK-V2-MOB-003)
 - **Completed Changes:**
-  - Implemented Authentication endpoints in `backend/api/views_auth.py` and `backend/api/authentication.py`:
-    - `POST /api/v2/auth/register/`: Registers user, creates owned tenant workspace, generates and returns token.
-    - `POST /api/v2/auth/login/`: Validates credentials, returns token and tenant profile.
-    - `POST /api/v2/auth/device/`: Registers/updates device push token tied to the tenant.
-    - `BearerTokenAuthentication`: Accepts both `Bearer <token>` and `Token <token>` headers.
-    - `TenantMiddleware`: Extracts user from Authorization header to automatically enforce tenant context and PostgreSQL RLS.
-  - Implemented Sync PUSH endpoint in `backend/api/views_sync.py`:
-    - `POST /api/v2/sync/push/`: Accepts ordered batches of offline operations (`create_borrower`, `create_loan`, `record_collection`, `modify_schedule`, `waive_penalty`).
-    - Enforces idempotency via `SyncLog` (returns previous status on repeated `operation_id`).
-    - Triggers waterfall allocation and penalty assessment via `ledger_service.record_collection`.
-    - Handles stale updates (settled loans return `NEEDS_REVIEW`).
-    - Records outbox events for all mutations (`SyncOutbox`).
-  - Implemented Sync PULL endpoint in `backend/api/views_sync.py`:
-    - `GET /api/v2/sync/pull/?cursor={cursor}&limit={limit}`: Sequentially pages tenant state changes from `SyncOutbox`.
-    - Strictly isolates changes by `tenant_id`.
-  - Wired routes in `backend/api/urls.py`.
-  - Added comprehensive test suite in `backend/api/tests_sync.py` covering all auth, push idempotency, financial mutation sync, stale loan review, and pull pagination/isolation scenarios (11 tests).
+  - **Auth & SecureStore (`CK-V2-MOB-001`)**:
+    - Created `src/core/auth/authStore.ts` using `expo-secure-store` to manage `AUTH_TOKEN`, `TENANT_ID`, `DEVICE_ID`, and `USER_INFO`.
+    - Created `src/core/api/client.ts` with auto-attaching `Authorization: Bearer <token>` and configurable `API_BASE_URL`.
+    - Created `src/core/auth/authService.ts` for `login`, `register`, `registerDevice`, and `logout`.
+    - Created Auth screens: `src/app/auth/login.tsx` (with offline bypass fallback) and `src/app/auth/register.tsx`.
+    - Registered `auth` route stack in `src/app/_layout.tsx` and `src/app/auth/_layout.tsx`.
+  - **Local Outbox & Push Protocol (`CK-V2-MOB-002`)**:
+    - Added `sync_outbox` and `sync_meta` tables to SQLite schema in `src/core/database/schema.ts`.
+    - Created `src/core/sync/outbox.ts` (`OutboxManager`) for enqueuing mutations, tracking statuses, and storing sync metadata.
+    - Integrated automatic outbox enqueuing in `BorrowerRepository`, `LoanRepository`, and `TransactionRepository`.
+    - Implemented `SyncService.pushPending(db)` to send queued mutations to `/api/v2/sync/push/` and handle server responses.
+  - **Server State Pull & Reconciliation (`CK-V2-MOB-003`)**:
+    - Implemented `SyncService.pullChanges(db)` to query `/api/v2/sync/pull/?cursor={cursor}` and transactionally merge incoming server events into local SQLite.
+    - Implemented `SyncService.syncAll(db)` coordinating sequential push and pull.
+    - Updated `src/app/(tabs)/more.tsx` to display cloud workspace status, last sync timestamp, and "Sync Now" trigger.
+  - **Testing**:
+    - Added comprehensive unit tests in `src/core/auth/authStore.test.ts` (3 tests) and `src/core/sync/syncService.test.ts` (5 tests).
+    - Verified all 46 mobile tests pass and type checks pass with 0 errors.
 - **Files Created/Modified:**
-  - `backend/credkeep_backend/settings.py`
-  - `backend/tenants/middleware.py`
-  - `backend/api/authentication.py`
-  - `backend/api/views_auth.py`
-  - `backend/api/views_sync.py`
-  - `backend/api/urls.py`
-  - `backend/api/tests_sync.py`
-  - `backend/ledger/engine/ledger_service.py`
-  - `backend/pytest.ini`
+  - `src/core/auth/authStore.ts`
+  - `src/core/auth/authStore.test.ts`
+  - `src/core/api/client.ts`
+  - `src/core/auth/authService.ts`
+  - `src/app/auth/_layout.tsx`
+  - `src/app/auth/login.tsx`
+  - `src/app/auth/register.tsx`
+  - `src/app/_layout.tsx`
+  - `src/core/database/schema.ts`
+  - `src/core/sync/outbox.ts`
+  - `src/core/sync/syncService.ts`
+  - `src/core/sync/syncService.test.ts`
+  - `src/core/database/borrowerRepository.ts`
+  - `src/core/database/loanRepository.ts`
+  - `src/core/database/loanRepository.test.ts`
+  - `src/core/database/transactionRepository.ts`
+  - `src/app/(tabs)/more.tsx`
   - `.workflow/V2_TASKS.md`
   - `.workflow/STATE.md`
 - **Commands Run:**
-  - `.venv\Scripts\pytest.exe`: 37 passed, 3 skipped
-  - `.venv\Scripts\python.exe manage.py check`: 0 issues
-  - `npm test`: 38/38 passed
+  - `npm test`: 46 passed across 11 suites
   - `npx tsc --noEmit`: 0 errors
   - `npx expo lint`: 0 errors
-- **Next Stage:** Phase 5: Mobile Integration (CK-V2-MOB-001, CK-V2-MOB-002, CK-V2-MOB-003) - awaiting Product Owner authorization
+  - `.venv\Scripts\pytest.exe`: 37 passed, 3 skipped
+  - `.venv\Scripts\python.exe manage.py check`: 0 issues
+- **Next Stage:** Phase 6: Migration & Ops (CK-V2-MIG-001, CK-V2-OPS-001, CK-V2-QA-001) - awaiting Product Owner authorization
