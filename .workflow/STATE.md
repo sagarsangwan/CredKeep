@@ -1,15 +1,15 @@
 # CredKeep Project State
 
 ## Current Context
-- **Current Git Branch:** feat/settlement/ck-p0-003
-- **HEAD Commit:** c2b85c0
+- **Current Git Branch:** feat/ui/safe-area
+- **HEAD Commit:** pending
 
 ## Active Task
-- **Task ID:** QA Orchestration Repair (WSL Integration)
+- **Task ID:** Android safe-area layout
 - **Assigned Agent:** Gemini
-- **Current Stage:** Phase 5 - Final Verification
+- **Current Stage:** Planning
 
 ## Status
 - **Known Failures:** None.
-- **Latest Verified Test Results:** WSL_CODEX_WORKING
-- **Next Action:** Resume standard autonomous workflow with native Codex QA fully operational.
+- **Latest Verified Test Results:** 35 passed
+- **Next Action:** Plan and implement the Android safe-area layout fix.

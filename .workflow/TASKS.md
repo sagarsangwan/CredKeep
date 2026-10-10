@@ -18,7 +18,7 @@
 - [x] Stale Home and earnings (Status: REVIEW_BLOCKED - missing valid Codex evidence due to orchestrator defect)
 
 ### P1 (Enhancements)
-- [ ] Borrower profile (Status: BACKLOG)
-- [ ] PIN/app lock (Status: BACKLOG)
+- [x] Borrower profile (Status: VERIFIED)
+- [x] PIN/app lock (Status: VERIFIED)
 - [ ] Android safe-area layout (Status: BACKLOG)
 - [ ] Second-phone installation failure (Status: BACKLOG)
