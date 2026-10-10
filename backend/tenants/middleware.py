@@ -11,6 +11,18 @@ class TenantMiddleware:
 
     def __call__(self, request):
         if not request.user.is_authenticated:
+            auth_header = request.headers.get('Authorization', '')
+            if auth_header:
+                parts = auth_header.split()
+                if len(parts) == 2 and parts[0].lower() in ('bearer', 'token'):
+                    try:
+                        from rest_framework.authtoken.models import Token
+                        token = Token.objects.select_related('user').get(key=parts[1])
+                        request.user = token.user
+                    except Exception:
+                        pass
+
+        if not request.user.is_authenticated:
             request.tenant = None
             return self.get_response(request)
 

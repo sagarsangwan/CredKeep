@@ -233,12 +233,29 @@ def record_collection(
                 orig.status = updated_k.status
                 orig.save(update_fields=['principal_paid_paise', 'markup_paid_paise', 'status'])
 
+                SyncOutbox.objects.create(
+                    tenant=tenant,
+                    record_type='KIST',
+                    record_id=orig.id,
+                    operation_type='UPDATE',
+                    payload={
+                        'id': str(orig.id),
+                        'loan_id': str(locked_loan.id),
+                        'installment_number': orig.installment_number,
+                        'principal_paid_paise': orig.principal_paid_paise,
+                        'markup_paid_paise': orig.markup_paid_paise,
+                        'status': orig.status
+                    }
+                )
+
         # Check for loan settlement
         all_kists_paid = all(k.status == 'PAID' for k in alloc_result.updated_kists)
+        settled_now = False
         if locked_loan.product_type == 'instalment':
             if all_kists_paid and alloc_result.remaining_penalty <= 0:
                 locked_loan.status = 'SETTLED'
                 locked_loan.save(update_fields=['status'])
+                settled_now = True
         elif locked_loan.product_type == 'bullet':
             total_principal_paid = past_principal_paid + allocated_principal
             if (total_principal_paid >= locked_loan.principal_paise and
@@ -246,6 +263,19 @@ def record_collection(
                 alloc_result.remaining_penalty <= 0):
                 locked_loan.status = 'SETTLED'
                 locked_loan.save(update_fields=['status'])
+                settled_now = True
+
+        if settled_now:
+            SyncOutbox.objects.create(
+                tenant=tenant,
+                record_type='LOAN',
+                record_id=locked_loan.id,
+                operation_type='UPDATE',
+                payload={
+                    'id': str(locked_loan.id),
+                    'status': 'SETTLED'
+                }
+            )
 
         # Create SyncOutbox entry for delta-sync
         SyncOutbox.objects.create(
