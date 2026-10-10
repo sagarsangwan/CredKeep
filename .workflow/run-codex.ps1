@@ -17,7 +17,7 @@ if (-not (Test-Path $OutputDir)) {
 $OutputFile = "$OutputDir\$TaskId.md"
 
 # Use Start-Process with cmd.exe to ensure proper output redirection and a real process handle
-$process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"codex exec --sandbox read-only `"$Prompt`" < NUL > $OutputFile 2>&1`"" -PassThru -NoNewWindow
+$process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"codex exec -c windows.sandbox='unelevated' --sandbox read-only `"$Prompt`" < NUL > $OutputFile 2>&1`"" -PassThru -NoNewWindow
 if (-not $process) {
     throw "Failed to start Codex process"
 }
