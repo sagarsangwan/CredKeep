@@ -66,7 +66,7 @@ Select skills autonomously based on the specific engineering task:
 - **Spec Execution**: Auto-select `implement-spec` when claiming and implementing tickets from `.scratch/<feature>/issues/`.
 - **Domain Alignment**: Auto-select `domain-modeling` when introducing or reconciling domain terms against `GLOSSARY.md` and `docs/adr/`.
 - **Pre-Commit Verification**: Auto-select `code-review` to inspect diffs against domain invariants before committing.
-- **UI Screen Construction**: Consult Stitch MCP design assets (`CredKeep V1 — Mobile Design System`, Project ID `8106667901868227815`) for screen layouts, typography, and color tokens.
+- **UI Screen Construction**: Consult Stitch MCP design assets (`CredKeep V1 — Mobile Design System`, Project ID `8106667901868227815`, Expected screens: 11) for screen layouts, typography, and color tokens. NEVER use the old `CredKeep Field Lending App` project.
 
 ### Automated Local Git Workflow
 
@@ -99,3 +99,113 @@ Execute Git operations locally and autonomously under these invariants:
 
 Antigravity operates on session-level model configuration (no per-step dynamic model switching). All autonomous tasks execute on the session's active strong model without simulating unsupported routing.
 
+## Performance Is a Continuous Requirement
+
+CredKeep is a lightweight, offline-first Android financial application.
+
+Performance, efficient storage, and reasonable APK size are permanent engineering requirements, not optional V2 enhancements.
+
+### 1. APK Size
+
+- Investigate unnecessary native modules and bundled assets.
+- Avoid adding dependencies when built-in React Native or Expo functionality is sufficient.
+- Preserve SQLCipher and other required security features.
+- Keep production JavaScript minification and compatible native shrinking enabled.
+- Measure actual APK size after every approved release build.
+- Compare each new artifact with the previous measured release.
+- Investigate significant unexplained size increases.
+- Never claim a particular APK size reduction without measuring it.
+- Never compromise security or financial correctness merely to reduce APK size.
+
+### 2. React Native Performance
+
+- Avoid unnecessary component rerenders.
+- Use FlatList or appropriate virtualized lists for potentially large borrower, loan, or transaction collections.
+- Paginate lengthy histories.
+- Avoid expensive calculations directly inside render functions.
+- Use memoization where profiling or measurable behavior justifies it.
+- Ensure loading, empty, and error states remain responsive.
+- Avoid oversized image assets and unnecessary animation libraries.
+
+### 3. SQLite Performance
+
+- Add appropriate indexes for borrower_id, loan_id, due_date, status, and frequently queried transaction timestamps.
+- Avoid N+1 queries in borrower and loan lists.
+- Use transactions for financial mutations.
+- Paginate long transaction histories.
+- Measure query performance using realistic test datasets.
+- Maintain correct journal and balance reconciliation.
+- Never sacrifice accuracy or auditability for speed.
+
+### 4. Startup & Memory
+
+- Keep app startup lightweight.
+- Initialize the database and security layer correctly.
+- Avoid loading every historical transaction during application startup.
+- Load screen-specific data when necessary.
+- Clean up listeners and subscriptions.
+- Avoid retaining redundant financial data in memory.
+
+### 5. Offline & Battery Efficiency
+
+- All V1 financial workflows must function without connectivity.
+- Avoid unnecessary background polling.
+- Use database mutation notifications or suitable state invalidation instead of continuous queries.
+- Avoid unnecessary background tasks and battery-consuming refresh loops.
+
+### 6. Dependency Discipline
+
+Before installing a package:
+- Verify that it is required.
+- Check compatibility with the installed Expo SDK.
+- Consider APK/native binary size implications.
+- Prefer maintained packages.
+- Avoid duplicate libraries performing the same job.
+
+Do not remove a required dependency solely because it increases APK size.
+
+### 7. Release Optimization Gate
+
+Before requesting approval for a new EAS build:
+
+- All critical business workflows must pass tests.
+- TypeScript, ESLint, and Expo Doctor must pass.
+- Check for unused dependencies and accidentally bundled development assets.
+- Confirm appropriate release minification and resource shrinking.
+- Confirm security and database functionality remain intact.
+- Summarize any known performance concerns.
+
+After an approved EAS build, report:
+
+- Actual APK file size
+- Build profile and Git commit
+- APK architecture(s), if verified
+- Startup performance, if measured
+- Relevant performance regressions
+- Prioritized optimization opportunities
+
+Never invent benchmark results.
+
+### 8. Optimization Priorities
+
+Priority order:
+
+1. Financial correctness and data integrity
+2. Security
+3. Functional offline workflows
+4. UI responsiveness and Android stability
+5. Battery and memory efficiency
+6. APK size reduction
+7. Cosmetic performance improvements
+
+Do not perform broad architectural rewrites merely to reduce bundle size.
+
+### 9. Automation
+
+Apply these rules to every future CredKeep task automatically.
+
+Use profiling and measurement before making invasive optimizations.
+
+Perform safe, low-risk optimization during development.
+
+Reserve intensive APK analysis and performance tuning for the final V1 stabilization phase.

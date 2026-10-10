@@ -2,6 +2,7 @@
   "expo": {
     "name": "credkeep",
     "slug": "credkeep",
+    "scheme": "credkeep",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -10,6 +11,8 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.sagarsangwan.credkeep",
+      "versionCode": 2,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -22,8 +25,32 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-sqlite",
-      "expo-status-bar"
-    ]
+      "expo-router",
+      [
+        "expo-sqlite",
+        {
+          "useSQLCipher": true
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26,
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
+          }
+        }
+      ],
+      "expo-status-bar",
+      "expo-sharing"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "44042971-c1f1-4f47-bec5-04950efe3bbf"
+      }
+    },
+    "owner": "sagarsangwan"
   }
 }

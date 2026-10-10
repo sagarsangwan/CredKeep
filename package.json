@@ -1,24 +1,38 @@
 {
   "name": "credkeep",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "expo-router/entry",
   "dependencies": {
-    "@react-native-community/netinfo": "12.0.1",
+    "crypto-js": "^4.2.0",
     "expo": "~57.0.27",
+    "expo-build-properties": "~57.0.22",
     "expo-constants": "~57.0.21",
+    "expo-crypto": "~57.0.3",
+    "expo-document-picker": "~57.0.3",
+    "expo-file-system": "~57.0.7",
     "expo-linking": "~57.0.12",
+    "expo-local-authentication": "~57.0.3",
+    "expo-router": "~57.0.25",
+    "expo-secure-store": "~57.0.4",
+    "expo-sharing": "~57.0.22",
     "expo-sqlite": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "lucide-react-native": "^1.54.0",
     "react": "19.2.3",
     "react-native": "0.86.3",
     "react-native-safe-area-context": "~5.7.0",
-    "react-native-screens": "~4.26.0"
+    "react-native-screens": "~4.26.0",
+    "react-native-svg": "^15.15.4"
   },
   "devDependencies": {
+    "@react-native/jest-preset": "^0.86.3",
+    "@types/crypto-js": "^4.2.2",
+    "@types/jest": "29.5.14",
     "@types/react": "~19.2.2",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~57.0.2",
+    "jest": "^29.7.0",
+    "jest-expo": "^57.0.5",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -26,7 +40,11 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "test": "jest"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "react-dom": "19.2.3"
+  }
 }
