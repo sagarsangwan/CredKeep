@@ -21,8 +21,10 @@ Set-Content -Path $PromptFile -Value $prompt -Encoding UTF8
 
 $StartTime = Get-Date
 
-$process = Start-Process -FilePath $CmdPath -ArgumentList "/c `"type `"$PromptFile`" | codex exec -c windows.sandbox='unelevated' --sandbox read-only - > `"$OutputFile`" 2>&1`"" -PassThru -NoNewWindow
-if (-not $process) { throw "Failed to start Codex process" }
+$PromptFileWsl = (wsl.exe -e wslpath -a $PromptFile).Trim()
+$OutputFileWsl = (wsl.exe -e wslpath -a $OutputFile).Trim()
+$process = Start-Process -FilePath "wsl.exe" -ArgumentList "-e bash -c `". ~/.nvm/nvm.sh && cat '$PromptFileWsl' | codex exec --sandbox read-only - > '$OutputFileWsl' 2>&1`"" -PassThru -NoNewWindow
+if (-not $process) { throw "Failed to start Codex process via WSL" }
 
 function Kill-ProcessTree($pidToKill) {
     $children = Get-CimInstance Win32_Process | Where-Object ParentProcessId -eq $pidToKill

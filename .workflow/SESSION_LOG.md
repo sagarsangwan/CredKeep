@@ -7,3 +7,5 @@
 - **Diagnostic Action**: Confirmed Codex shell helper on Windows failed to initialize inside `workspace-write` and `read-only` sandbox modes due to `windows.sandbox="elevated"` default config mismatch with standard user execution.
 - **Recovery Action**: Updated `run-codex.ps1` and `qa-codex.ps1` to pass `-c windows.sandbox='unelevated'`. Tested and confirmed this allows Codex to execute sandbox commands correctly.
 - **Incident**: Codex QA timed out for CK-P0-003 after 300s wrapper limit while reviewing the diff, despite fixing the sandbox bug. Preserved as `REVIEW_BLOCKED` per instructions and moved on to `Stale Home and earnings`.
+- **Incident**: The Windows `codex-windows-sandbox-service` was fundamentally broken.
+- **Recovery Action**: Authorized full WSL2 native Codex execution. Installed Node.js LTS and `@openai/codex` in WSL Ubuntu. Updated orchestration wrappers (`qa-codex.ps1` and `run-codex.ps1`) to transparently route all Codex commands through `wsl.exe`. Validated successful native Linux execution and QA validation pipeline without modifying the host Windows security policies. Final status: `WSL_CODEX_WORKING`.

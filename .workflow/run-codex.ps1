@@ -19,10 +19,12 @@ $PromptFile = "$OutputDir\${TaskId}_prompt.txt"
 
 Set-Content -Path $PromptFile -Value $Prompt -Encoding UTF8
 
-# Use Start-Process with cmd.exe to ensure proper output redirection and a real process handle
-$process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"type `"$PromptFile`" | codex exec -c windows.sandbox='unelevated' --sandbox read-only - > `"$OutputFile`" 2>&1`"" -PassThru -NoNewWindow
+# Use Start-Process with wsl.exe to invoke native Linux Codex
+$PromptFileWsl = (wsl.exe -e wslpath -a $PromptFile).Trim()
+$OutputFileWsl = (wsl.exe -e wslpath -a $OutputFile).Trim()
+$process = Start-Process -FilePath "wsl.exe" -ArgumentList "-e bash -c `". ~/.nvm/nvm.sh && cat '$PromptFileWsl' | codex exec --sandbox read-only - > '$OutputFileWsl' 2>&1`"" -PassThru -NoNewWindow
 if (-not $process) {
-    throw "Failed to start Codex process"
+    throw "Failed to start Codex process via WSL"
 }
 
 function Kill-ProcessTree($pidToKill) {

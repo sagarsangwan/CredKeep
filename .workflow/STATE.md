@@ -5,11 +5,11 @@
 - **HEAD Commit:** c2b85c0
 
 ## Active Task
-- **Task ID:** Stale Home and earnings
+- **Task ID:** QA Orchestration Repair (WSL Integration)
 - **Assigned Agent:** Gemini
-- **Current Stage:** Phase 2 - Implementation
+- **Current Stage:** Phase 5 - Final Verification
 
 ## Status
-- **Known Failures:** Codex QA timed out on CK-P0-003 after 300s, preserved as REVIEW_BLOCKED.
-- **Latest Verified Test Results:** PASS (35 tests)
-- **Next Action:** Implement Stale Home and earnings task.
+- **Known Failures:** None.
+- **Latest Verified Test Results:** WSL_CODEX_WORKING
+- **Next Action:** Resume standard autonomous workflow with native Codex QA fully operational.
