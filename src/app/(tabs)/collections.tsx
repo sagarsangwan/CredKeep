@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, StyleSheet, Alert, ScrollView, FlatList, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as crypto from 'expo-crypto';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
@@ -13,6 +14,7 @@ import { Borrower } from '../../core/database/borrowerRepository';
 import { Paise, formatINR } from '../../core/domain/money';
 
 export default function CollectionsScreen() {
+  const { borrowerId } = useLocalSearchParams();
   const { loans, transactions, borrowers, refreshVersion, triggerRefresh } = useDatabase();
   const [loansList, setLoansList] = useState<Loan[]>([]);
   const [borrowersList, setBorrowersList] = useState<Borrower[]>([]);
@@ -55,6 +57,15 @@ export default function CollectionsScreen() {
   const getBorrowerName = (id: string) => {
     return borrowersList.find(b => b.id === id)?.name || 'Unknown Borrower';
   };
+
+  useEffect(() => {
+    if (borrowerId && activeLoans.length > 0 && !selectedLoanId) {
+      const loanForBorrower = activeLoans.find(l => l.borrower_id === borrowerId);
+      if (loanForBorrower) {
+        setTimeout(() => setSelectedLoanId(loanForBorrower.id), 0);
+      }
+    }
+  }, [borrowerId, activeLoans, selectedLoanId]);
 
   const handlePayment = async () => {
     if (!selectedLoanId || !amountInr) {

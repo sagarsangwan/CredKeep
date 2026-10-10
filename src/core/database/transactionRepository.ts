@@ -318,4 +318,61 @@ export class TransactionRepository {
       totalEarnings: (collectedQuery?.markup_received || 0) + penaltyReceived
     };
   }
+
+  async getBorrowerSummary(borrowerId: string) {
+    const loans = await this.db.getAllAsync<any>(
+      `SELECT * FROM loans WHERE borrower_id = ?`,
+      [borrowerId]
+    );
+
+    let totalPrincipalRemaining = 0;
+    let totalMarkupRemaining = 0;
+    let totalPenaltyRemaining = 0;
+    let activeLoanCount = 0;
+
+    for (const loan of loans) {
+      if (loan.status === 'ACTIVE') {
+        activeLoanCount++;
+      }
+
+      const earnings = await this.getEarningsSummary({ loanId: loan.id });
+      totalPenaltyRemaining += earnings.outstandingPenalty;
+
+      const kistSum = await this.db.getFirstAsync<any>(`
+        SELECT 
+          SUM(principal_component_paise) as total_principal,
+          SUM(markup_component_paise) as total_markup,
+          SUM(principal_paid_paise) as paid_principal,
+          SUM(markup_paid_paise) as paid_markup
+        FROM repayment_schedules
+        WHERE loan_id = ?
+      `, [loan.id]);
+
+      const markupRem = (kistSum?.total_markup || 0) - (kistSum?.paid_markup || 0);
+      totalMarkupRemaining += Math.max(0, markupRem);
+
+      if (loan.product_type === 'bullet') {
+        const bulletPrincipal = loan.principal_paise;
+        const paidQuery = await this.db.getFirstAsync<any>(`
+          SELECT SUM(allocated_principal_paise) as paid_principal, SUM(forgiven_principal_paise) as waived_principal
+          FROM transactions 
+          WHERE loan_id = ?
+        `, [loan.id]);
+        const paid = paidQuery?.paid_principal || 0;
+        const waived = paidQuery?.waived_principal || 0;
+        totalPrincipalRemaining += Math.max(0, bulletPrincipal - paid - waived);
+      } else {
+        const prinRem = (kistSum?.total_principal || 0) - (kistSum?.paid_principal || 0);
+        totalPrincipalRemaining += Math.max(0, prinRem);
+      }
+    }
+
+    return {
+      activeLoanCount,
+      totalPrincipalRemaining,
+      totalMarkupRemaining,
+      totalPenaltyRemaining,
+      totalOutstanding: totalPrincipalRemaining + totalMarkupRemaining + totalPenaltyRemaining
+    };
+  }
 }
