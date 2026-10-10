@@ -3,13 +3,13 @@
 This backlog drives the autonomous execution of CredKeep V2.
 
 ## Phase 1: Backend Foundation
-- [ ] **CK-V2-BE-001**: Scaffold Django Project & Config
+- [x] **CK-V2-BE-001**: Scaffold Django Project & Config
   - *Scope:* Init Django, DRF, PostgreSQL connection (psycopg3).
   - *Acceptance:* `python manage.py check` passes.
-- [ ] **CK-V2-SEC-001**: Implement Identity & Tenancy Models
+- [x] **CK-V2-SEC-001**: Implement Identity & Tenancy Models
   - *Scope:* Create Tenant, User linking, Device models.
   - *Acceptance:* Models created, initial migrations applied.
-- [ ] **CK-V2-SEC-002**: Implement PostgreSQL RLS
+- [x] **CK-V2-SEC-002**: Implement PostgreSQL RLS
   - *Scope:* Add RunSQL migrations to enforce `tenant_id` scoping.
   - *Acceptance:* Tests prove cross-tenant queries return empty.
 
