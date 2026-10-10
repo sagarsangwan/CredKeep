@@ -1,12 +1,12 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** CK-P0-003
-- **Completed Changes:** Implemented bullet loan principal repayment in `transactionRepository.ts`. Bullet loans now allocate unallocated surplus towards principal repayment and settle the loan automatically when principal is fully paid.
-- **Files Modified:** `src/core/database/transactionRepository.ts`, `src/__tests__/bullet-loan.test.ts`
-- **Commands Run:** `npm test`, `npx tsc --noEmit`, `npx expo lint`
-- **Test Results:** PASS (35 tests)
-- **Git Commit Hashes:** pending commit
+- **Task ID:** Stale Home and earnings
+- **Completed Changes:** CK-P0-003 implemented but Codex QA timed out and is REVIEW_BLOCKED. Moving to Stale Home task.
+- **Files Modified:** None for this task yet.
+- **Commands Run:** None
+- **Test Results:** N/A
+- **Git Commit Hashes:** N/A
 - **Remaining Problems:** None
-- **Next Agent:** Codex
-- **Next Action:** Verify CK-P0-003 and approve completion.
+- **Next Agent:** Gemini
+- **Next Action:** Implement Stale Home and earnings task.

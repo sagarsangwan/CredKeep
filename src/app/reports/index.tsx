@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import { View, StyleSheet, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Typography } from '../../ui/Typography';
@@ -6,21 +6,23 @@ import { Card } from '../../ui/Card';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
 import { formatINR } from '../../core/domain/money';
+import { useFocusEffect } from 'expo-router';
 
 export default function ReportsScreen() {
   const { transactions, refreshVersion } = useDatabase();
   const [globalEarnings, setGlobalEarnings] = useState<any>(null);
 
-  useEffect(() => {
-    async function load() {
-      if (transactions) {
-        // null filters = global sum
-        const summary = await transactions.getEarningsSummary();
-        setGlobalEarnings(summary);
+  useFocusEffect(
+    useCallback(() => {
+      async function load() {
+        if (transactions) {
+          const summary = await transactions.getEarningsSummary();
+          setGlobalEarnings(summary);
+        }
       }
-    }
-    load();
-  }, [transactions, refreshVersion]);
+      load();
+    }, [transactions])
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
