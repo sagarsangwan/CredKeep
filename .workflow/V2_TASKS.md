@@ -29,11 +29,11 @@ This backlog drives the autonomous execution of CredKeep V2.
   - *Acceptance:* Unit tests pass against V1 fixtures.
 
 ## Phase 4: Sync API
-- [ ] **CK-V2-API-001**: Implement Authentication API
+- [x] **CK-V2-API-001**: Implement Authentication API
   - *Scope:* Registration and Login endpoints.
-- [ ] **CK-V2-SYNC-001**: Implement PUSH Endpoint
+- [x] **CK-V2-SYNC-001**: Implement PUSH Endpoint
   - *Scope:* Accept batch operations, idempotency check, trigger allocations.
-- [ ] **CK-V2-SYNC-002**: Implement PULL Endpoint
+- [x] **CK-V2-SYNC-002**: Implement PULL Endpoint
   - *Scope:* Return state changes since `cursor`.
 
 ## Phase 5: Mobile Integration

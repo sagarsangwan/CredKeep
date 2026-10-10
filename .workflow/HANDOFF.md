@@ -1,39 +1,41 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** V2 Phase 3: Financial Engine Core (CK-V2-LEDGER-003, CK-V2-LEDGER-004)
+- **Task ID:** V2 Phase 4: Sync API (CK-V2-API-001, CK-V2-SYNC-001, CK-V2-SYNC-002)
 - **Completed Changes:**
-  - Ported V1 payment allocation engine to Python in `backend/ledger/engine/allocation.py`:
-    - Strict `INSTALMENT_FIRST` waterfall: due instalments (oldest first, markup then principal) -> outstanding loan penalties -> future non-due instalments -> unallocated funds.
-    - Exact integer Paise math.
-  - Ported V1 penalty assessment engine to Python in `backend/ledger/engine/penalty.py`:
-    - Non-compounding ₹100/calendar day penalty for overdue loans starting the day after the earliest unpaid due date.
-    - Multi-kist deduplication: assesses one fee per day for the overdue loan.
-  - Implemented schedule generator and calendar due-date calculation in `backend/ledger/engine/schedule.py`:
-    - Month-end boundary adjustments (Feb 28/29, 30-day months).
-    - Exact `divide_paise` distribution conserving total Paise.
-  - Implemented transactional `record_collection` service in `backend/ledger/engine/ledger_service.py`:
-    - Idempotency via `operation_id`.
-    - Auto schedule extension for bullet loans.
-    - Transactional penalty assessments.
-    - Waterfall allocation execution.
-    - Bullet loan remaining principal reduction.
-    - Append-only `Transaction` creation and `Kist` updates.
-    - Automatic loan settlement transition.
-    - `SyncOutbox` event generation for mobile sync.
-  - Comprehensive unit test suites ported and verified in `backend/ledger/tests.py` against all V1 test fixtures (all 26 test cases passing).
+  - Implemented Authentication endpoints in `backend/api/views_auth.py` and `backend/api/authentication.py`:
+    - `POST /api/v2/auth/register/`: Registers user, creates owned tenant workspace, generates and returns token.
+    - `POST /api/v2/auth/login/`: Validates credentials, returns token and tenant profile.
+    - `POST /api/v2/auth/device/`: Registers/updates device push token tied to the tenant.
+    - `BearerTokenAuthentication`: Accepts both `Bearer <token>` and `Token <token>` headers.
+    - `TenantMiddleware`: Extracts user from Authorization header to automatically enforce tenant context and PostgreSQL RLS.
+  - Implemented Sync PUSH endpoint in `backend/api/views_sync.py`:
+    - `POST /api/v2/sync/push/`: Accepts ordered batches of offline operations (`create_borrower`, `create_loan`, `record_collection`, `modify_schedule`, `waive_penalty`).
+    - Enforces idempotency via `SyncLog` (returns previous status on repeated `operation_id`).
+    - Triggers waterfall allocation and penalty assessment via `ledger_service.record_collection`.
+    - Handles stale updates (settled loans return `NEEDS_REVIEW`).
+    - Records outbox events for all mutations (`SyncOutbox`).
+  - Implemented Sync PULL endpoint in `backend/api/views_sync.py`:
+    - `GET /api/v2/sync/pull/?cursor={cursor}&limit={limit}`: Sequentially pages tenant state changes from `SyncOutbox`.
+    - Strictly isolates changes by `tenant_id`.
+  - Wired routes in `backend/api/urls.py`.
+  - Added comprehensive test suite in `backend/api/tests_sync.py` covering all auth, push idempotency, financial mutation sync, stale loan review, and pull pagination/isolation scenarios (11 tests).
 - **Files Created/Modified:**
-  - `backend/ledger/engine/__init__.py`
-  - `backend/ledger/engine/allocation.py`
-  - `backend/ledger/engine/penalty.py`
-  - `backend/ledger/engine/schedule.py`
+  - `backend/credkeep_backend/settings.py`
+  - `backend/tenants/middleware.py`
+  - `backend/api/authentication.py`
+  - `backend/api/views_auth.py`
+  - `backend/api/views_sync.py`
+  - `backend/api/urls.py`
+  - `backend/api/tests_sync.py`
   - `backend/ledger/engine/ledger_service.py`
-  - `backend/ledger/tests.py`
+  - `backend/pytest.ini`
+  - `.workflow/V2_TASKS.md`
+  - `.workflow/STATE.md`
 - **Commands Run:**
-  - `.venv\Scripts\pytest.exe`: 26 passed, 3 skipped
+  - `.venv\Scripts\pytest.exe`: 37 passed, 3 skipped
   - `.venv\Scripts\python.exe manage.py check`: 0 issues
   - `npm test`: 38/38 passed
   - `npx tsc --noEmit`: 0 errors
   - `npx expo lint`: 0 errors
-- **Git Commit Hash:** `53aa170`
-- **Next Stage:** Phase 4: Sync API (CK-V2-API-001, CK-V2-SYNC-001, CK-V2-SYNC-002) - awaiting Product Owner authorization
+- **Next Stage:** Phase 5: Mobile Integration (CK-V2-MOB-001, CK-V2-MOB-002, CK-V2-MOB-003) - awaiting Product Owner authorization
