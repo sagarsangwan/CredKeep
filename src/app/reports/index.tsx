@@ -6,7 +6,7 @@ import { Card } from '../../ui/Card';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
 import { formatINR } from '../../core/domain/money';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, Stack } from 'expo-router';
 
 export default function ReportsScreen() {
   const { transactions, refreshVersion } = useDatabase();
@@ -26,6 +26,7 @@ export default function ReportsScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
+      <Stack.Screen options={{ headerShown: false }} />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         <Typography variant="headlineMd" style={styles.title}>Earnings & Reports</Typography>
         

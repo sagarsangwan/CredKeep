@@ -1,16 +1,17 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** QA Orchestration Repair (WSL Integration)
+- **Task ID:** Borrower profile
 - **Completed Changes:** 
-  - Installed Node.js LTS and `@openai/codex` globally in WSL Ubuntu.
-  - Authenticated Codex interactively via the local server.
-  - Updated `.workflow/run-codex.ps1` and `.workflow/qa-codex.ps1` to seamlessly pass prompts to `wsl.exe` and execute native Linux Codex.
-  - Successfully verified execution using a real QA review against an existing commit, confirming that the orchestrator rejects `REWORK` verdicts with a nonzero exit code.
-- **Files Modified:** `.workflow/run-codex.ps1`, `.workflow/qa-codex.ps1`, `.workflow/STATE.md`, `.workflow/SESSION_LOG.md`
-- **Commands Run:** Native Linux `codex` through `wsl.exe`.
-- **Test Results:** WSL_CODEX_WORKING
-- **Git Commit Hashes:** N/A (about to commit)
+  - Implemented `getBorrowerSummary` in `TransactionRepository` to aggregate multi-loan balances accurately (including bullet vs instalment rules).
+  - Built out the Borrower Profile UI in `src/app/borrower/[id].tsx` featuring a rich navy summary card, identity details, and active loan list with product badges.
+  - Wired up "Record Payment" and "New Loan" quick actions by passing navigation parameters to `loans.tsx` and `collections.tsx`.
+  - Added support for pre-selecting the borrower in the new loan wizard and collections screen.
+  - Addressed lint errors and verified tests.
+- **Files Modified:** `src/app/borrower/[id].tsx`, `src/app/(tabs)/loans.tsx`, `src/app/(tabs)/collections.tsx`, `src/core/database/transactionRepository.ts`.
+- **Commands Run:** `npm test`, `npx tsc --noEmit`, `npx expo lint`
+- **Test Results:** 35 tests passed.
+- **Git Commit Hashes:** `82c53f8`
 - **Remaining Problems:** None.
 - **Next Agent:** Gemini
-- **Next Action:** Resume standard autonomous workflow.
+- **Next Action:** Implement PIN/app lock feature.

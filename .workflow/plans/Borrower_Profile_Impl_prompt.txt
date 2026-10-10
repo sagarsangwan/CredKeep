@@ -1,0 +1,1 @@
+﻿Implement the Borrower Profile screen (src/app/borrower/[id].tsx) following the plan in .workflow/plans/Borrower_Profile.md. Use the tdd skill for the financial calculations (the aggregate summary query). Build the UI, update navigation params for Record Payment and New Loan, and ensure offline layout correctness. Make a local git commit when passing.

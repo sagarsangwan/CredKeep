@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, StyleSheet, ScrollView, TouchableOpacity, Linking, Alert } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, Stack, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Phone, Plus, CreditCard } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
@@ -54,7 +54,8 @@ export default function BorrowerDetailsScreen() {
   }, [loadData, refreshVersion]);
 
   if (!borrower) return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom', 'left', 'right']}>
+      <Stack.Screen options={{ title: 'Customer Profile', headerShown: true }} />
       <View style={[styles.container, styles.centered]}>
         <Typography variant="bodyLg">Loading...</Typography>
       </View>
@@ -74,7 +75,8 @@ export default function BorrowerDetailsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom', 'left', 'right']}>
+      <Stack.Screen options={{ title: 'Customer Profile', headerShown: true }} />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         
         {/* Profile Card */}

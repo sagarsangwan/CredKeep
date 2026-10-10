@@ -4,6 +4,7 @@ import { Home, Users, Landmark, Banknote, Menu } from 'lucide-react-native';
 export default function TabLayout() {
   return (
     <Tabs screenOptions={{ 
+      headerShown: false,
       tabBarActiveTintColor: '#14283F',
       tabBarInactiveTintColor: '#64748B',
       headerStyle: {

@@ -42,7 +42,7 @@ export default function HomeScreen() {
   );
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <View>
           <Typography variant="headlineSm" color={theme.colors.onPrimary} style={styles.brand}>CredKeep</Typography>

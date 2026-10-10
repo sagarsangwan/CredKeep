@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { View, StyleSheet, Alert, Switch, Modal } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { Shield } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { theme } from '../../ui/theme';
@@ -121,6 +121,7 @@ export default function SecuritySettingsScreen() {
         )}
 
         <Modal visible={isSettingPin} animationType="slide" presentationStyle="pageSheet">
+          <SafeAreaProvider>
           <SafeAreaView style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <Typography variant="headlineMd" color={theme.colors.primary}>
@@ -152,6 +153,7 @@ export default function SecuritySettingsScreen() {
               style={{ marginTop: 40 }} 
             />
           </SafeAreaView>
+          </SafeAreaProvider>
         </Modal>
       </View>
     </SafeAreaView>

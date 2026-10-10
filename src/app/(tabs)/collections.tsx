@@ -96,7 +96,7 @@ export default function CollectionsScreen() {
 
   if (!selectedLoanId) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
           <Typography variant="headlineMd" color={theme.colors.onPrimary}>Select Loan for Collection</Typography>
         </View>
@@ -127,7 +127,7 @@ export default function CollectionsScreen() {
   const totalPenalty = previewPenalty + outstandingPenalty;
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
     <ScrollView contentContainerStyle={styles.content}>
       <View style={styles.row}>
         <TouchableOpacity onPress={() => { setSelectedLoanId(null); setResult(null); }}>

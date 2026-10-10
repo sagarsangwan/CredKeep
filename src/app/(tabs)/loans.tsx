@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, ScrollView, TouchableOpacity } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
@@ -228,7 +228,7 @@ export default function LoansScreen() {
   );
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <Typography variant="headlineMd" color={theme.colors.onPrimary}>Active Loans</Typography>
         <Button title="New Loan" onPress={() => { resetForm(); setModalVisible(true); }} style={styles.headerBtn} />
@@ -261,8 +261,9 @@ export default function LoansScreen() {
       />
 
       <Modal visible={isModalVisible} animationType="slide" presentationStyle="pageSheet">
-        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }} edges={['top']}>
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <SafeAreaProvider>
+          <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }}>
+            <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <View style={styles.modalHeader}>
             <TouchableOpacity onPress={() => setModalVisible(false)}><Typography color={theme.colors.primary}>Cancel</Typography></TouchableOpacity>
             <Typography variant="labelLg">New Loan - Step {step}/4</Typography>
@@ -273,9 +274,10 @@ export default function LoansScreen() {
           {step === 3 && renderStep3()}
           {step === 4 && renderStep4()}
         </KeyboardAvoidingView>
-        </SafeAreaView>
+          </SafeAreaView>
+        </SafeAreaProvider>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 

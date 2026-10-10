@@ -20,5 +20,5 @@
 ### P1 (Enhancements)
 - [x] Borrower profile (Status: VERIFIED)
 - [x] PIN/app lock (Status: VERIFIED)
-- [ ] Android safe-area layout (Status: BACKLOG)
+- [x] Android safe-area layout (Status: VERIFIED)
 - [ ] Second-phone installation failure (Status: BACKLOG)

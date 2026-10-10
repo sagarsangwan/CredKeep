@@ -1,17 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { View, StyleSheet, ScrollView } from 'react-native';
 import { useLocalSearchParams, Stack } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Typography } from '../../ui/Typography';
 import { Card } from '../../ui/Card';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
 import { Loan } from '../../core/database/loanRepository';
+import { formatINR } from '../../core/domain/money';
 
 export default function LoanDetailsScreen() {
   const { id } = useLocalSearchParams();
-  const { loans } = useDatabase();
+  const { loans, transactions } = useDatabase();
   const [loan, setLoan] = useState<Loan | null>(null);
   const [schedule, setSchedule] = useState<any[]>([]);
+  const [earnings, setEarnings] = useState<any>(null);
 
   useEffect(() => {
     async function load() {
@@ -21,31 +24,59 @@ export default function LoanDetailsScreen() {
         if (l) {
           const s = await loans.getSchedule(id);
           setSchedule(s);
+          if (transactions) {
+            const summary = await transactions.getEarningsSummary({ loanId: l.id });
+            setEarnings(summary);
+          }
         }
       }
     }
     load();
-  }, [id, loans]);
+  }, [id, loans, transactions]);
 
   if (!loan) {
     return (
-      <View style={styles.center}>
+      <SafeAreaView style={styles.center} edges={['bottom', 'left', 'right']}>
+        <Stack.Screen options={{ title: 'Loan Details', headerShown: true }} />
         <Typography>Loading...</Typography>
-      </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ padding: theme.spacing.lg, paddingBottom: 40 }}>
-      <Stack.Screen options={{ title: 'Loan Details' }} />
-      
-      <Card style={styles.headerCard}>
+    <SafeAreaView style={styles.container} edges={['bottom', 'left', 'right']}>
+      <ScrollView contentContainerStyle={{ padding: theme.spacing.lg, paddingBottom: 40 }}>
+        <Stack.Screen options={{ title: 'Loan Details', headerShown: true }} />
+        
+        <Card style={styles.headerCard}>
         <Typography variant="headlineMd">Principal: {loan.principal_paise / 100} INR</Typography>
         <Typography variant="bodyLg">Status: {loan.status}</Typography>
         <Typography variant="bodyMd" color={theme.colors.textSecondary}>
           Created: {new Date(loan.created_at).toLocaleDateString()}
         </Typography>
       </Card>
+
+      {earnings && (
+        <Card style={styles.earningsCard}>
+          <Typography variant="titleMd" style={{marginBottom: 10}}>Earnings & Collection Summary</Typography>
+          <View style={styles.row}>
+            <Typography variant="bodyMd">Principal Returned:</Typography>
+            <Typography variant="bodyMd">{formatINR(earnings.principalReturned)}</Typography>
+          </View>
+          <View style={styles.row}>
+            <Typography variant="bodyMd">Markup Received:</Typography>
+            <Typography variant="bodyMd">{formatINR(earnings.markupReceived)}</Typography>
+          </View>
+          <View style={styles.row}>
+            <Typography variant="bodyMd">Penalty Received:</Typography>
+            <Typography variant="bodyMd">{formatINR(earnings.penaltyReceived)}</Typography>
+          </View>
+          <View style={[styles.row, {marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderColor: theme.colors.outlineVariant}]}>
+            <Typography variant="labelLg">Total Actual Earnings:</Typography>
+            <Typography variant="labelLg" color={theme.colors.success}>{formatINR(earnings.totalEarnings)}</Typography>
+          </View>
+        </Card>
+      )}
 
       <Typography variant="headlineSm" style={styles.sectionTitle}>Repayment Schedule</Typography>
       
@@ -74,7 +105,8 @@ export default function LoanDetailsScreen() {
           </View>
         </Card>
       ))}
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
@@ -91,6 +123,15 @@ const styles = StyleSheet.create({
   headerCard: {
     marginBottom: theme.spacing.xl,
     backgroundColor: theme.colors.primaryContainer,
+  },
+  earningsCard: {
+    marginBottom: theme.spacing.xl,
+    backgroundColor: theme.colors.surfaceTint,
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
   },
   sectionTitle: {
     marginBottom: theme.spacing.md,

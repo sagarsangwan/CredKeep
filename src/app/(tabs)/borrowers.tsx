@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
 import { Card } from '../../ui/Card';
@@ -46,7 +46,7 @@ export default function BorrowersScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <Typography variant="headlineMd" color={theme.colors.onPrimary}>Customers</Typography>
         <Button title="Add New" onPress={() => setModalVisible(true)} style={styles.headerBtn} />
@@ -70,7 +70,8 @@ export default function BorrowersScreen() {
       />
 
       <Modal visible={isModalVisible} animationType="slide" presentationStyle="pageSheet">
-        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }} edges={['top']}>
+        <SafeAreaProvider>
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }}>
         <KeyboardAvoidingView 
           style={{ flex: 1 }} 
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -107,6 +108,7 @@ export default function BorrowersScreen() {
           </View>
         </KeyboardAvoidingView>
         </SafeAreaView>
+        </SafeAreaProvider>
       </Modal>
     </SafeAreaView>
   );
