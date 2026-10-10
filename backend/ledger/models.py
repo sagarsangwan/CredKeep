@@ -163,6 +163,7 @@ class Transaction(models.Model):
         ordering = ['tenant', 'sequence_number']
         constraints = [
             UniqueConstraint(fields=['tenant', 'operation_id'], name='unique_tenant_transaction_operation'),
+            UniqueConstraint(fields=['tenant', 'sequence_number'], name='unique_tenant_transaction_sequence'),
             CheckConstraint(condition=Q(amount_paise__gte=0), name='check_transaction_amount_non_negative'),
             CheckConstraint(
                 condition=Q(
@@ -209,14 +210,20 @@ class Transaction(models.Model):
         if self.sequence_number is None:
             # Atomic per-tenant sequence assignment
             with transaction.atomic():
-                last = (
-                    Transaction.objects
-                    .select_for_update()
-                    .filter(tenant=self.tenant)
-                    .order_by('-sequence_number')
-                    .first()
-                )
-                self.sequence_number = (last.sequence_number + 1) if (last and last.sequence_number) else 1
+                from tenants.models import Tenant
+                tenant = Tenant.objects.select_for_update().get(id=self.tenant_id)
+                if tenant.transaction_sequence_counter == 0:
+                    last = (
+                        Transaction.objects
+                        .filter(tenant=tenant)
+                        .order_by('-sequence_number')
+                        .first()
+                    )
+                    if last and last.sequence_number:
+                        tenant.transaction_sequence_counter = last.sequence_number
+                tenant.transaction_sequence_counter += 1
+                tenant.save(update_fields=['transaction_sequence_counter'])
+                self.sequence_number = tenant.transaction_sequence_counter
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)

@@ -1,6 +1,6 @@
 import calendar
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Union
 
 @dataclass
@@ -63,9 +63,10 @@ def generate_schedule(
         raise ValueError("markup_factor must be a finite number")
 
     if isinstance(markup_factor, float):
-        total_markup = round(principal_paise * markup_factor)
+        markup_dec = Decimal(str(markup_factor))
     else:
-        total_markup = int(round(Decimal(principal_paise) * markup_factor))
+        markup_dec = Decimal(markup_factor)
+    total_markup = int((Decimal(principal_paise) * markup_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
 
     schedule: List[ScheduledKistData] = []
 

@@ -1055,13 +1055,16 @@ def test_reject_unsupported_product_type_without_schedule(api_client, lender_set
 
 @pytest.mark.django_db(transaction=True)
 def test_concurrent_overdue_collections_under_row_lock(lender_setup):
+    import concurrent.futures
+    from django.db import connection
+
     user, tenant, token = lender_setup
     borrower = Borrower.objects.create(
         tenant=tenant,
         name='Concurrent Borrower',
         phone='9876543293'
     )
-    loan = LoanAccount.objects.create(
+    loan1 = LoanAccount.objects.create(
         tenant=tenant,
         borrower=borrower,
         principal_paise=200000,
@@ -1071,9 +1074,9 @@ def test_concurrent_overdue_collections_under_row_lock(lender_setup):
         due_day=1,
         product_type='instalment'
     )
-    kist = Kist.objects.create(
+    Kist.objects.create(
         tenant=tenant,
-        loan=loan,
+        loan=loan1,
         installment_number=1,
         original_due_date='2026-01-01',
         effective_due_date='2026-01-01',
@@ -1083,22 +1086,80 @@ def test_concurrent_overdue_collections_under_row_lock(lender_setup):
         status='PENDING'
     )
 
-    # Two concurrent payments for the same loan
-    op_1 = uuid.uuid4()
-    op_2 = uuid.uuid4()
+    loan2 = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan2,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
 
-    res1 = ledger_service.record_collection(loan, 110000, op_1, '2026-01-05')
-    assert res1['status'] == 'SUCCESS'
+    # 1. Race two threads submitting duplicate operation_id on loan1
+    dup_op_id = uuid.uuid4()
+    def submit_collection_dup():
+        try:
+            return ledger_service.record_collection(loan1, 110000, dup_op_id, '2026-01-05')
+        finally:
+            connection.close()
 
-    res2 = ledger_service.record_collection(loan, 110000, op_2, '2026-01-05')
-    assert res2['status'] == 'SUCCESS'
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(submit_collection_dup)
+        f2 = executor.submit(submit_collection_dup)
+        res1 = f1.result()
+        res2 = f2.result()
 
-    # Both succeeded and allocations conserved
-    loan.refresh_from_db()
-    txs = loan.transactions.filter(transaction_type='COLLECTION')
-    assert txs.count() == 2
-    total_allocated = sum(t.allocated_principal_paise + t.allocated_markup_paise + t.allocated_penalty_paise for t in txs)
-    assert total_allocated <= 220000 + 40000  # kist total plus overdue penalties
+    statuses = {res1['status'], res2['status']}
+    assert 'SUCCESS' in statuses
+    assert statuses.issubset({'SUCCESS', 'ALREADY_EXISTS'})
+    # Exactly 1 collection transaction created for dup_op_id
+    assert LedgerTx.objects.filter(tenant=tenant, operation_id=dup_op_id).count() == 1
+
+    # 2. Race two concurrent collections on different loans for the same tenant
+    op_loan1 = uuid.uuid4()
+    op_loan2 = uuid.uuid4()
+    def submit_loan1():
+        try:
+            return ledger_service.record_collection(loan1, 55000, op_loan1, '2026-01-05')
+        finally:
+            connection.close()
+
+    def submit_loan2():
+        try:
+            return ledger_service.record_collection(loan2, 55000, op_loan2, '2026-01-05')
+        finally:
+            connection.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(submit_loan1)
+        f2 = executor.submit(submit_loan2)
+        r1 = f1.result()
+        r2 = f2.result()
+
+    assert r1['status'] == 'SUCCESS'
+    assert r2['status'] == 'SUCCESS'
+
+    tx_loan1 = LedgerTx.objects.get(tenant=tenant, operation_id=op_loan1)
+    tx_loan2 = LedgerTx.objects.get(tenant=tenant, operation_id=op_loan2)
+
+    # Sequence numbers must be strictly distinct and monotonic under concurrent writes
+    assert tx_loan1.sequence_number != tx_loan2.sequence_number
+    all_seqs = list(LedgerTx.objects.filter(tenant=tenant).values_list('sequence_number', flat=True))
+    assert len(all_seqs) == len(set(all_seqs))
+
 
 
 @pytest.mark.django_db

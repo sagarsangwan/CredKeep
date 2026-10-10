@@ -1,6 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import { TransactionRepository } from '../core/database/transactionRepository';
 import { Paise, toPaise } from '../core/domain/money';
+import { OutboxManager } from '../core/sync/outbox';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 
@@ -570,41 +571,65 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     await db.runAsync(`INSERT INTO loans VALUES ('loan-real', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules VALUES ('kist-real', 'loan-real', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
 
-    // Verify atomic rollback when an unhandled error happens late in the transaction
-    await expect(
-      db.withExclusiveTransactionAsync(async (tx: any) => {
-        await tx.runAsync(
-          `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
-           VALUES ('tx-1', 'op-fail', 'loan-real', 'COLLECTION', 260000, '2026-01-01', '2026-01-01')`
-        );
-        await tx.runAsync(
-          `UPDATE repayment_schedules SET principal_paid_paise = 200000, markup_paid_paise = 60000, status = 'PAID' WHERE id = 'kist-real'`
-        );
-        await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = 'loan-real'`);
-        await tx.runAsync(
-          `INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
-           VALUES ('out-1', 'op-fail', 'record_collection', '{}', 'PENDING', '2026-01-01')`
-        );
+    const repo = new TransactionRepository(db);
 
-        // Late failure after all writes
-        throw new Error('Simulated network/disk crash before commit');
-      })
-    ).rejects.toThrow('Simulated network/disk crash before commit');
+    // Spy on OutboxManager.enqueue to inject a late failure after ledger & schedules have been written
+    const origEnqueue = OutboxManager.enqueue;
+    OutboxManager.enqueue = jest.fn().mockImplementationOnce(() => {
+      throw new Error('Simulated network/disk crash during outbox enqueue');
+    });
 
-    // In real SQLite, ALL changes must be completely rolled back:
-    const txCount = (await db.getFirstAsync<{ cnt: number }>(`SELECT count(*) as cnt FROM transactions`))?.cnt;
-    expect(txCount).toBe(0);
+    try {
+      // 1. Invoke production payment repository method - should throw due to late failure
+      await expect(
+        repo.recordCashPayment(
+          'loan-real',
+          260000 as Paise,
+          'op-fail',
+          '2026-01-01'
+        )
+      ).rejects.toThrow('Simulated network/disk crash during outbox enqueue');
 
-    const schedule = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-real'`);
-    expect(schedule?.principal_paid_paise).toBe(0);
-    expect(schedule?.markup_paid_paise).toBe(0);
-    expect(schedule?.status).toBe('PENDING');
+      // 2. Verify complete rollback across all tables in real SQLite engine
+      const txCount = (await db.getFirstAsync<{ cnt: number }>(`SELECT count(*) as cnt FROM transactions`))?.cnt;
+      expect(txCount).toBe(0);
 
-    const loan = await db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = 'loan-real'`);
-    expect(loan?.status).toBe('ACTIVE');
+      const schedule = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-real'`);
+      expect(schedule?.principal_paid_paise).toBe(0);
+      expect(schedule?.markup_paid_paise).toBe(0);
+      expect(schedule?.status).toBe('PENDING');
 
-    const outboxCount = (await db.getFirstAsync<{ cnt: number }>(`SELECT count(*) as cnt FROM sync_outbox`))?.cnt;
-    expect(outboxCount).toBe(0);
+      const loan = await db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = 'loan-real'`);
+      expect(loan?.status).toBe('ACTIVE');
+
+      const outboxCount = (await db.getFirstAsync<{ cnt: number }>(`SELECT count(*) as cnt FROM sync_outbox`))?.cnt;
+      expect(outboxCount).toBe(0);
+    } finally {
+      OutboxManager.enqueue = origEnqueue;
+    }
+
+    // 3. Clean retry with the exact same operation_id must succeed and commit cleanly
+    await repo.recordCashPayment(
+      'loan-real',
+      260000 as Paise,
+      'op-fail',
+      '2026-01-01'
+    );
+
+    const txAfter = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-fail'`);
+    expect(txAfter).not.toBeNull();
+    expect(txAfter.amount_paise).toBe(260000);
+
+    const scheduleAfter = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-real'`);
+    expect(scheduleAfter?.principal_paid_paise).toBe(200000);
+    expect(scheduleAfter?.markup_paid_paise).toBe(60000);
+    expect(scheduleAfter?.status).toBe('PAID');
+
+    const loanAfter = await db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = 'loan-real'`);
+    expect(loanAfter?.status).toBe('SETTLED');
+
+    const outboxAfter = await db.getFirstAsync<any>(`SELECT * FROM sync_outbox WHERE operation_id = 'op-fail'`);
+    expect(outboxAfter).not.toBeNull();
   });
 
   it('enforces real SQLite unique constraint preventing duplicate operation_ids', async () => {

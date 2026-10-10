@@ -423,15 +423,20 @@ describe('SyncService & OutboxManager', () => {
     });
 
     it('reports failure, halts pull, and protects local state when push has failed operations', async () => {
-      jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
+      const pushSpy = jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
       const pullSpy = jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });
 
-      const res = await SyncService.syncAll(mockDb);
-      expect(res.success).toBe(false);
-      expect(res.pulledCount).toBe(0);
-      expect(pullSpy).not.toHaveBeenCalled();
-      expect(res.errors).toBeDefined();
-      expect(res.errors![0]).toContain('failed to push to server; pull halted to protect local state');
+      try {
+        const res = await SyncService.syncAll(mockDb);
+        expect(res.success).toBe(false);
+        expect(res.pulledCount).toBe(0);
+        expect(pullSpy).not.toHaveBeenCalled();
+        expect(res.errors).toBeDefined();
+        expect(res.errors![0]).toContain('failed to push to server; pull halted to protect local state');
+      } finally {
+        pushSpy.mockRestore();
+        pullSpy.mockRestore();
+      }
     });
 
     it('pushes pending outbox queues exceeding 50 items in successive batches', async () => {
@@ -484,7 +489,7 @@ describe('SyncService & OutboxManager', () => {
 
       // Server sends a stale snapshot (0 paid)
       mockDb.getAllAsync.mockImplementation(async (sql: string, params: any[]) => {
-        if (sql.includes('sync_outbox WHERE status = \'PENDING\'')) {
+        if (sql.includes('sync_outbox')) {
           return outboxRows.filter(r => r.status === 'PENDING');
         }
         if (sql.includes('repayment_schedules WHERE loan_id = ?')) {
@@ -511,23 +516,115 @@ describe('SyncService & OutboxManager', () => {
         return null;
       });
 
-      await SyncService.applyServerChange(mockDb, {
-        record_type: 'KIST',
-        operation_type: 'UPDATE',
-        payload: {
-          id: 'kist-1',
-          loan_id: 'loan-1',
-          installment_number: 1,
-          principal_paid_paise: 0,
-          markup_paid_paise: 0,
-          status: 'PENDING'
-        }
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        changes: [{
+          record_type: 'KIST',
+          operation_type: 'UPDATE',
+          payload: {
+            id: 'kist-1',
+            loan_id: 'loan-1',
+            installment_number: 1,
+            principal_paid_paise: 0,
+            markup_paid_paise: 0,
+            status: 'PENDING'
+          }
+        }],
+        next_cursor: 1,
+        has_more: false
       });
+
+      await SyncService.pullChanges(mockDb);
 
       // Verification: local pending collection was reapplied on top of server snapshot!
       expect(mockDb.runAsync).toHaveBeenCalledWith(
         expect.stringContaining('UPDATE repayment_schedules SET'),
         expect.arrayContaining([100000, 10000, 'PAID', 'loan-1', 1])
+      );
+    });
+
+    it('compensates and reverts rejected payment allocations on server push rejection', async () => {
+      outboxRows.push({
+        id: 'outbox-rej-1',
+        operation_id: 'op-rejected',
+        operation_type: 'record_collection',
+        payload: JSON.stringify({
+          loan_id: 'loan-1',
+          amount_paise: 110000,
+          effective_date: '2026-01-05'
+        }),
+        status: 'PENDING',
+        created_at: new Date().toISOString()
+      });
+
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('SELECT * FROM transactions WHERE operation_id = ?')) {
+          if (params[0] === 'op-rejected') {
+            return {
+              id: 'tx-rej',
+              operation_id: 'op-rejected',
+              loan_id: 'loan-1',
+              transaction_type: 'COLLECTION',
+              amount_paise: 110000,
+              allocated_principal_paise: 100000,
+              allocated_markup_paise: 10000,
+              allocated_penalty_paise: 0,
+              unallocated_surplus_paise: 0
+            };
+          }
+          if (params[0] === 'reversal-op-rejected') {
+            return null;
+          }
+        }
+        if (sql.includes('SELECT * FROM loans WHERE id = ?')) {
+          return { id: 'loan-1', principal_paise: 100000, product_type: 'instalment', status: 'SETTLED' };
+        }
+        return null;
+      });
+
+      mockDb.getAllAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('sync_outbox')) {
+          return outboxRows.filter(r => r.status === 'PENDING');
+        }
+        if (sql.includes('SELECT t.* FROM transactions t')) {
+          return [];
+        }
+        if (sql.includes('SELECT * FROM repayment_schedules WHERE loan_id = ?')) {
+          return [{
+            id: 'kist-1',
+            loan_id: 'loan-1',
+            installment_number: 1,
+            principal_component_paise: 100000,
+            markup_component_paise: 10000,
+            total_due_paise: 110000,
+            principal_paid_paise: 0,
+            markup_paid_paise: 0,
+            status: 'PENDING'
+          }];
+        }
+        return [];
+      });
+
+      (ApiClient.post as jest.Mock).mockResolvedValueOnce({
+        results: [{
+          operation_id: 'op-rejected',
+          status: 'REJECTED',
+          error: 'Borrower credit limit exceeded'
+        }]
+      });
+
+      const pushRes = await SyncService.pushPending(mockDb);
+      expect(pushRes.failed).toBe(1);
+
+      // Verify compensating REVERSAL transaction was inserted
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO transactions'),
+        expect.arrayContaining(['reversal-op-rejected', 'loan-1', 'REVERSAL', -100000, -10000])
+      );
+
+      // Verify schedule was reset and loan status updated back to ACTIVE
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        `UPDATE loans SET status = ? WHERE id = ?`,
+        ['ACTIVE', 'loan-1']
       );
     });
   });

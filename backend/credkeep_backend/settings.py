@@ -74,6 +74,15 @@ DATABASES = {
     'default': env.db('DATABASE_URL', default=f'sqlite:///{BASE_DIR}/db.sqlite3')
 }
 DATABASES['default']['ATOMIC_REQUESTS'] = True
+DATABASES['default']['OPTIONS'] = {'timeout': 30}
+
+from django.db.backends.signals import connection_created
+def configure_sqlite_pragmas(sender, connection, **kwargs):
+    if connection.vendor == 'sqlite':
+        with connection.cursor() as cursor:
+            cursor.execute('PRAGMA busy_timeout = 30000;')
+            cursor.execute('PRAGMA journal_mode = WAL;')
+connection_created.connect(configure_sqlite_pragmas)
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

@@ -4,6 +4,7 @@ import { ApiClient } from '../api/client';
 import { AuthStore } from '../auth/authStore';
 import { OutboxManager } from './outbox';
 import { allocatePayment } from '../domain/allocation';
+import { Paise } from '../domain/money';
 
 export interface SyncResult {
   pushedCount: number;
@@ -46,6 +47,10 @@ export class SyncService {
           if (res.status === 'ACCEPTED') {
             await OutboxManager.markSynced(db, [res.operation_id]);
             totalPushed++;
+          } else if (res.status === 'REJECTED') {
+            await OutboxManager.markStatus(db, res.operation_id, 'REJECTED', res.error);
+            await this.revertRejectedPayment(db, res.operation_id, res.error);
+            batchFailed++;
           } else if (res.status === 'FAILED') {
             await OutboxManager.markStatus(db, res.operation_id, 'PENDING', res.error);
             batchFailed++;
@@ -89,8 +94,12 @@ export class SyncService {
 
       if (changes.length > 0) {
         await db.withExclusiveTransactionAsync(async (tx) => {
+          const modifiedLoanIds = new Set<string>();
           for (const change of changes) {
-            await this.applyServerChange(tx, change);
+            await this.applyServerChange(tx, change, modifiedLoanIds);
+          }
+          for (const loanId of modifiedLoanIds) {
+            await this.reapplyPendingCollections(tx, loanId);
           }
         });
         totalPulled += changes.length;
@@ -108,9 +117,15 @@ export class SyncService {
   /**
    * Applies an authoritative server delta event into the local SQLite database
    */
-  static async applyServerChange(tx: SQLiteDatabase, change: any): Promise<void> {
+  static async applyServerChange(tx: SQLiteDatabase, change: any, modifiedLoanIds?: Set<string>): Promise<void> {
     const { record_type, operation_type, payload } = change;
     if (!payload) return;
+
+    if (payload.loan_id && modifiedLoanIds) {
+      modifiedLoanIds.add(payload.loan_id);
+    } else if (record_type === 'LOAN' && payload.id && modifiedLoanIds) {
+      modifiedLoanIds.add(payload.id);
+    }
 
     if (record_type === 'BORROWER') {
       if (operation_type === 'INSERT') {
@@ -159,12 +174,18 @@ export class SyncService {
         if (existingKist) {
           await tx.runAsync(
             `UPDATE repayment_schedules SET
+               principal_component_paise = ?,
+               markup_component_paise = ?,
+               total_due_paise = ?,
                effective_due_date = ?,
                principal_paid_paise = ?,
                markup_paid_paise = ?,
                status = ?
              WHERE id = ?`,
             [
+              payload.principal_component_paise || 0,
+              payload.markup_component_paise || 0,
+              payload.total_due_paise,
               payload.effective_due_date,
               payload.principal_paid_paise || 0,
               payload.markup_paid_paise || 0,
@@ -200,6 +221,16 @@ export class SyncService {
           [payload.id, payload.loan_id, payload.installment_number]
         );
         const kistId = existingKist ? existingKist.id : payload.id;
+        if (payload.principal_component_paise !== undefined || payload.markup_component_paise !== undefined || payload.total_due_paise !== undefined) {
+          await tx.runAsync(
+            `UPDATE repayment_schedules SET
+               principal_component_paise = COALESCE(?, principal_component_paise),
+               markup_component_paise = COALESCE(?, markup_component_paise),
+               total_due_paise = COALESCE(?, total_due_paise)
+             WHERE id = ?`,
+            [payload.principal_component_paise, payload.markup_component_paise, payload.total_due_paise, kistId]
+          );
+        }
         if (payload.effective_due_date) {
           await tx.runAsync(
             `UPDATE repayment_schedules SET effective_due_date = ? WHERE id = ?`,
@@ -215,9 +246,6 @@ export class SyncService {
              WHERE id = ?`,
             [payload.principal_paid_paise, payload.markup_paid_paise, payload.status, kistId]
           );
-          if (payload.loan_id) {
-            await this.reapplyPendingCollections(tx, payload.loan_id);
-          }
         }
       }
     } else if (record_type === 'TRANSACTION') {
@@ -326,9 +354,20 @@ export class SyncService {
 
     if (relevant.length === 0) return;
 
+    // Calculate actual outstanding penalties dynamically
+    const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' THEN amount_paise ELSE 0 END), 0) as assessed,
+         COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
+         COALESCE(SUM(CASE WHEN transaction_type = 'WAIVER' THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
+       FROM transactions WHERE loan_id = ?`,
+      [loanId]
+    );
+    let outstandingPenalty = Math.max(0, (penaltyRow?.assessed || 0) - (penaltyRow?.paid || 0) - (penaltyRow?.forgiven || 0)) as Paise;
+
     for (const item of relevant) {
       const p = JSON.parse(item.payload);
-      const paymentAmount = p.amount_paise || 0;
+      const paymentAmount = (p.amount_paise || 0) as Paise;
       const effectiveDate = p.effective_date || new Date().toISOString().split('T')[0];
 
       const kists = await tx.getAllAsync<any>(
@@ -341,16 +380,143 @@ export class SyncService {
         paymentAmount,
         kists: kists.map((k) => ({
           kistNumber: k.installment_number,
-          amountDue: k.total_due_paise,
-          principalDue: k.principal_component_paise,
-          markupDue: k.markup_component_paise,
-          amountPaid: k.principal_paid_paise + k.markup_paid_paise,
-          principalPaid: k.principal_paid_paise,
-          markupPaid: k.markup_paid_paise,
+          amountDue: k.total_due_paise as Paise,
+          principalDue: k.principal_component_paise as Paise,
+          markupDue: k.markup_component_paise as Paise,
+          amountPaid: (k.principal_paid_paise + k.markup_paid_paise) as Paise,
+          principalPaid: k.principal_paid_paise as Paise,
+          markupPaid: k.markup_paid_paise as Paise,
           isDue: k.effective_due_date <= effectiveDate,
           status: k.status,
         })),
-        outstandingPenalty: 0 as any,
+        outstandingPenalty,
+      };
+
+      const result = allocatePayment(allocInput);
+      outstandingPenalty = result.remainingPenalty;
+
+      for (const uk of result.updatedKists) {
+        await tx.runAsync(
+          `UPDATE repayment_schedules SET
+             principal_paid_paise = ?,
+             markup_paid_paise = ?,
+             status = ?
+           WHERE loan_id = ? AND installment_number = ?`,
+          [uk.principalPaid, uk.markupPaid, uk.status || 'PENDING', loanId, uk.kistNumber]
+        );
+      }
+    }
+  }
+
+  /**
+   * Compensates and reverts rejected payment mutations locally.
+   * Inserts an append-only compensating REVERSAL ledger entry,
+   * reverses affected kist paid amounts, and restores loan status.
+   */
+  static async revertRejectedPayment(db: SQLiteDatabase, operationId: string, _errorReason?: string): Promise<void> {
+    await db.withExclusiveTransactionAsync(async (tx) => {
+      const origTx = await tx.getFirstAsync<any>(
+        `SELECT * FROM transactions WHERE operation_id = ? AND transaction_type = 'COLLECTION'`,
+        [operationId]
+      );
+      if (!origTx) return;
+
+      const reversalOpId = `reversal-${operationId}`;
+      const existingReversal = await tx.getFirstAsync<any>(
+        `SELECT id FROM transactions WHERE operation_id = ?`,
+        [reversalOpId]
+      );
+      if (existingReversal) return;
+
+      const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+      await tx.runAsync(
+        `INSERT INTO transactions (
+           id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+           amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
+           unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          revId,
+          reversalOpId,
+          origTx.loan_id,
+          'REVERSAL',
+          0,
+          'SYSTEM',
+          0,
+          -origTx.allocated_principal_paise,
+          -origTx.allocated_markup_paise,
+          -origTx.allocated_penalty_paise,
+          -origTx.unallocated_surplus_paise,
+          0,
+          new Date().toISOString().split('T')[0],
+          new Date().toISOString(),
+        ]
+      );
+
+      await this.recalculateLoanSchedule(tx, origTx.loan_id);
+    });
+  }
+
+  /**
+   * Recalculates repayment schedules and loan status by replaying
+   * all valid non-rejected collections for the loan.
+   */
+  static async recalculateLoanSchedule(tx: SQLiteDatabase, loanId: string): Promise<void> {
+    const loan = await tx.getFirstAsync<any>(
+      `SELECT * FROM loans WHERE id = ?`,
+      [loanId]
+    );
+    if (!loan) return;
+
+    // Reset all kists to 0 paid
+    await tx.runAsync(
+      `UPDATE repayment_schedules
+       SET principal_paid_paise = 0, markup_paid_paise = 0, status = 'PENDING'
+       WHERE loan_id = ?`,
+      [loanId]
+    );
+
+    // Get all valid non-rejected collections in chronological sequence
+    const collections = await tx.getAllAsync<any>(
+      `SELECT t.* FROM transactions t
+       WHERE t.loan_id = ? AND t.transaction_type = 'COLLECTION'
+         AND t.operation_id NOT IN (
+           SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED'
+         )
+       ORDER BY t.sequence_number ASC`,
+      [loanId]
+    );
+
+    for (const col of collections) {
+      const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
+        `SELECT
+           COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' AND effective_date <= ? THEN amount_paise ELSE 0 END), 0) as assessed,
+           COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' AND sequence_number < ? THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
+           COALESCE(SUM(CASE WHEN transaction_type = 'WAIVER' AND effective_date <= ? THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
+         FROM transactions WHERE loan_id = ?`,
+        [col.effective_date, col.sequence_number, col.effective_date, loanId]
+      );
+      const outstandingPenalty = Math.max(0, (penaltyRow?.assessed || 0) - (penaltyRow?.paid || 0) - (penaltyRow?.forgiven || 0)) as Paise;
+
+      const kists = await tx.getAllAsync<any>(
+        `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
+        [loanId]
+      );
+
+      const allocInput = {
+        paymentAmount: col.amount_paise as Paise,
+        kists: kists.map((k) => ({
+          kistNumber: k.installment_number,
+          amountDue: k.total_due_paise as Paise,
+          principalDue: k.principal_component_paise as Paise,
+          markupDue: k.markup_component_paise as Paise,
+          amountPaid: (k.principal_paid_paise + k.markup_paid_paise) as Paise,
+          principalPaid: k.principal_paid_paise as Paise,
+          markupPaid: k.markup_paid_paise as Paise,
+          isDue: k.effective_due_date <= col.effective_date,
+          status: k.status,
+        })),
+        outstandingPenalty,
       };
 
       const result = allocatePayment(allocInput);
@@ -365,6 +531,18 @@ export class SyncService {
         );
       }
     }
+
+    // Check final settlement status of loan
+    const finalKists = await tx.getAllAsync<any>(
+      `SELECT * FROM repayment_schedules WHERE loan_id = ?`,
+      [loanId]
+    );
+    const allPaid = finalKists.length > 0 && finalKists.every((k) => k.status === 'PAID');
+    const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
+
+    const isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise;
+    const newStatus = isSettled ? 'SETTLED' : 'ACTIVE';
+    await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [newStatus, loanId]);
   }
 
   /**
