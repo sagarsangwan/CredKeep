@@ -1,0 +1,15 @@
+node_modules/
+.git/
+build/
+dist/
+*.sqlite
+*.db
+*.db-journal
+borrower*.json
+*.pem
+*.key
+.env
+.env.*
+secrets/
+android/
+ios/

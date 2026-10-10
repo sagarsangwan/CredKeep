@@ -82,11 +82,11 @@ export class LoanRepository {
     `, [loanId]);
   }
 
-  async extendScheduleIfNeeded(loanId: string) {
-    const loan = await this.getById(loanId);
+  async extendScheduleIfNeeded(loanId: string, tx: any = this.db) {
+    const loan = await tx.getFirstAsync(`SELECT * FROM loans WHERE id = ?`, [loanId]);
     if (!loan || loan.product_type !== 'bullet' || loan.status !== 'ACTIVE') return;
 
-    const kists = await this.db.getAllAsync<any>(`
+    const kists = await tx.getAllAsync(`
       SELECT * FROM repayment_schedules 
       WHERE loan_id = ? 
       ORDER BY installment_number ASC
@@ -110,7 +110,7 @@ export class LoanRepository {
       
       let nextDueDate = calculateNextDueDate(loan.start_date, monthsToAddFromStart, loan.due_day);
       
-      const statement = await this.db.prepareAsync(`
+      const statement = await tx.prepareAsync(`
         INSERT INTO repayment_schedules 
         (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)

@@ -88,12 +88,30 @@ Execute Git operations locally and autonomously under these invariants:
 
 ### Agent Permissions & Boundaries
 
-- **Autonomous (Permitted)**: Reading and editing workspace files, running tests, typechecks, linters, local git branch creation, selective staging, and local commits.
+- **Autonomous (Permitted Without Asking)**:
+  - Reading, searching, and viewing project files.
+  - Running safe `git status`, `git log`, and `git diff` commands.
+  - Creating, editing, and formatting project source files.
+  - Running development quality gates (`npx tsc --noEmit`, `npx expo lint`, `npm test`, `npx expo-doctor`).
+  - Running safe local diagnostic scripts and repeating failed tests after code fixes.
+  - Invoking the authenticated Codex CLI for planning and independent QA in its noninteractive sandbox.
+  - Running verified project-scoped Graphify commands.
+  - Installing normal, necessary, compatible project development dependencies.
+  - Creating task-specific local Git commits and staging selective changes.
+  - Updating `.workflow` state, reports, and handoff documentation.
+  - Transitioning between planning, implementation, testing, and code review autonomously.
+
 - **Prohibited Without Explicit Approval**:
-  - Pushing to remote repositories (`origin`).
-  - Deleting files or branches.
+  - Deleting or resetting financial records.
+  - Destructive Git operations (e.g., branch deletion, `push --force`).
+  - Exposing or changing credentials.
+  - Changing system-wide security settings.
+  - Running untrusted scripts requiring elevated privileges.
+  - Pushing code to remote repositories (GitHub/`origin`).
+  - Publishing the app or triggering an EAS cloud build.
+  - Bypassing operating-system security, fabricating approvals, or using unrestricted command execution to defeat safety controls.
   - Installing system-level software or machine packages.
-  - Modifying external services or production configurations.
+  - Making paid services or purchases.
 
 ### Model Routing Policy
 
@@ -209,3 +227,28 @@ Use profiling and measurement before making invasive optimizations.
 Perform safe, low-risk optimization during development.
 
 Reserve intensive APK analysis and performance tuning for the final V1 stabilization phase.
+
+## Multi-Agent Workflow Integration
+This project uses a split-agent model:
+- **Codex:** Planner, Tester, Reviewer. Operates independently.
+- **Gemini / Antigravity:** Implementer and Orchestrator.
+
+**Coordination Rules:**
+1. All agents MUST read `.workflow/STATE.md` before taking action.
+2. Agents MUST read `AGENTS.md` before every action.
+3. Hand-offs occur by updating `.workflow/HANDOFF.md` and invoking the next agent.
+4. Codex is the final arbiter of QA and tests.
+5. All completed work MUST have local Git commits with conventional commit messages.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
