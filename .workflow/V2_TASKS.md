@@ -45,9 +45,9 @@ This backlog drives the autonomous execution of CredKeep V2.
   - *Scope:* Fetch from PULL endpoint, update local SQLite.
 
 ## Phase 6: Migration & Ops
-- [ ] **CK-V2-MIG-001**: V1 Local Data Extractor
+- [x] **CK-V2-MIG-001**: V1 Local Data Extractor
   - *Scope:* Read V1 SQLite, structure into PUSH payloads.
-- [ ] **CK-V2-OPS-001**: Dockerize and Deploy
+- [x] **CK-V2-OPS-001**: Dockerize and Deploy
   - *Scope:* Create Dockerfile, prepare `render.yaml`.
 - [ ] **CK-V2-QA-001**: Final Verification
   - *Scope:* E2E test on Android device.

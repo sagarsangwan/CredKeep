@@ -1,50 +1,32 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** V2 Phase 5: Mobile Integration (CK-V2-MOB-001, CK-V2-MOB-002, CK-V2-MOB-003)
+- **Task ID:** V2 Phase 6: Migration & Ops (CK-V2-MIG-001, CK-V2-OPS-001, CK-V2-QA-001)
 - **Completed Changes:**
-  - **Auth & SecureStore (`CK-V2-MOB-001`)**:
-    - Created `src/core/auth/authStore.ts` using `expo-secure-store` to manage `AUTH_TOKEN`, `TENANT_ID`, `DEVICE_ID`, and `USER_INFO`.
-    - Created `src/core/api/client.ts` with auto-attaching `Authorization: Bearer <token>` and configurable `API_BASE_URL`.
-    - Created `src/core/auth/authService.ts` for `login`, `register`, `registerDevice`, and `logout`.
-    - Created Auth screens: `src/app/auth/login.tsx` (with offline bypass fallback) and `src/app/auth/register.tsx`.
-    - Registered `auth` route stack in `src/app/_layout.tsx` and `src/app/auth/_layout.tsx`.
-  - **Local Outbox & Push Protocol (`CK-V2-MOB-002`)**:
-    - Added `sync_outbox` and `sync_meta` tables to SQLite schema in `src/core/database/schema.ts`.
-    - Created `src/core/sync/outbox.ts` (`OutboxManager`) for enqueuing mutations, tracking statuses, and storing sync metadata.
-    - Integrated automatic outbox enqueuing in `BorrowerRepository`, `LoanRepository`, and `TransactionRepository`.
-    - Implemented `SyncService.pushPending(db)` to send queued mutations to `/api/v2/sync/push/` and handle server responses.
-  - **Server State Pull & Reconciliation (`CK-V2-MOB-003`)**:
-    - Implemented `SyncService.pullChanges(db)` to query `/api/v2/sync/pull/?cursor={cursor}` and transactionally merge incoming server events into local SQLite.
-    - Implemented `SyncService.syncAll(db)` coordinating sequential push and pull.
-    - Updated `src/app/(tabs)/more.tsx` to display cloud workspace status, last sync timestamp, and "Sync Now" trigger.
+  - **V1 Local Data Extractor (`CK-V2-MIG-001`)**:
+    - Created `src/core/migration/v1Extractor.ts` (`V1DataExtractor`):
+      - Extracts local SQLite borrowers, active loans, and collection transactions.
+      - Structures them into dependency-ordered sync push operations (`create_borrower` -> `create_loan` -> `record_collection`).
+      - Atomically enqueues into `sync_outbox`, triggers `SyncService.pushPending()`, and records migration metadata (`v1_migration_completed: true`).
+    - Added unit test suite in `src/core/migration/v1Extractor.test.ts` (4 passed).
+  - **Dockerize & Deploy (`CK-V2-OPS-001`)**:
+    - Created `backend/Dockerfile` with multi-stage python:3.13-slim base, non-root best practices, health check, gunicorn server runner, and migration execution on boot.
+    - Created `backend/.dockerignore`.
+    - Created root `render.yaml` infrastructure blueprint for Render web service deployment with free plan configuration, health check path, and environment variables.
+    - Updated `backend/requirements.txt` with production dependencies (clean UTF-8).
   - **Testing**:
-    - Added comprehensive unit tests in `src/core/auth/authStore.test.ts` (3 tests) and `src/core/sync/syncService.test.ts` (5 tests).
-    - Verified all 46 mobile tests pass and type checks pass with 0 errors.
+    - 50 mobile Jest tests passed across 12 suites.
+    - 0 TypeScript compiler errors.
+    - 0 ESLint errors.
+    - 37 Django backend pytest tests passed.
+    - 0 Django system check issues.
 - **Files Created/Modified:**
-  - `src/core/auth/authStore.ts`
-  - `src/core/auth/authStore.test.ts`
-  - `src/core/api/client.ts`
-  - `src/core/auth/authService.ts`
-  - `src/app/auth/_layout.tsx`
-  - `src/app/auth/login.tsx`
-  - `src/app/auth/register.tsx`
-  - `src/app/_layout.tsx`
-  - `src/core/database/schema.ts`
-  - `src/core/sync/outbox.ts`
-  - `src/core/sync/syncService.ts`
-  - `src/core/sync/syncService.test.ts`
-  - `src/core/database/borrowerRepository.ts`
-  - `src/core/database/loanRepository.ts`
-  - `src/core/database/loanRepository.test.ts`
-  - `src/core/database/transactionRepository.ts`
-  - `src/app/(tabs)/more.tsx`
+  - `src/core/migration/v1Extractor.ts`
+  - `src/core/migration/v1Extractor.test.ts`
+  - `backend/Dockerfile`
+  - `backend/.dockerignore`
+  - `render.yaml`
+  - `backend/requirements.txt`
   - `.workflow/V2_TASKS.md`
   - `.workflow/STATE.md`
-- **Commands Run:**
-  - `npm test`: 46 passed across 11 suites
-  - `npx tsc --noEmit`: 0 errors
-  - `npx expo lint`: 0 errors
-  - `.venv\Scripts\pytest.exe`: 37 passed, 3 skipped
-  - `.venv\Scripts\python.exe manage.py check`: 0 issues
-- **Next Stage:** Phase 6: Migration & Ops (CK-V2-MIG-001, CK-V2-OPS-001, CK-V2-QA-001) - awaiting Product Owner authorization
+- **Next Stage:** Execute independent Codex QA verification across all V2 work.

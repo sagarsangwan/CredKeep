@@ -1,0 +1,153 @@
+import { V1DataExtractor } from './v1Extractor';
+import { SyncService } from '../sync/syncService';
+import { OutboxManager } from '../sync/outbox';
+
+jest.mock('../sync/syncService', () => ({
+  SyncService: {
+    pushPending: jest.fn(async () => ({ pushed: 3, failed: 0 })),
+  },
+}));
+
+const mockMeta: Record<string, string> = {};
+
+jest.mock('../sync/outbox', () => {
+  return {
+    OutboxManager: {
+      enqueue: jest.fn(async () => {}),
+      setMeta: jest.fn(async (_db, k, v) => {
+        mockMeta[k] = v;
+      }),
+      getMeta: jest.fn(async (_db, k) => mockMeta[k] || null),
+    },
+  };
+});
+
+describe('V1DataExtractor', () => {
+  let mockDb: any;
+
+  beforeEach(() => {
+    for (const key of Object.keys(mockMeta)) {
+      delete mockMeta[key];
+    }
+    jest.clearAllMocks();
+    mockDb = {
+      getAllAsync: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM borrowers')) {
+          return [
+            { id: 'b-1', name: 'Ramesh', phone: '9988776655', created_at: '2026-01-01' },
+          ];
+        }
+        if (sql.includes('FROM loans')) {
+          return [
+            {
+              id: 'l-1',
+              borrower_id: 'b-1',
+              principal_paise: 2400000,
+              markup_factor: 0.3,
+              term_months: 12,
+              start_date: '2026-01-01',
+              due_day: 1,
+              product_type: 'instalment',
+              status: 'ACTIVE',
+              created_at: '2026-01-01',
+            },
+          ];
+        }
+        if (sql.includes('FROM transactions')) {
+          return [
+            {
+              id: 'tx-1',
+              operation_id: 'op-col-1',
+              loan_id: 'l-1',
+              transaction_type: 'COLLECTION',
+              amount_paise: 260000,
+              payment_method: 'CASH',
+              is_cash: 1,
+              effective_date: '2026-02-01',
+              created_at: '2026-02-01',
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+  });
+
+  it('extracts records from all three portfolio tables', async () => {
+    const data = await V1DataExtractor.extract(mockDb);
+
+    expect(data.borrowers.length).toBe(1);
+    expect(data.borrowers[0].name).toBe('Ramesh');
+
+    expect(data.loans.length).toBe(1);
+    expect(data.loans[0].principal_paise).toBe(2400000);
+
+    expect(data.transactions.length).toBe(1);
+    expect(data.transactions[0].amount_paise).toBe(260000);
+  });
+
+  it('builds structured push operations in dependency order', () => {
+    const extracted = {
+      borrowers: [{ id: 'b-1', name: 'Ramesh', phone: '9988776655', created_at: '2026-01-01' }],
+      loans: [
+        {
+          id: 'l-1',
+          borrower_id: 'b-1',
+          principal_paise: 2400000,
+          markup_factor: 0.3,
+          term_months: 12,
+          start_date: '2026-01-01',
+          due_day: 1,
+          product_type: 'instalment',
+          status: 'ACTIVE',
+          created_at: '2026-01-01',
+        },
+      ],
+      transactions: [
+        {
+          id: 'tx-1',
+          operation_id: 'op-col-1',
+          loan_id: 'l-1',
+          transaction_type: 'COLLECTION',
+          amount_paise: 260000,
+          payment_method: 'CASH',
+          is_cash: 1,
+          effective_date: '2026-02-01',
+          created_at: '2026-02-01',
+        },
+      ],
+    };
+
+    const operations = V1DataExtractor.buildPushPayloads(extracted);
+
+    expect(operations.length).toBe(3);
+    expect(operations[0].type).toBe('create_borrower');
+    expect(operations[0].payload.name).toBe('Ramesh');
+
+    expect(operations[1].type).toBe('create_loan');
+    expect(operations[1].payload.principal_paise).toBe(2400000);
+
+    expect(operations[2].type).toBe('record_collection');
+    expect(operations[2].payload.amount_paise).toBe(260000);
+  });
+
+  it('executes full migration to cloud and marks metadata', async () => {
+    const summary = await V1DataExtractor.migrateToCloud(mockDb);
+
+    expect(summary.success).toBe(true);
+    expect(summary.borrowersCount).toBe(1);
+    expect(summary.loansCount).toBe(1);
+    expect(summary.transactionsCount).toBe(1);
+
+    expect(OutboxManager.enqueue).toHaveBeenCalledTimes(3);
+    expect(SyncService.pushPending).toHaveBeenCalled();
+    expect(OutboxManager.setMeta).toHaveBeenCalledWith(mockDb, 'v1_migration_completed', 'true');
+  });
+
+  it('checks migration completion status', async () => {
+    expect(await V1DataExtractor.isMigrationCompleted(mockDb)).toBe(false);
+
+    await OutboxManager.setMeta(mockDb, 'v1_migration_completed', 'true');
+    expect(await V1DataExtractor.isMigrationCompleted(mockDb)).toBe(true);
+  });
+});
