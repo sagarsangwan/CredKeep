@@ -1,4 +1,4 @@
-from django.db import connection, DatabaseError
+from django.db import connection, DatabaseError, transaction
 from django.core.exceptions import PermissionDenied, ObjectDoesNotExist
 
 class TenantMiddleware:
@@ -20,11 +20,14 @@ class TenantMiddleware:
         except ObjectDoesNotExist as e:
             raise PermissionDenied("User does not have an active tenant.") from e
 
-        if connection.vendor == 'postgresql':
-            with connection.cursor() as cursor:
-                # SET LOCAL is scoped to the current transaction.
-                # Since ATOMIC_REQUESTS is True, this automatically resets when the transaction commits or rolls back.
-                cursor.execute("SET LOCAL credkeep.current_tenant = %s", [str(tenant.id)])
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cursor:
+                    # SET LOCAL is scoped to the current transaction.
+                    # By executing within transaction.atomic(), this configuration remains active
+                    # for the entire view execution and is automatically cleared on commit or rollback.
+                    cursor.execute("SET LOCAL credkeep.current_tenant = %s", [str(tenant.id)])
 
-        response = self.get_response(request)
-        return response
+            response = self.get_response(request)
+            return response
+

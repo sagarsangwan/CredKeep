@@ -1,4 +1,3 @@
-import { LoanRepository } from '../core/database/loanRepository';
 import { TransactionRepository } from '../core/database/transactionRepository';
 import { Paise, toPaise } from '../core/domain/money';
 
@@ -7,6 +6,10 @@ interface LoanRow {
   product_type: 'instalment' | 'bullet';
   status: string;
   principal_paise: Paise;
+  start_date: string;
+  due_day: number;
+  markup_factor: number;
+  term_months: number;
 }
 
 interface ScheduleRow {
@@ -46,12 +49,40 @@ interface DbState {
 describe('Cross-Loan Isolation', () => {
   let dbState: DbState;
   let txRepo: TransactionRepository;
+
+  beforeAll(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
+  });
+
+  afterAll(() => {
+    jest.useRealTimers();
+  });
   
   beforeEach(() => {
+    jest.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
     dbState = {
       loans: [
-        { id: 'loan-a', product_type: 'instalment', status: 'ACTIVE', principal_paise: toPaise(2000) },
-        { id: 'loan-b', product_type: 'bullet', status: 'ACTIVE', principal_paise: toPaise(3000) }
+        {
+          id: 'loan-a',
+          product_type: 'instalment',
+          status: 'ACTIVE',
+          principal_paise: toPaise(2000),
+          start_date: '2026-01-01',
+          due_day: 1,
+          markup_factor: 0.3,
+          term_months: 1
+        },
+        {
+          id: 'loan-b',
+          product_type: 'bullet',
+          status: 'ACTIVE',
+          principal_paise: toPaise(3000),
+          start_date: '2026-01-01',
+          due_day: 1,
+          markup_factor: 0.1,
+          term_months: 1
+        }
       ],
       schedules: [
         {
@@ -134,7 +165,8 @@ describe('Cross-Loan Isolation', () => {
         return null;
       }),
       getAllAsync: jest.fn(async (query: string, params: any[] = []) => {
-        if (query.includes('FROM repayment_schedules WHERE loan_id = ?')) {
+        const normalized = query.replace(/\s+/g, ' ');
+        if (normalized.includes('FROM repayment_schedules') && normalized.includes('loan_id = ?')) {
           return state.schedules.filter(s => s.loan_id === params[0]);
         }
         if (query.includes('PENALTY_ASSESSMENT')) {
@@ -144,6 +176,9 @@ describe('Cross-Loan Isolation', () => {
       }),
       runAsync: jest.fn(async (query: string, params: any[] = []) => {
         if (query.includes('INSERT INTO transactions')) {
+          if (state.transactions.some(t => t.operation_id === params[1])) {
+            throw new Error(`UNIQUE constraint failed: transactions.operation_id`);
+          }
           state.transactions.push({
             id: params[0],
             operation_id: params[1],
@@ -179,6 +214,19 @@ describe('Cross-Loan Isolation', () => {
                 schedule.status = params[2];
               }
             }
+            if (query.includes('INSERT INTO repayment_schedules')) {
+              state.schedules.push({
+                loan_id: params[1],
+                installment_number: params[2],
+                total_due_paise: params[7],
+                principal_component_paise: params[5],
+                markup_component_paise: params[6],
+                principal_paid_paise: toPaise(0),
+                markup_paid_paise: toPaise(0),
+                effective_due_date: params[4],
+                status: 'PENDING'
+              });
+            }
           }),
           finalizeAsync: jest.fn(async () => {})
         };
@@ -213,7 +261,7 @@ describe('Cross-Loan Isolation', () => {
     
     expect(amountPaid).toBe(allocatedPrincipal + allocatedMarkup + allocatedPenalty + surplus);
     expect(amountPaid).toBe(toPaise(1500));
-    expect(allocatedPrincipal).toBe(toPaise(900)); // The unallocated funds (1500 - 500 markup - 100 penalty = 900) went to principal
+    expect(allocatedPrincipal).toBe(toPaise(600)); // 1500 total - 500 kist1 markup - 300 extended kist2 markup - 100 penalty = 600 principal
   });
 
   it('Payment idempotency: skips execution if operation_id exists', async () => {
@@ -226,8 +274,8 @@ describe('Cross-Loan Isolation', () => {
   });
   
   it('Bullet Principal test: fully pays bullet loan and settles it', async () => {
-    // Loan B is bullet, due 500 markup + 3000 principal = 3500.
-    // Pay on due date to avoid penalties
+    // Pay on due date (2026-01-01) without extension: due 500 markup + 3000 principal = 3500
+    jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     await txRepo.recordCashPayment('loan-b', toPaise(3500), 'op-b-full', '2026-01-01');
     
     const loanBSchedule = dbState.schedules.find(s => s.loan_id === 'loan-b');
@@ -251,8 +299,9 @@ describe('Cross-Loan Isolation', () => {
     const scheduleA = dbState.schedules.find(s => s.loan_id === 'loan-a');
     expect(scheduleA?.principal_paid_paise).toBe(0);
     
-    // Successful retry using the normal mock
-    await txRepo.recordCashPayment('loan-a', toPaise(2600), 'retry-op', '2026-01-02');
+    // Successful retry using the normal mock with the SAME operation ID,
+    // proving that rollback cleanly aborted the first attempt and did not persist the operation ID
+    await txRepo.recordCashPayment('loan-a', toPaise(2600), 'fail-op', '2026-01-02');
     expect(dbState.transactions.filter(t => t.transaction_type === 'COLLECTION').length).toBe(1);
     expect(dbState.schedules.find(s => s.loan_id === 'loan-a')?.status).toBe('PAID');
   });

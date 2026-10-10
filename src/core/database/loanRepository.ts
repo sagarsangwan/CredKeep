@@ -1,6 +1,6 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
-import { ScheduleOptions, generateSchedule } from '../domain/schedule';
+import { ScheduleOptions, generateSchedule, calculateNextDueDate } from '../domain/schedule';
 
 export type Loan = {
   id: string;
@@ -98,10 +98,6 @@ export class LoanRepository {
     
     // If the last kist's due date is in the past, generate new ones until we pass currentDate
     if (lastKist.effective_due_date < currentDate) {
-      // dynamic import for schedule util if needed, but it's not exported yet? Wait, I exported it.
-      const { calculateNextDueDate } = require('../domain/schedule');
-      const { toPaise } = require('../domain/money');
-      
       const totalMarkup = loan.principal_paise * loan.markup_factor;
       const markupDuePerMonth = Math.floor(totalMarkup / loan.term_months);
       
