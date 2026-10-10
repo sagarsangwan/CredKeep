@@ -21,4 +21,4 @@
 - [x] Borrower profile (Status: VERIFIED)
 - [x] PIN/app lock (Status: VERIFIED)
 - [x] Android safe-area layout (Status: VERIFIED)
-- [ ] Second-phone installation failure (Status: BACKLOG)
+- [x] Second-phone installation failure (Status: VERIFIED - Device Config)

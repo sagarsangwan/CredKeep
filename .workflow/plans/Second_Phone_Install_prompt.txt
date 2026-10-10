@@ -1,0 +1,1 @@
+﻿Investigate and plan a fix for the 'Second-phone installation failure' bug in CredKeep. The database should be correctly initialized or restored when installing on a second device.
