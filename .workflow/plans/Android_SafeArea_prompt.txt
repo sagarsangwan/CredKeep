@@ -1,0 +1,1 @@
+﻿Investigate and plan a fix for the 'Android safe-area layout' issue in CredKeep. Ensure the plan uses react-native-safe-area-context properly to avoid content overlapping with system bars on Android.

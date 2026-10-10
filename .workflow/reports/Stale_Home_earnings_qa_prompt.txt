@@ -1,0 +1,1 @@
+﻿Perform QA on Stale_Home_earnings. Review the git diff between ea9e343 and 3bc0c36. Verify cross-loan isolation, atomic financial mutations, payment idempotency, transaction conservation, and error handling. Check the regression test. Return APPROVED or REWORK with concrete file-level findings.

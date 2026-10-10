@@ -1,0 +1,1 @@
+﻿Perform QA on mock-task. Review the git diff between base and head. Verify cross-loan isolation, atomic financial mutations, payment idempotency, transaction conservation, and error handling. Check the regression test. Return APPROVED or REWORK with concrete file-level findings.

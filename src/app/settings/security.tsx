@@ -1,113 +1,160 @@
-import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, Alert, Switch } from 'react-native';
-import * as SecureStore from 'expo-secure-store';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import React, { useState } from 'react';
+import { View, StyleSheet, Alert, Switch, Modal } from 'react-native';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
+import { Shield } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { theme } from '../../ui/theme';
 import { Button } from '../../ui/Button';
-import { PIN_KEY, BIO_ENABLED_KEY } from '../../ui/PinLock';
+import { useSecurity } from '../../ui/PinLock';
+import { Keypad } from '../../ui/Keypad';
+import { Card } from '../../ui/Card';
 
 export default function SecuritySettingsScreen() {
-  const [hasPin, setHasPin] = useState(false);
-  const [bioEnabled, setBioEnabled] = useState(false);
+  const { hasPin, bioEnabled, setPin, removePin, setBioEnabled } = useSecurity();
   const [pinEntry, setPinEntry] = useState('');
   const [isSettingPin, setIsSettingPin] = useState(false);
-
-  const loadStatus = async () => {
-    const pin = await SecureStore.getItemAsync(PIN_KEY);
-    setHasPin(!!pin);
-    const bio = await SecureStore.getItemAsync(BIO_ENABLED_KEY);
-    setBioEnabled(bio === 'true');
-  };
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadStatus();
-  }, []);
+  const [step, setStep] = useState<1 | 2>(1); // 1 = Enter, 2 = Confirm
+  const [firstPin, setFirstPin] = useState('');
 
   const handleToggleBio = async (val: boolean) => {
     if (!hasPin) {
       Alert.alert('Error', 'Please set a PIN first.');
       return;
     }
-    await SecureStore.setItemAsync(BIO_ENABLED_KEY, val ? 'true' : 'false');
-    setBioEnabled(val);
+    await setBioEnabled(val);
   };
 
-  const handleSetPin = async () => {
-    if (pinEntry.length !== 4) {
-      Alert.alert('Error', 'PIN must be 4 digits');
-      return;
+  const handleKeyPress = (num: string) => {
+    if (pinEntry.length < 4) {
+      const newPin = pinEntry + num;
+      setPinEntry(newPin);
+      
+      if (newPin.length === 4) {
+        setTimeout(() => {
+          if (step === 1) {
+            setFirstPin(newPin);
+            setPinEntry('');
+            setStep(2);
+          } else {
+            if (newPin === firstPin) {
+              setPin(newPin);
+              setIsSettingPin(false);
+              setPinEntry('');
+              setFirstPin('');
+              setStep(1);
+              Alert.alert('Success', 'PIN set successfully.');
+            } else {
+              Alert.alert('Error', 'PINs do not match. Try again.');
+              setPinEntry('');
+              setFirstPin('');
+              setStep(1);
+            }
+          }
+        }, 200); // small delay for visual feedback
+      }
     }
-    await SecureStore.setItemAsync(PIN_KEY, pinEntry);
-    setHasPin(true);
-    setIsSettingPin(false);
-    setPinEntry('');
-    Alert.alert('Success', 'PIN set successfully.');
+  };
+
+  const handleBackspace = () => {
+    setPinEntry(prev => prev.slice(0, -1));
   };
 
   const handleRemovePin = async () => {
-    await SecureStore.deleteItemAsync(PIN_KEY);
-    await SecureStore.deleteItemAsync(BIO_ENABLED_KEY);
-    setHasPin(false);
-    setBioEnabled(false);
-    Alert.alert('Success', 'App Lock removed.');
+    Alert.alert(
+      'Remove App Lock', 
+      'Are you sure you want to disable the PIN and biometric lock?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: async () => {
+          await removePin();
+          Alert.alert('Success', 'App Lock removed.');
+        }}
+      ]
+    );
+  };
+
+  const startPinSetup = () => {
+    setIsSettingPin(true);
+    setStep(1);
+    setPinEntry('');
+    setFirstPin('');
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
-        <Typography variant="headlineMd" color={theme.colors.onBackground} style={styles.title}>
-          App Security
-        </Typography>
+        <View style={styles.header}>
+          <Shield size={32} color={theme.colors.primary} />
+          <Typography variant="headlineMd" color={theme.colors.onBackground} style={styles.title}>
+            App Security
+          </Typography>
+        </View>
+
+        <Card style={styles.summaryCard}>
+          <Typography variant="bodyMd" color={theme.colors.onPrimaryContainer}>
+            Protect your financial data by requiring a PIN or biometrics to open the app.
+          </Typography>
+        </Card>
 
         <View style={styles.card}>
           <View style={styles.row}>
             <Typography variant="titleMd" color={theme.colors.onSurface}>App Lock (PIN)</Typography>
-            <Typography variant="labelLg" color={hasPin ? theme.colors.primary : theme.colors.error}>
+            <Typography variant="labelLg" color={hasPin ? theme.colors.primary : theme.colors.onSurfaceVariant}>
               {hasPin ? 'Enabled' : 'Disabled'}
             </Typography>
           </View>
           
           {hasPin && (
-            <View style={[styles.row, { marginTop: 20 }]}>
+            <View style={[styles.row, { marginTop: theme.spacing.lg }]}>
               <Typography variant="titleMd" color={theme.colors.onSurface}>Biometric Unlock</Typography>
               <Switch value={bioEnabled} onValueChange={handleToggleBio} />
             </View>
           )}
         </View>
 
-        {!hasPin && !isSettingPin && (
-          <Button title="Set up PIN" onPress={() => setIsSettingPin(true)} style={{ marginTop: 20 }} />
-        )}
-
-        {!hasPin && isSettingPin && (
-          <View style={{ marginTop: 20 }}>
-            <Typography variant="labelLg" color={theme.colors.onSurface}>Enter 4-digit PIN</Typography>
-            {/* Extremely simple input for settings, relying on custom keypad is better but a TextInput or styled View works here */}
-            {/* In a real app we'd use the same Keypad, but for brevity we'll just allow setting it directly or with a keypad */}
-            <Typography variant="headlineLg" style={{ marginVertical: 20 }}>{pinEntry.padEnd(4, '-')}</Typography>
-            <View style={styles.keypad}>
-              {['1','2','3','4','5','6','7','8','9','C','0','OK'].map(k => (
-                <Button 
-                  key={k} 
-                  title={k} 
-                  variant="outline" 
-                  style={{ width: 80, marginBottom: 10 }} 
-                  onPress={() => {
-                    if (k === 'C') setPinEntry('');
-                    else if (k === 'OK') handleSetPin();
-                    else if (pinEntry.length < 4) setPinEntry(pinEntry + k);
-                  }} 
-                />
-              ))}
-            </View>
-          </View>
+        {!hasPin && (
+          <Button title="Set up PIN" onPress={startPinSetup} style={{ marginTop: theme.spacing.xl }} />
         )}
 
         {hasPin && (
-          <Button variant="outline" title="Remove App Lock" onPress={handleRemovePin} style={{ marginTop: 20 }} />
+          <Button variant="outline" title="Remove App Lock" onPress={handleRemovePin} style={{ marginTop: theme.spacing.xl }} />
         )}
+
+        <Modal visible={isSettingPin} animationType="slide" presentationStyle="pageSheet">
+          <SafeAreaProvider>
+          <SafeAreaView style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Typography variant="headlineMd" color={theme.colors.primary}>
+                {step === 1 ? 'Create PIN' : 'Confirm PIN'}
+              </Typography>
+              <Typography variant="bodyMd" color={theme.colors.onSurfaceVariant} style={{ marginTop: 8 }}>
+                {step === 1 ? 'Enter a 4-digit PIN' : 'Re-enter your PIN'}
+              </Typography>
+            </View>
+
+            <View style={styles.dotsContainer}>
+              {[1, 2, 3, 4].map(i => (
+                <View 
+                  key={i} 
+                  style={[
+                    styles.dot, 
+                    pinEntry.length >= i ? styles.dotFilled : null
+                  ]} 
+                />
+              ))}
+            </View>
+
+            <Keypad onKeyPress={handleKeyPress} onBackspace={handleBackspace} />
+
+            <Button 
+              variant="ghost" 
+              title="Cancel" 
+              onPress={() => setIsSettingPin(false)} 
+              style={{ marginTop: 40 }} 
+            />
+          </SafeAreaView>
+          </SafeAreaProvider>
+        </Modal>
       </View>
     </SafeAreaView>
   );
@@ -121,25 +168,54 @@ const styles = StyleSheet.create({
   container: {
     padding: theme.spacing.xl,
   },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.xl,
+  },
   title: {
+    marginLeft: theme.spacing.md,
+  },
+  summaryCard: {
+    backgroundColor: theme.colors.surfaceVariant,
+    padding: theme.spacing.lg,
     marginBottom: theme.spacing.xl,
   },
   card: {
     backgroundColor: theme.colors.surface,
-    padding: 20,
-    borderRadius: 12,
+    padding: theme.spacing.lg,
+    borderRadius: theme.borderRadius.lg,
     borderWidth: 1,
-    borderColor: theme.colors.outline,
+    borderColor: theme.colors.outlineVariant,
   },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  keypad: {
+  modalContainer: {
+    flex: 1,
+    backgroundColor: theme.colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: 60,
+  },
+  dotsContainer: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    width: 260,
-  }
+    gap: 20,
+    marginBottom: 60,
+  },
+  dot: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: theme.colors.primary,
+  },
+  dotFilled: {
+    backgroundColor: theme.colors.primary,
+  },
 });

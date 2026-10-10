@@ -21,6 +21,9 @@ export class TransactionRepository {
           returnResult = existing;
           return;
         }
+
+        const loan = await tx.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+        if (!loan) throw new Error('Loan not found');
         
         // Ensure schedule is up to date (for bullet loans)
         const { LoanRepository } = require('./loanRepository');
@@ -77,6 +80,23 @@ export class TransactionRepository {
           allocatedMarkup += a.allocatedToMarkup;
           allocatedPenalty += a.allocatedToPenalty;
         }
+
+        let bulletPrincipalPaid = 0;
+        if (loan.product_type === 'bullet') {
+          const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
+            `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+            [loanId]
+          );
+          bulletPrincipalPaid = pastPrincipalPaidRes?.total || 0;
+          const remainingPrincipal = loan.principal_paise - bulletPrincipalPaid;
+          
+          if (remainingPrincipal > 0 && result.unallocatedFunds > 0) {
+            const payPrincipal = Math.min(result.unallocatedFunds, remainingPrincipal) as Paise;
+            allocatedPrincipal += payPrincipal;
+            result.unallocatedFunds = (result.unallocatedFunds - payPrincipal) as Paise;
+            bulletPrincipalPaid += payPrincipal;
+          }
+        }
         
         await tx.runAsync(`
           INSERT INTO transactions (
@@ -111,8 +131,6 @@ export class TransactionRepository {
           await updateStmt.finalizeAsync();
         }
         // Check if loan should be closed
-        const loan = await tx.getFirstAsync<any>(`SELECT product_type FROM loans WHERE id = ?`, [loanId]);
-        
         let allKistsPaid = true;
         for (const k of result.updatedKists) {
           if (k.status !== 'PAID') {
@@ -121,10 +139,14 @@ export class TransactionRepository {
           }
         }
         
-        // For instalment loans, if all kists are paid and no outstanding penalty remains, settle the loan
-        // For bullet loans, they require an explicit principal repayment transaction to settle (not yet implemented in this method)
-        if (loan && loan.product_type === 'instalment' && allKistsPaid && result.remainingPenalty <= 0) {
-           await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+        if (loan.product_type === 'instalment') {
+          if (allKistsPaid && result.remainingPenalty <= 0) {
+             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+          }
+        } else if (loan.product_type === 'bullet') {
+          if (bulletPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+          }
         }
         
         returnResult = { success: true, transactionId, result };
@@ -294,6 +316,63 @@ export class TransactionRepository {
       penaltyWaived,
       outstandingPenalty,
       totalEarnings: (collectedQuery?.markup_received || 0) + penaltyReceived
+    };
+  }
+
+  async getBorrowerSummary(borrowerId: string) {
+    const loans = await this.db.getAllAsync<any>(
+      `SELECT * FROM loans WHERE borrower_id = ?`,
+      [borrowerId]
+    );
+
+    let totalPrincipalRemaining = 0;
+    let totalMarkupRemaining = 0;
+    let totalPenaltyRemaining = 0;
+    let activeLoanCount = 0;
+
+    for (const loan of loans) {
+      if (loan.status === 'ACTIVE') {
+        activeLoanCount++;
+      }
+
+      const earnings = await this.getEarningsSummary({ loanId: loan.id });
+      totalPenaltyRemaining += earnings.outstandingPenalty;
+
+      const kistSum = await this.db.getFirstAsync<any>(`
+        SELECT 
+          SUM(principal_component_paise) as total_principal,
+          SUM(markup_component_paise) as total_markup,
+          SUM(principal_paid_paise) as paid_principal,
+          SUM(markup_paid_paise) as paid_markup
+        FROM repayment_schedules
+        WHERE loan_id = ?
+      `, [loan.id]);
+
+      const markupRem = (kistSum?.total_markup || 0) - (kistSum?.paid_markup || 0);
+      totalMarkupRemaining += Math.max(0, markupRem);
+
+      if (loan.product_type === 'bullet') {
+        const bulletPrincipal = loan.principal_paise;
+        const paidQuery = await this.db.getFirstAsync<any>(`
+          SELECT SUM(allocated_principal_paise) as paid_principal, SUM(forgiven_principal_paise) as waived_principal
+          FROM transactions 
+          WHERE loan_id = ?
+        `, [loan.id]);
+        const paid = paidQuery?.paid_principal || 0;
+        const waived = paidQuery?.waived_principal || 0;
+        totalPrincipalRemaining += Math.max(0, bulletPrincipal - paid - waived);
+      } else {
+        const prinRem = (kistSum?.total_principal || 0) - (kistSum?.paid_principal || 0);
+        totalPrincipalRemaining += Math.max(0, prinRem);
+      }
+    }
+
+    return {
+      activeLoanCount,
+      totalPrincipalRemaining,
+      totalMarkupRemaining,
+      totalPenaltyRemaining,
+      totalOutstanding: totalPrincipalRemaining + totalMarkupRemaining + totalPenaltyRemaining
     };
   }
 }

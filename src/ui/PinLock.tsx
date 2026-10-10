@@ -1,37 +1,63 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, createContext, useContext } from 'react';
 import { View, StyleSheet, TouchableOpacity, AppState } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { Typography } from './Typography';
 import { theme } from './theme';
+import { Keypad } from './Keypad';
 
 export const PIN_KEY = 'credkeep_app_pin';
 export const BIO_ENABLED_KEY = 'credkeep_bio_enabled';
 
+interface SecurityContextValue {
+  hasPin: boolean;
+  bioEnabled: boolean;
+  setPin: (pin: string) => Promise<void>;
+  removePin: () => Promise<void>;
+  setBioEnabled: (enabled: boolean) => Promise<void>;
+  lockApp: () => void;
+}
+
+const SecurityContext = createContext<SecurityContextValue | null>(null);
+
+export const useSecurity = () => {
+  const ctx = useContext(SecurityContext);
+  if (!ctx) throw new Error('useSecurity must be used within PinLock');
+  return ctx;
+};
+
 export function PinLock({ children }: { children: React.ReactNode }) {
-  const [isLocked, setIsLocked] = useState(true);
-  const [hasPin, setHasPin] = useState(false);
+  const [isLocked, setIsLocked] = useState(false); // Default to false until checked
+  const [hasPin, setHasPinState] = useState(false);
+  const [bioEnabled, setBioEnabledState] = useState(false);
+  
   const [pinEntry, setPinEntry] = useState('');
   const [storedPin, setStoredPin] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
+
   const appState = React.useRef(AppState.currentState);
 
-  const checkPinSetup = async () => {
+  const checkPinSetup = async (isResume = false) => {
     try {
       const pin = await SecureStore.getItemAsync(PIN_KEY);
+      const bio = await SecureStore.getItemAsync(BIO_ENABLED_KEY);
+      
+      setHasPinState(!!pin);
+      setStoredPin(pin);
+      setBioEnabledState(bio === 'true');
+      
       if (pin) {
-        setHasPin(true);
-        setStoredPin(pin);
-        
-        // Check biometrics
-        const bioEnabled = await SecureStore.getItemAsync(BIO_ENABLED_KEY);
-        if (bioEnabled === 'true') {
+        setIsLocked(true);
+        // Only auto-prompt biometrics if we just resumed or starting up
+        if (bio === 'true') {
           const hasHardware = await LocalAuthentication.hasHardwareAsync();
           const isEnrolled = await LocalAuthentication.isEnrolledAsync();
           if (hasHardware && isEnrolled) {
             const auth = await LocalAuthentication.authenticateAsync({
               promptMessage: 'Unlock CredKeep',
               fallbackLabel: 'Use PIN',
+              disableDeviceFallback: true, // Force them to use our PIN if bio fails
             });
             if (auth.success) {
               setIsLocked(false);
@@ -43,30 +69,28 @@ export function PinLock({ children }: { children: React.ReactNode }) {
       }
     } catch (e) {
       console.error('SecureStore error', e);
-      setIsLocked(false);
+      // Fail secure - if there's an error and we think we might have a PIN, lock it.
+      // But we can't read the PIN to verify. So just leave it locked with an error message?
+      // For now, fail secure if we can't read it.
+      setIsLocked(true);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', nextAppState => {
-      if (
-        appState.current.match(/inactive|background/) &&
-        nextAppState === 'active'
-      ) {
-        // App has come to the foreground
-        if (storedPin) {
+      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        if (hasPin) {
           setIsLocked(true);
           setPinEntry('');
-          checkPinSetup();
+          checkPinSetup(true);
         }
       }
       appState.current = nextAppState;
     });
-
-    return () => {
-      subscription.remove();
-    };
-  }, [storedPin]);
+    return () => subscription.remove();
+  }, [hasPin]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -82,6 +106,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
       if (newPin.length === 4) {
         if (newPin === storedPin) {
           setIsLocked(false);
+          setPinEntry('');
         } else {
           setError(true);
           setTimeout(() => setPinEntry(''), 500);
@@ -95,44 +120,96 @@ export function PinLock({ children }: { children: React.ReactNode }) {
     setError(false);
   };
 
-  if (!isLocked) return <>{children}</>;
+  const setPin = async (pin: string) => {
+    await SecureStore.setItemAsync(PIN_KEY, pin);
+    setStoredPin(pin);
+    setHasPinState(true);
+  };
+
+  const removePin = async () => {
+    await SecureStore.deleteItemAsync(PIN_KEY);
+    await SecureStore.deleteItemAsync(BIO_ENABLED_KEY);
+    setStoredPin(null);
+    setHasPinState(false);
+    setBioEnabledState(false);
+    setIsLocked(false);
+  };
+
+  const setBioEnabled = async (enabled: boolean) => {
+    await SecureStore.setItemAsync(BIO_ENABLED_KEY, enabled ? 'true' : 'false');
+    setBioEnabledState(enabled);
+  };
+
+  const lockApp = () => {
+    if (hasPin) {
+      setIsLocked(true);
+      setPinEntry('');
+    }
+  };
+
+  const handleRetryBio = async () => {
+    const auth = await LocalAuthentication.authenticateAsync({
+      promptMessage: 'Unlock CredKeep',
+      fallbackLabel: 'Use PIN',
+      disableDeviceFallback: true,
+    });
+    if (auth.success) {
+      setIsLocked(false);
+    }
+  };
+
+  const contextValue: SecurityContextValue = {
+    hasPin,
+    bioEnabled,
+    setPin,
+    removePin,
+    setBioEnabled,
+    lockApp,
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
+        <Typography variant="headlineMd">Loading...</Typography>
+      </View>
+    );
+  }
+
+  if (isLocked) {
+    return (
+      <View style={styles.container}>
+        <Typography variant="headlineMd" color={theme.colors.primary} style={styles.title}>
+          Enter PIN
+        </Typography>
+        
+        <View style={styles.dotsContainer}>
+          {[1, 2, 3, 4].map(i => (
+            <View 
+              key={i} 
+              style={[
+                styles.dot, 
+                pinEntry.length >= i ? styles.dotFilled : null,
+                error ? styles.dotError : null
+              ]} 
+            />
+          ))}
+        </View>
+
+        <Keypad onKeyPress={handleKeyPress} onBackspace={handleBackspace} />
+
+        {bioEnabled && (
+          <TouchableOpacity onPress={handleRetryBio} style={styles.bioButton}>
+            <Typography variant="labelLg" color={theme.colors.primary}>Use Biometrics</Typography>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  }
 
   return (
-    <View style={styles.container}>
-      <Typography variant="headlineMd" color={theme.colors.primary} style={styles.title}>
-        Enter PIN
-      </Typography>
-      
-      <View style={styles.dotsContainer}>
-        {[1, 2, 3, 4].map(i => (
-          <View 
-            key={i} 
-            style={[
-              styles.dot, 
-              pinEntry.length >= i ? styles.dotFilled : null,
-              error ? styles.dotError : null
-            ]} 
-          />
-        ))}
-      </View>
-
-      <View style={styles.keypad}>
-        {['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'].map((key, i) => (
-          <TouchableOpacity
-            key={i}
-            style={styles.key}
-            onPress={() => key === 'del' ? handleBackspace() : key ? handleKeyPress(key) : null}
-            disabled={!key}
-          >
-            {key === 'del' ? (
-              <Typography variant="headlineSm" color={theme.colors.onSurface}>⌫</Typography>
-            ) : key ? (
-              <Typography variant="headlineLg" color={theme.colors.onSurface}>{key}</Typography>
-            ) : null}
-          </TouchableOpacity>
-        ))}
-      </View>
-    </View>
+    <SecurityContext.Provider value={contextValue}>
+      {children}
+    </SecurityContext.Provider>
   );
 }
 
@@ -149,7 +226,7 @@ const styles = StyleSheet.create({
   dotsContainer: {
     flexDirection: 'row',
     gap: 20,
-    marginBottom: 80,
+    marginBottom: 60,
   },
   dot: {
     width: 16,
@@ -165,18 +242,8 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.error,
     backgroundColor: theme.colors.error,
   },
-  keypad: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    width: 280,
-    justifyContent: 'space-between',
-  },
-  key: {
-    width: 80,
-    height: 80,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 10,
-    borderRadius: 40,
+  bioButton: {
+    marginTop: 40,
+    padding: 16,
   }
 });

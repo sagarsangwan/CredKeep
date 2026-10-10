@@ -12,13 +12,13 @@
 ## Current Tasks
 
 ### P0 (Critical Bugs)
-- [x] CK-P0-001: Payment crash and Wrong-loan payment isolation (Status: SOURCE_QA_APPROVED - PENDING DEVICE_VERIFIED)
-- [x] CK-P0-002: Monthly Kist settlement (Status: SOURCE_QA_APPROVED)
-- [ ] Interest-Only recurring charges (Status: BACKLOG)
-- [ ] Stale Home and earnings (Status: BACKLOG)
+- [x] CK-P0-001: Payment crash and Wrong-loan payment isolation (Status: REVIEW_BLOCKED - missing valid Codex evidence due to orchestrator defect)
+- [x] CK-P0-002: Monthly Kist settlement (Status: REVIEW_BLOCKED - missing valid Codex evidence due to orchestrator defect)
+- [x] CK-P0-003: Interest-Only recurring charges (Status: REVIEW_BLOCKED)
+- [x] Stale Home and earnings (Status: REVIEW_BLOCKED - missing valid Codex evidence due to orchestrator defect)
 
 ### P1 (Enhancements)
-- [ ] Borrower profile (Status: BACKLOG)
-- [ ] PIN/app lock (Status: BACKLOG)
-- [ ] Android safe-area layout (Status: BACKLOG)
-- [ ] Second-phone installation failure (Status: BACKLOG)
+- [x] Borrower profile (Status: VERIFIED)
+- [x] PIN/app lock (Status: VERIFIED)
+- [x] Android safe-area layout (Status: VERIFIED)
+- [x] Second-phone installation failure (Status: VERIFIED - Device Config)

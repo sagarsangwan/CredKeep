@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, ScrollView, TouchableOpacity, TextInput } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { View, FlatList, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, ScrollView, TouchableOpacity } from 'react-native';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
 import { Card } from '../../ui/Card';
@@ -15,6 +15,7 @@ import { generateSchedule } from '../../core/domain/schedule';
 
 export default function LoansScreen() {
   const router = useRouter();
+  const { borrowerId, openWizard } = useLocalSearchParams();
   const { loans, borrowers, refreshVersion, triggerRefresh } = useDatabase();
   const [data, setData] = useState<Loan[]>([]);
   const [borrowersList, setBorrowersList] = useState<Borrower[]>([]);
@@ -50,6 +51,18 @@ export default function LoansScreen() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
   }, [loadData, refreshVersion]);
+
+  useEffect(() => {
+    if (openWizard === 'true' && borrowerId && borrowersList.length > 0) {
+      setTimeout(() => {
+        setModalVisible(true);
+        setSelectedBorrowerId(borrowerId as string);
+        setStep(2); // Skip borrower selection step
+        // Remove params to prevent re-triggering on normal refresh
+        router.setParams({ openWizard: '', borrowerId: '' });
+      }, 0);
+    }
+  }, [openWizard, borrowerId, borrowersList, router]);
 
   const filteredBorrowers = useMemo(() => {
     if (!searchQuery) return borrowersList;
@@ -98,7 +111,7 @@ export default function LoansScreen() {
       resetForm();
       triggerRefresh(); // Automatically triggers re-fetch via useEffect
     } catch (e: any) {
-      Alert.alert('Error', e.message);
+      Alert.alert('Error', e.message || 'An error occurred');
     }
   };
 
@@ -215,7 +228,7 @@ export default function LoansScreen() {
   );
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <Typography variant="headlineMd" color={theme.colors.onPrimary}>Active Loans</Typography>
         <Button title="New Loan" onPress={() => { resetForm(); setModalVisible(true); }} style={styles.headerBtn} />
@@ -248,8 +261,9 @@ export default function LoansScreen() {
       />
 
       <Modal visible={isModalVisible} animationType="slide" presentationStyle="pageSheet">
-        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }} edges={['top']}>
-          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <SafeAreaProvider>
+          <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }}>
+            <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <View style={styles.modalHeader}>
             <TouchableOpacity onPress={() => setModalVisible(false)}><Typography color={theme.colors.primary}>Cancel</Typography></TouchableOpacity>
             <Typography variant="labelLg">New Loan - Step {step}/4</Typography>
@@ -260,9 +274,10 @@ export default function LoansScreen() {
           {step === 3 && renderStep3()}
           {step === 4 && renderStep4()}
         </KeyboardAvoidingView>
-        </SafeAreaView>
+          </SafeAreaView>
+        </SafeAreaProvider>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 
