@@ -1,0 +1,1 @@
+﻿Perform QA on V2_Phase1. Review the git diff between feat/bugfix/second-phone-install and feat/v2-backend-foundation. Verify cross-loan isolation, atomic financial mutations, payment idempotency, transaction conservation, and error handling. Check the regression test. Return APPROVED or REWORK with concrete file-level findings.

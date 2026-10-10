@@ -230,15 +230,15 @@ Reserve intensive APK analysis and performance tuning for the final V1 stabiliza
 
 ## Multi-Agent Workflow Integration
 This project uses a split-agent model:
-- **Codex:** Planner, Tester, Reviewer. Operates independently.
+- **Codex:** Independent Reviewer for phase boundaries and critical security changes.
 - **Gemini / Antigravity:** Implementer and Orchestrator.
 
-**Coordination Rules:**
-1. All agents MUST read `.workflow/STATE.md` before taking action.
-2. Agents MUST read `AGENTS.md` before every action.
-3. Hand-offs occur by updating `.workflow/HANDOFF.md` and invoking the next agent.
-4. Codex is the final arbiter of QA and tests.
-5. All completed work MUST have local Git commits with conventional commit messages.
+**Coordination Rules (Lightweight V2 Policy):**
+1. Stop requiring Codex planning for every task. Follow the executable backlog in `.workflow/V2_TASKS.md` directly.
+2. Use Gemini for continuous implementation.
+3. Invoke Codex via WSL only for a meaningful independent review at completed phase boundaries (e.g., End of Phase 1).
+4. No redundant full-repository reads or verbose reporting. Use Graphify selectively for unfamiliar code.
+5. All completed work MUST have local Git commits with conventional commit messages following an APPROVED status.
 
 ## graphify
 

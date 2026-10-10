@@ -1,0 +1,1 @@
+﻿Respond with 'Codex WSL integration successful.' and nothing else.

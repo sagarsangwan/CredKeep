@@ -81,20 +81,19 @@ export class TransactionRepository {
           allocatedPenalty += a.allocatedToPenalty;
         }
 
-        let bulletPrincipalPaid = 0;
+        let pastPrincipalPaid = 0;
         if (loan.product_type === 'bullet') {
           const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
             `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
             [loanId]
           );
-          bulletPrincipalPaid = pastPrincipalPaidRes?.total || 0;
-          const remainingPrincipal = loan.principal_paise - bulletPrincipalPaid;
+          pastPrincipalPaid = pastPrincipalPaidRes?.total || 0;
+          const remainingPrincipal = loan.principal_paise - pastPrincipalPaid;
           
           if (remainingPrincipal > 0 && result.unallocatedFunds > 0) {
             const payPrincipal = Math.min(result.unallocatedFunds, remainingPrincipal) as Paise;
             allocatedPrincipal += payPrincipal;
             result.unallocatedFunds = (result.unallocatedFunds - payPrincipal) as Paise;
-            bulletPrincipalPaid += payPrincipal;
           }
         }
         
@@ -144,7 +143,7 @@ export class TransactionRepository {
              await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
           }
         } else if (loan.product_type === 'bullet') {
-          if (bulletPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+          if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
              await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
           }
         }

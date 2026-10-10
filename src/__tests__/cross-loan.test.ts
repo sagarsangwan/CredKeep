@@ -1,93 +1,259 @@
 import { LoanRepository } from '../core/database/loanRepository';
 import { TransactionRepository } from '../core/database/transactionRepository';
-import { toPaise } from '../core/domain/money';
+import { Paise, toPaise } from '../core/domain/money';
+
+interface LoanRow {
+  id: string;
+  product_type: 'instalment' | 'bullet';
+  status: string;
+  principal_paise: Paise;
+}
+
+interface ScheduleRow {
+  loan_id: string;
+  installment_number: number;
+  total_due_paise: Paise;
+  principal_component_paise: Paise;
+  markup_component_paise: Paise;
+  principal_paid_paise: Paise;
+  markup_paid_paise: Paise;
+  effective_due_date: string;
+  status: string;
+}
+
+interface TransactionRow {
+  id: string;
+  operation_id: string;
+  loan_id: string;
+  transaction_type: string;
+  is_cash: number;
+  payment_method: string;
+  amount_paise: Paise;
+  allocated_principal_paise: Paise;
+  allocated_markup_paise: Paise;
+  allocated_penalty_paise: Paise;
+  unallocated_surplus_paise: Paise;
+  effective_date: string;
+  created_at: string;
+}
+
+interface DbState {
+  loans: LoanRow[];
+  schedules: ScheduleRow[];
+  transactions: TransactionRow[];
+}
 
 describe('Cross-Loan Isolation', () => {
-  let mockDb: any;
-  let loanRepo: LoanRepository;
+  let dbState: DbState;
   let txRepo: TransactionRepository;
-  let queries: any[] = [];
-  let executionLog: any[] = [];
-  let runAsyncCallbacks: any[] = [];
-
+  
   beforeEach(() => {
-    queries = [];
-    executionLog = [];
-    runAsyncCallbacks = [];
-    
-    mockDb = {
-      withExclusiveTransactionAsync: jest.fn(async (cb) => {
-        // mock tx is the same as db here for test tracking, but in reality expo passes a tx object
-        const tx = { ...mockDb };
-        await cb(tx);
-      }),
-      runAsync: jest.fn(async (query, params) => {
-        queries.push({ query, params });
-        executionLog.push('runAsync');
-      }),
-      prepareAsync: jest.fn(async (query) => {
-        return {
-          executeAsync: jest.fn(async (params) => {
-            queries.push({ query, params });
-            executionLog.push('executeAsync');
-          }),
-          finalizeAsync: jest.fn(async () => {})
+    dbState = {
+      loans: [
+        { id: 'loan-a', product_type: 'instalment', status: 'ACTIVE', principal_paise: toPaise(2000) },
+        { id: 'loan-b', product_type: 'bullet', status: 'ACTIVE', principal_paise: toPaise(3000) }
+      ],
+      schedules: [
+        {
+          loan_id: 'loan-a',
+          installment_number: 1,
+          total_due_paise: toPaise(2600),
+          principal_component_paise: toPaise(2000),
+          markup_component_paise: toPaise(600),
+          principal_paid_paise: toPaise(0),
+          markup_paid_paise: toPaise(0),
+          effective_due_date: '2026-01-01',
+          status: 'PENDING'
+        },
+        {
+          // Realistic bullet schedule: only markup is due in the kist!
+          loan_id: 'loan-b',
+          installment_number: 1,
+          total_due_paise: toPaise(500),
+          principal_component_paise: toPaise(0),
+          markup_component_paise: toPaise(500),
+          principal_paid_paise: toPaise(0),
+          markup_paid_paise: toPaise(0),
+          effective_due_date: '2026-01-01',
+          status: 'PENDING'
+        }
+      ],
+      transactions: []
+    };
+
+    txRepo = new TransactionRepository(createDbMock(dbState, null));
+  });
+
+  const createDbMock = (state: DbState, throwOnUpdateId: string | null = null): any => {
+    return {
+      withExclusiveTransactionAsync: jest.fn(async (cb: (tx: any) => Promise<void>) => {
+        // Clone state for transaction
+        const txState: DbState = {
+          loans: JSON.parse(JSON.stringify(state.loans)),
+          schedules: JSON.parse(JSON.stringify(state.schedules)),
+          transactions: JSON.parse(JSON.stringify(state.transactions))
         };
+        const tx = createDbMock(txState, throwOnUpdateId);
+        
+        try {
+          await cb(tx);
+          // Commit
+          state.loans = txState.loans;
+          state.schedules = txState.schedules;
+          state.transactions = txState.transactions;
+        } catch (e) {
+          // Rollback (do nothing to outer state)
+          throw e;
+        }
       }),
-      getFirstAsync: jest.fn(async (query, params) => {
-        if (query.includes('loans WHERE id = ?')) {
-          return { id: params[0], product_type: 'instalment', status: 'ACTIVE' };
+      getFirstAsync: jest.fn(async (query: string, params: any[] = []) => {
+        if (query.includes('FROM loans WHERE id = ?')) {
+          return state.loans.find(l => l.id === params[0]) || null;
         }
         if (query.includes('operation_id = ?')) {
-          return null;
+          return state.transactions.find(t => t.operation_id === params[0]) || null;
         }
         if (query.includes('SUM(amount_paise)')) {
-          return { total: 0 };
+          const sum = state.transactions
+            .filter(t => t.loan_id === params[0] && t.transaction_type === 'PENALTY_ASSESSMENT')
+            .reduce((acc, t) => acc + t.amount_paise, 0);
+          return { total: sum };
         }
         if (query.includes('SUM(allocated_penalty_paise)')) {
-          return { total: 0 };
+          const sum = state.transactions
+            .filter(t => t.loan_id === params[0] && t.transaction_type === 'COLLECTION')
+            .reduce((acc, t) => acc + t.allocated_penalty_paise, 0);
+          return { total: sum };
+        }
+        if (query.includes('SUM(allocated_principal_paise)')) {
+          const sum = state.transactions
+            .filter(t => t.loan_id === params[0] && t.transaction_type === 'COLLECTION')
+            .reduce((acc, t) => acc + (t.allocated_principal_paise || 0), 0);
+          return { total: sum };
         }
         return null;
       }),
-      getAllAsync: jest.fn(async (query, params) => {
-        if (query.includes('repayment_schedules')) {
-          return [
-            {
-              installment_number: 1,
-              total_due_paise: 260000,
-              principal_component_paise: 200000,
-              markup_component_paise: 60000,
-              principal_paid_paise: 0,
-              markup_paid_paise: 0,
-              effective_due_date: '2026-01-01',
-              status: 'PENDING'
-            }
-          ];
+      getAllAsync: jest.fn(async (query: string, params: any[] = []) => {
+        if (query.includes('FROM repayment_schedules WHERE loan_id = ?')) {
+          return state.schedules.filter(s => s.loan_id === params[0]);
         }
         if (query.includes('PENALTY_ASSESSMENT')) {
-          return [];
+          return state.transactions.filter(t => t.loan_id === params[0] && t.transaction_type === 'PENALTY_ASSESSMENT');
         }
         return [];
+      }),
+      runAsync: jest.fn(async (query: string, params: any[] = []) => {
+        if (query.includes('INSERT INTO transactions')) {
+          state.transactions.push({
+            id: params[0],
+            operation_id: params[1],
+            loan_id: params[2],
+            transaction_type: params[3],
+            is_cash: params[4],
+            payment_method: params[5],
+            amount_paise: params[6],
+            allocated_principal_paise: params[7],
+            allocated_markup_paise: params[8],
+            allocated_penalty_paise: params[9],
+            unallocated_surplus_paise: params[10],
+            effective_date: params[11],
+            created_at: params[12]
+          });
+        }
+        if (query.includes("UPDATE loans SET status = 'SETTLED'")) {
+          const loan = state.loans.find(l => l.id === params[0]);
+          if (loan) loan.status = 'SETTLED';
+        }
+      }),
+      prepareAsync: jest.fn(async (query: string) => {
+        return {
+          executeAsync: jest.fn(async (params: any[]) => {
+            if (throwOnUpdateId && query.includes('UPDATE repayment_schedules') && params[3] === throwOnUpdateId) {
+              throw new Error('DB failure during update');
+            }
+            if (query.includes('UPDATE repayment_schedules')) {
+              const schedule = state.schedules.find(s => s.loan_id === params[3] && s.installment_number === params[4]);
+              if (schedule) {
+                schedule.principal_paid_paise = params[0];
+                schedule.markup_paid_paise = params[1];
+                schedule.status = params[2];
+              }
+            }
+          }),
+          finalizeAsync: jest.fn(async () => {})
+        };
       })
     };
+  };
+
+  it('Payment against Loan B should only update Loan B and satisfy conservation', async () => {
+    // Perform partial payment on Loan B: 1500 paise
+    // Bullet kist has 500 markup due. So 500 goes to markup, 1000 to principal.
+    await txRepo.recordCashPayment('loan-b', toPaise(1500), 'op-b-1', '2026-01-02');
     
-    loanRepo = new LoanRepository(mockDb);
-    txRepo = new TransactionRepository(mockDb);
+    // Verify Loan A is unchanged
+    const loanASchedule = dbState.schedules.find(s => s.loan_id === 'loan-a');
+    expect(loanASchedule?.principal_paid_paise).toBe(0);
+    expect(loanASchedule?.markup_paid_paise).toBe(0);
+    
+    // Verify Loan B updated
+    const loanBSchedule = dbState.schedules.find(s => s.loan_id === 'loan-b');
+    expect(loanBSchedule?.markup_paid_paise).toBe(toPaise(500));
+    expect(loanBSchedule?.status).toBe('PAID'); // Kist (markup only) is paid!
+    
+    // Conservation assertion
+    const collections = dbState.transactions.filter(t => t.transaction_type === 'COLLECTION');
+    expect(collections.length).toBe(1);
+    
+    const amountPaid = collections[0].amount_paise;
+    const allocatedPrincipal = collections[0].allocated_principal_paise;
+    const allocatedMarkup = collections[0].allocated_markup_paise;
+    const allocatedPenalty = collections[0].allocated_penalty_paise;
+    const surplus = collections[0].unallocated_surplus_paise;
+    
+    expect(amountPaid).toBe(allocatedPrincipal + allocatedMarkup + allocatedPenalty + surplus);
+    expect(amountPaid).toBe(toPaise(1500));
+    expect(allocatedPrincipal).toBe(toPaise(900)); // The unallocated funds (1500 - 500 markup - 100 penalty = 900) went to principal
   });
 
-  it('Payment against Loan B should only update Loan B', async () => {
-    const loanBId = 'loan-b';
-    const amount = toPaise(2600); // 1 kist
+  it('Payment idempotency: skips execution if operation_id exists', async () => {
+    await txRepo.recordCashPayment('loan-b', toPaise(2600), 'existing-op', '2026-01-02');
+    const txCount = dbState.transactions.length;
     
-    await txRepo.recordCashPayment(loanBId, amount, 'test-op', '2026-01-02');
+    // Repeat same operation ID
+    await txRepo.recordCashPayment('loan-b', toPaise(2600), 'existing-op', '2026-01-02');
+    expect(dbState.transactions.length).toBe(txCount);
+  });
+  
+  it('Bullet Principal test: fully pays bullet loan and settles it', async () => {
+    // Loan B is bullet, due 500 markup + 3000 principal = 3500.
+    // Pay on due date to avoid penalties
+    await txRepo.recordCashPayment('loan-b', toPaise(3500), 'op-b-full', '2026-01-01');
     
-    // Let's check which queries were run
-    const updates = queries.filter(q => q.query.includes('UPDATE repayment_schedules'));
+    const loanBSchedule = dbState.schedules.find(s => s.loan_id === 'loan-b');
+    expect(loanBSchedule?.status).toBe('PAID');
     
-    expect(updates.length).toBeGreaterThan(0);
-    for (const update of updates) {
-      const loanIdIndex = update.params.length - 2; // Assuming WHERE loan_id = ? AND installment_number = ?
-      expect(update.params[loanIdIndex]).toBe(loanBId);
-    }
+    const loanB = dbState.loans.find(l => l.id === 'loan-b');
+    expect(loanB?.status).toBe('SETTLED');
+  });
+
+  it('Rollback: throws, discards changes, and allows successful retry', async () => {
+    // Create a mock that throws when updating loan-a's schedule
+    const errorRepo = new TransactionRepository(createDbMock(dbState, 'loan-a'));
+
+    await expect(errorRepo.recordCashPayment('loan-a', toPaise(2600), 'fail-op', '2026-01-02'))
+      .rejects.toThrow('DB failure during update');
+      
+    // Verify that the global dbState remains completely unchanged (rollback worked)
+    expect(dbState.transactions.length).toBe(0);
+    const loanA = dbState.loans.find(l => l.id === 'loan-a');
+    expect(loanA?.status).toBe('ACTIVE');
+    const scheduleA = dbState.schedules.find(s => s.loan_id === 'loan-a');
+    expect(scheduleA?.principal_paid_paise).toBe(0);
+    
+    // Successful retry using the normal mock
+    await txRepo.recordCashPayment('loan-a', toPaise(2600), 'retry-op', '2026-01-02');
+    expect(dbState.transactions.filter(t => t.transaction_type === 'COLLECTION').length).toBe(1);
+    expect(dbState.schedules.find(s => s.loan_id === 'loan-a')?.status).toBe('PAID');
   });
 });
