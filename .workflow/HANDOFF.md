@@ -1,39 +1,39 @@
 # Task Handoff
 
 ## Handoff Detail
-- **Task ID:** V2 Phase 2: Domain Data Models (CK-V2-LEDGER-001, CK-V2-LEDGER-002)
+- **Task ID:** V2 Phase 3: Financial Engine Core (CK-V2-LEDGER-003, CK-V2-LEDGER-004)
 - **Completed Changes:**
-  - Scaffolded dedicated Django app `backend/ledger/` and registered in `settings.py`.
-  - Implemented `Borrower`, `LoanAccount`, and `Kist` (Repayment Schedule) models:
-    - Scoped strictly by `tenant`.
-    - Phone number uniqueness per tenant (`unique_tenant_borrower_phone`).
-    - Exact integer Paise monetary values (`principal_paise`, `total_due_paise`, `principal_paid_paise`, `markup_paid_paise`).
-    - Validated due dates (1..31) and positive principal constraints.
-  - Implemented `Transaction` model:
-    - Strictly append-only immutability (modifications and deletions raise `ValidationError`).
-    - Sequential per-tenant numbering (`sequence_number`).
-    - Financial conservation validation: allocations (`principal + markup + penalty + surplus`) must strictly equal `amount_paise`.
-  - Implemented `ScheduleModification`, `SyncLog`, and `SyncOutbox` models.
-  - Created initial migration `0001_initial.py` and PostgreSQL RLS migration `0002_rls.py`.
-  - Applied all database migrations successfully.
-  - Created Django admin classes in `backend/ledger/admin.py`.
-  - Added comprehensive unit test suite in `backend/ledger/tests.py` covering tenant phone uniqueness, kist uniqueness, transaction conservation, append-only immutability, per-tenant sequential numbering, and outbox tracking.
+  - Ported V1 payment allocation engine to Python in `backend/ledger/engine/allocation.py`:
+    - Strict `INSTALMENT_FIRST` waterfall: due instalments (oldest first, markup then principal) -> outstanding loan penalties -> future non-due instalments -> unallocated funds.
+    - Exact integer Paise math.
+  - Ported V1 penalty assessment engine to Python in `backend/ledger/engine/penalty.py`:
+    - Non-compounding ₹100/calendar day penalty for overdue loans starting the day after the earliest unpaid due date.
+    - Multi-kist deduplication: assesses one fee per day for the overdue loan.
+  - Implemented schedule generator and calendar due-date calculation in `backend/ledger/engine/schedule.py`:
+    - Month-end boundary adjustments (Feb 28/29, 30-day months).
+    - Exact `divide_paise` distribution conserving total Paise.
+  - Implemented transactional `record_collection` service in `backend/ledger/engine/ledger_service.py`:
+    - Idempotency via `operation_id`.
+    - Auto schedule extension for bullet loans.
+    - Transactional penalty assessments.
+    - Waterfall allocation execution.
+    - Bullet loan remaining principal reduction.
+    - Append-only `Transaction` creation and `Kist` updates.
+    - Automatic loan settlement transition.
+    - `SyncOutbox` event generation for mobile sync.
+  - Comprehensive unit test suites ported and verified in `backend/ledger/tests.py` against all V1 test fixtures (all 26 test cases passing).
 - **Files Created/Modified:**
-  - `backend/credkeep_backend/settings.py`
-  - `backend/ledger/__init__.py`
-  - `backend/ledger/apps.py`
-  - `backend/ledger/models.py`
-  - `backend/ledger/admin.py`
-  - `backend/ledger/migrations/0001_initial.py`
-  - `backend/ledger/migrations/0002_rls.py`
+  - `backend/ledger/engine/__init__.py`
+  - `backend/ledger/engine/allocation.py`
+  - `backend/ledger/engine/penalty.py`
+  - `backend/ledger/engine/schedule.py`
+  - `backend/ledger/engine/ledger_service.py`
   - `backend/ledger/tests.py`
 - **Commands Run:**
+  - `.venv\Scripts\pytest.exe`: 26 passed, 3 skipped
   - `.venv\Scripts\python.exe manage.py check`: 0 issues
-  - `.venv\Scripts\python.exe manage.py makemigrations ledger`
-  - `.venv\Scripts\python.exe manage.py migrate`: All migrations applied cleanly
-  - `.venv\Scripts\pytest.exe`: 11 passed, 3 skipped
   - `npm test`: 38/38 passed
   - `npx tsc --noEmit`: 0 errors
   - `npx expo lint`: 0 errors
-- **Git Commit Hash:** `b7db18c`
-- **Next Stage:** Phase 3: Financial Engine Core (CK-V2-LEDGER-003, CK-V2-LEDGER-004) - awaiting Product Owner authorization
+- **Git Commit Hash:** `53aa170`
+- **Next Stage:** Phase 4: Sync API (CK-V2-API-001, CK-V2-SYNC-001, CK-V2-SYNC-002) - awaiting Product Owner authorization

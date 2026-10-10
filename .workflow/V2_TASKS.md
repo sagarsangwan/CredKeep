@@ -21,10 +21,10 @@ This backlog drives the autonomous execution of CredKeep V2.
   - *Acceptance:* Models created, migrations generated.
 
 ## Phase 3: Financial Engine Core
-- [ ] **CK-V2-LEDGER-003**: Implement Payment Allocation Logic
+- [x] **CK-V2-LEDGER-003**: Implement Payment Allocation Logic
   - *Scope:* Port the V1 waterfall allocation to Python.
   - *Acceptance:* Unit tests pass against V1 fixtures.
-- [ ] **CK-V2-LEDGER-004**: Implement Penalty Assessment Logic
+- [x] **CK-V2-LEDGER-004**: Implement Penalty Assessment Logic
   - *Scope:* Port V1 penalty logic (₹100/day).
   - *Acceptance:* Unit tests pass against V1 fixtures.
 
