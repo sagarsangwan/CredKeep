@@ -14,9 +14,9 @@ This backlog drives the autonomous execution of CredKeep V2.
   - *Acceptance:* Tests prove cross-tenant queries return empty.
 
 ## Phase 2: Domain Data Models
-- [ ] **CK-V2-LEDGER-001**: Implement Borrower & Loan Models
+- [x] **CK-V2-LEDGER-001**: Implement Borrower & Loan Models
   - *Scope:* Create Borrower, LoanAccount, Kist models.
-- [ ] **CK-V2-LEDGER-002**: Implement Transaction Models
+- [x] **CK-V2-LEDGER-002**: Implement Transaction Models
   - *Scope:* Create append-only Transaction model and SyncOutbox.
   - *Acceptance:* Models created, migrations generated.
 
