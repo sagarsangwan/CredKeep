@@ -81,8 +81,9 @@ Execute Git operations locally and autonomously under these invariants:
 4. **Selective Staging**: Stage only files relevant to the specific ticket (`git add <paths>`). Never stage unrelated files or secrets.
 5. **Conventional Commits**: Automatically author descriptive Conventional Commit messages (`feat(...)`, `fix(...)`, `test(...)`, `refactor(...)`, `docs(...)`).
 6. **Report Commit Hash**: Always report the created commit hash and summary to the Product Owner.
-7. **Strict Non-Destructive Boundary**:
-   - **NEVER** automatically push to remote (`git push`).
+7. **Push Before Checkout (Product Owner Standing Rule)**:
+   - Always push the active feature branch to GitHub (`git push origin <branch>`) before checking out or transitioning to another branch.
+8. **Strict Non-Destructive Boundary**:
    - **NEVER** force-push (`git push --force`).
    - **NEVER** delete branches without explicit Product Owner approval.
 
@@ -98,6 +99,7 @@ Execute Git operations locally and autonomously under these invariants:
   - Running verified project-scoped Graphify commands.
   - Installing normal, necessary, compatible project development dependencies.
   - Creating task-specific local Git commits and staging selective changes.
+  - Pushing active branch before checkout to keep GitHub in sync (Product Owner standing rule).
   - Updating `.workflow` state, reports, and handoff documentation.
   - Transitioning between planning, implementation, testing, and code review autonomously.
 
@@ -107,7 +109,7 @@ Execute Git operations locally and autonomously under these invariants:
   - Exposing or changing credentials.
   - Changing system-wide security settings.
   - Running untrusted scripts requiring elevated privileges.
-  - Pushing code to remote repositories (GitHub/`origin`).
+  - Arbitrary or unprompted remote push outside standing rules.
   - Publishing the app or triggering an EAS cloud build.
   - Bypassing operating-system security, fabricating approvals, or using unrestricted command execution to defeat safety controls.
   - Installing system-level software or machine packages.
