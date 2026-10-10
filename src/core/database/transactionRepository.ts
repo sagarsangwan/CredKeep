@@ -21,6 +21,9 @@ export class TransactionRepository {
           returnResult = existing;
           return;
         }
+
+        const loan = await tx.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+        if (!loan) throw new Error('Loan not found');
         
         // Ensure schedule is up to date (for bullet loans)
         const { LoanRepository } = require('./loanRepository');
@@ -77,6 +80,23 @@ export class TransactionRepository {
           allocatedMarkup += a.allocatedToMarkup;
           allocatedPenalty += a.allocatedToPenalty;
         }
+
+        let bulletPrincipalPaid = 0;
+        if (loan.product_type === 'bullet') {
+          const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
+            `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+            [loanId]
+          );
+          bulletPrincipalPaid = pastPrincipalPaidRes?.total || 0;
+          const remainingPrincipal = loan.principal_paise - bulletPrincipalPaid;
+          
+          if (remainingPrincipal > 0 && result.unallocatedFunds > 0) {
+            const payPrincipal = Math.min(result.unallocatedFunds, remainingPrincipal) as Paise;
+            allocatedPrincipal += payPrincipal;
+            result.unallocatedFunds = (result.unallocatedFunds - payPrincipal) as Paise;
+            bulletPrincipalPaid += payPrincipal;
+          }
+        }
         
         await tx.runAsync(`
           INSERT INTO transactions (
@@ -111,8 +131,6 @@ export class TransactionRepository {
           await updateStmt.finalizeAsync();
         }
         // Check if loan should be closed
-        const loan = await tx.getFirstAsync<any>(`SELECT product_type FROM loans WHERE id = ?`, [loanId]);
-        
         let allKistsPaid = true;
         for (const k of result.updatedKists) {
           if (k.status !== 'PAID') {
@@ -121,10 +139,14 @@ export class TransactionRepository {
           }
         }
         
-        // For instalment loans, if all kists are paid and no outstanding penalty remains, settle the loan
-        // For bullet loans, they require an explicit principal repayment transaction to settle (not yet implemented in this method)
-        if (loan && loan.product_type === 'instalment' && allKistsPaid && result.remainingPenalty <= 0) {
-           await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+        if (loan.product_type === 'instalment') {
+          if (allKistsPaid && result.remainingPenalty <= 0) {
+             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+          }
+        } else if (loan.product_type === 'bullet') {
+          if (bulletPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+          }
         }
         
         returnResult = { success: true, transactionId, result };
