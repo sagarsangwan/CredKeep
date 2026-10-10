@@ -253,3 +253,290 @@ def test_schedule_modification_tracking(tenant_fixture, loan_fixture):
     )
     assert mod.revised_effective_due_date == '2026-02-15'
     assert mod.accrued_penalty_action == 'WAIVE'
+
+
+# ==============================================================================
+# Phase 3: Financial Engine Core Tests (Ported from V1 Fixtures)
+# ==============================================================================
+
+from ledger.engine.allocation import (
+    KistAllocationState,
+    AllocationInput,
+    allocate_payment,
+)
+from ledger.engine.penalty import (
+    PenaltyRule,
+    OverdueKist,
+    LoanPenaltyState,
+    calculate_new_penalties,
+)
+from ledger.engine.schedule import (
+    divide_paise,
+    calculate_next_due_date,
+    generate_schedule,
+)
+from ledger.engine.ledger_service import (
+    record_collection,
+    assess_penalties,
+)
+
+def to_paise(rupees: int) -> int:
+    return rupees * 100
+
+def test_allocation_allocates_fully_to_oldest_unpaid_instalment():
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600)),
+        KistAllocationState(kist_number=2, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600)),
+    ]
+    result = allocate_payment(AllocationInput(payment_amount=to_paise(2600), kists=kists, outstanding_penalty=0))
+
+    assert len(result.allocations) == 1
+    assert result.allocations[0].allocated_to_kist == 1
+    assert result.allocations[0].amount == to_paise(2600)
+    assert result.updated_kists[0].amount_paid == to_paise(2600)
+    assert result.updated_kists[0].status == 'PAID'
+    assert result.remaining_penalty == 0
+    assert result.unallocated_funds == 0
+
+def test_allocation_instalment_first_then_penalty():
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600))
+    ]
+    # ₹2,600 instalment + ₹500 penalty. Pay ₹3,100.
+    result = allocate_payment(AllocationInput(payment_amount=to_paise(3100), kists=kists, outstanding_penalty=to_paise(500)))
+
+    assert result.updated_kists[0].status == 'PAID'
+    assert result.remaining_penalty == 0
+    penalty_alloc = next(a for a in result.allocations if a.allocated_to_penalty > 0)
+    assert penalty_alloc.allocated_to_penalty == to_paise(500)
+    assert result.unallocated_funds == 0
+
+def test_allocation_marks_instalment_paid_and_keeps_penalty_outstanding():
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600))
+    ]
+    # ₹2,600 instalment + ₹500 penalty. Pay ₹2,600.
+    result = allocate_payment(AllocationInput(payment_amount=to_paise(2600), kists=kists, outstanding_penalty=to_paise(500)))
+
+    assert result.updated_kists[0].status == 'PAID'
+    assert result.updated_kists[0].amount_paid == to_paise(2600)
+    assert result.remaining_penalty == to_paise(500)
+    assert result.unallocated_funds == 0
+
+def test_allocation_excess_to_next_unpaid_instalment():
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600)),
+        KistAllocationState(kist_number=2, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600)),
+    ]
+    # Pay ₹2,700 with 0 penalty
+    result = allocate_payment(AllocationInput(payment_amount=to_paise(2700), kists=kists, outstanding_penalty=0))
+
+    assert result.updated_kists[0].status == 'PAID'
+    assert result.updated_kists[1].amount_paid == to_paise(100)
+    assert result.updated_kists[1].status == 'PARTIALLY_PAID'
+    second_alloc = next(a for a in result.allocations if a.allocated_to_kist == 2)
+    assert second_alloc.amount == to_paise(100)
+
+def test_allocation_cascades_large_payment():
+    # Pay ₹6,000. Penalty ₹500.
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600), is_due=True),
+        KistAllocationState(kist_number=2, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600), is_due=True),
+        KistAllocationState(kist_number=3, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600), is_due=False),
+    ]
+    result = allocate_payment(AllocationInput(payment_amount=to_paise(6000), kists=kists, outstanding_penalty=to_paise(500)))
+
+    # Pay K1 (2600) -> Pay K2 (2600) -> Pay Penalty (500) -> Pay K3 (300)
+    assert result.updated_kists[0].status == 'PAID'
+    assert result.updated_kists[1].status == 'PAID'
+    assert result.remaining_penalty == 0
+    assert result.updated_kists[2].amount_paid == to_paise(300)
+    assert result.updated_kists[2].status == 'PARTIALLY_PAID'
+
+def test_allocation_resolves_pending_status_if_fully_paid():
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600), amount_paid=to_paise(2600), status='PENDING')
+    ]
+    result = allocate_payment(AllocationInput(payment_amount=0, kists=kists, outstanding_penalty=0))
+    assert result.updated_kists[0].status == 'PAID'
+
+def test_allocation_preserves_overpaid_kist():
+    kists = [
+        KistAllocationState(kist_number=1, amount_due=to_paise(2600), principal_due=to_paise(2000), markup_due=to_paise(600), amount_paid=to_paise(3000), status='PENDING')
+    ]
+    result = allocate_payment(AllocationInput(payment_amount=to_paise(100), kists=kists, outstanding_penalty=0))
+    assert result.updated_kists[0].amount_paid == to_paise(3000)
+    assert result.updated_kists[0].status == 'PAID'
+
+
+# --- Penalty Engine V1 Fixture Tests ---
+
+def test_penalty_single_kist_5_days_overdue():
+    state = LoanPenaltyState(
+        loan_id='1',
+        rule=PenaltyRule(daily_rate_paise=to_paise(100)),
+        kists=[
+            OverdueKist(kist_number=1, due_date='2026-10-01', amount_due=to_paise(2600), amount_paid=0, is_fully_paid=False)
+        ],
+        assessed_dates=set()
+    )
+    # 5 days overdue (Oct 2, 3, 4, 5, 6)
+    new_penalty, new_dates = calculate_new_penalties(state, '2026-10-06')
+    assert new_penalty == to_paise(500)
+    assert len(new_dates) == 5
+    assert '2026-10-02' in new_dates
+    assert '2026-10-06' in new_dates
+
+def test_penalty_multiple_overdue_kists_do_not_duplicate():
+    state = LoanPenaltyState(
+        loan_id='1',
+        rule=PenaltyRule(daily_rate_paise=to_paise(100)),
+        kists=[
+            OverdueKist(kist_number=1, due_date='2026-09-01', amount_due=to_paise(2600), amount_paid=0, is_fully_paid=False),
+            OverdueKist(kist_number=2, due_date='2026-10-01', amount_due=to_paise(2600), amount_paid=0, is_fully_paid=False),
+        ],
+        assessed_dates={f"2026-09-{d:02d}" for d in range(2, 31)} | {'2026-10-01'}
+    )
+    new_penalty, new_dates = calculate_new_penalties(state, '2026-10-06')
+    assert new_penalty == to_paise(500)
+    assert len(new_dates) == 5
+
+def test_penalty_stops_when_kists_fully_paid():
+    state = LoanPenaltyState(
+        loan_id='1',
+        rule=PenaltyRule(daily_rate_paise=to_paise(100)),
+        kists=[
+            OverdueKist(kist_number=1, due_date='2026-10-01', amount_due=to_paise(2600), amount_paid=to_paise(2600), is_fully_paid=True)
+        ],
+        assessed_dates=set()
+    )
+    new_penalty, new_dates = calculate_new_penalties(state, '2026-10-06')
+    assert new_penalty == 0
+    assert len(new_dates) == 0
+
+
+# --- Schedule Engine Tests ---
+
+def test_schedule_divide_paise_conservation():
+    # 260001 paise divided across 12 installments
+    parts = divide_paise(260001, 12)
+    assert len(parts) == 12
+    assert sum(parts) == 260001
+
+def test_schedule_month_end_due_date_calculation():
+    # Adding 1 month to Jan 31 gives Feb 28 (or 29)
+    d1 = calculate_next_due_date('2026-01-31', 1, 31)
+    assert d1 == '2026-02-28'
+    # Adding 2 months to Jan 31 gives Mar 31
+    d2 = calculate_next_due_date('2026-01-31', 2, 31)
+    assert d2 == '2026-03-31'
+    # Adding 3 months gives Apr 30
+    d3 = calculate_next_due_date('2026-01-31', 3, 31)
+    assert d3 == '2026-04-30'
+
+def test_schedule_generation_instalment_and_bullet():
+    instalment_sched = generate_schedule(
+        principal_paise=2400000,
+        markup_factor=Decimal('0.3000'),
+        term_months=12,
+        start_date_str='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    assert len(instalment_sched) == 12
+    assert sum(k.principal_due for k in instalment_sched) == 2400000
+    assert sum(k.markup_due for k in instalment_sched) == 720000
+
+    bullet_sched = generate_schedule(
+        principal_paise=3000000,
+        markup_factor=Decimal('0.1000'),
+        term_months=1,
+        start_date_str='2026-01-01',
+        due_day=1,
+        product_type='bullet'
+    )
+    assert len(bullet_sched) == 1
+    assert bullet_sched[0].principal_due == 0
+    assert bullet_sched[0].markup_due == 300000
+
+
+# --- Ledger Service Integration Tests ---
+
+@pytest.mark.django_db(transaction=True)
+def test_ledger_service_record_collection_instalment(tenant_fixture, borrower_fixture):
+    loan = LoanAccount.objects.create(
+        tenant=tenant_fixture,
+        borrower=borrower_fixture,
+        principal_paise=200000,  # ₹2,000
+        markup_factor=Decimal('0.3000'),  # ₹600
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    Kist.objects.create(
+        tenant=tenant_fixture,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=200000,
+        markup_component_paise=60000,
+        total_due_paise=260000,
+        status='PENDING'
+    )
+
+    op_id = uuid.uuid4()
+    # Pay on due date (no penalty)
+    result = record_collection(loan, 260000, op_id, '2026-01-01')
+    assert result['status'] == 'SUCCESS'
+    
+    # Verify loan transitioned to SETTLED
+    loan.refresh_from_db()
+    assert loan.status == 'SETTLED'
+    
+    # Idempotency check: replay same op_id
+    repeat = record_collection(loan, 260000, op_id, '2026-01-01')
+    assert repeat['status'] == 'ALREADY_EXISTS'
+
+@pytest.mark.django_db(transaction=True)
+def test_ledger_service_record_collection_bullet_loan_settlement(tenant_fixture, borrower_fixture):
+    bullet_loan = LoanAccount.objects.create(
+        tenant=tenant_fixture,
+        borrower=borrower_fixture,
+        principal_paise=300000,  # ₹3,000 principal
+        markup_factor=Decimal('0.1000'),  # ₹300 markup
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='bullet'
+    )
+    Kist.objects.create(
+        tenant=tenant_fixture,
+        loan=bullet_loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=0,
+        markup_component_paise=30000,
+        total_due_paise=30000,
+        status='PENDING'
+    )
+
+    op_id = uuid.uuid4()
+    # Pay ₹3,300 on due date (300 markup + 3000 principal)
+    result = record_collection(bullet_loan, 330000, op_id, '2026-01-01')
+    assert result['status'] == 'SUCCESS'
+
+    bullet_loan.refresh_from_db()
+    assert bullet_loan.status == 'SETTLED'
+
+    # Verify transaction conservation
+    tx = result['transaction']
+    assert tx.amount_paise == 330000
+    assert tx.allocated_markup_paise == 30000
+    assert tx.allocated_principal_paise == 300000
+    assert tx.allocated_penalty_paise == 0
+    assert tx.unallocated_surplus_paise == 0
+    assert tx.allocated_principal_paise + tx.allocated_markup_paise + tx.allocated_penalty_paise + tx.unallocated_surplus_paise == tx.amount_paise
+
