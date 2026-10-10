@@ -1,4 +1,5 @@
 import { SQLiteDatabase } from 'expo-sqlite';
+import * as crypto from 'expo-crypto';
 import { ApiClient } from '../api/client';
 import { AuthStore } from '../auth/authStore';
 import { OutboxManager } from './outbox';
@@ -42,6 +43,10 @@ export class SyncService {
         if (res.status === 'ACCEPTED') {
           await OutboxManager.markSynced(db, [res.operation_id]);
           pushed++;
+        } else if (res.status === 'FAILED') {
+          // Transient failure: keep status as 'PENDING' so it remains in queue for retry
+          await OutboxManager.markStatus(db, res.operation_id, 'PENDING', res.error);
+          failed++;
         } else {
           await OutboxManager.markStatus(db, res.operation_id, res.status, res.error);
           failed++;
@@ -206,9 +211,9 @@ export class SyncService {
       if (operation_type === 'INSERT') {
         const isCash = payload.is_cash !== undefined ? (payload.is_cash ? 1 : 0) : 1;
         const paymentMethod = payload.payment_method || (isCash ? 'CASH' : 'ONLINE');
-        const existing = await tx.getFirstAsync<{ id: string }>(
-          `SELECT id FROM transactions WHERE operation_id = ?`,
-          [payload.operation_id]
+        const existing = await tx.getFirstAsync<any>(
+          `SELECT * FROM transactions WHERE operation_id = ? OR (loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT' AND effective_date = ?)`,
+          [payload.operation_id, payload.loan_id, payload.effective_date]
         );
         if (!existing) {
           await tx.runAsync(
@@ -234,9 +239,46 @@ export class SyncService {
               payload.created_at || new Date().toISOString(),
             ]
           );
+        } else if (existing.transaction_type === 'COLLECTION' && payload.transaction_type === 'COLLECTION') {
+          // Reconcile authoritative server allocations via append-only adjustment transaction, respecting trigger
+          const deltaPrincipal = (payload.allocated_principal_paise || 0) - (existing.allocated_principal_paise || 0);
+          const deltaMarkup = (payload.allocated_markup_paise || 0) - (existing.allocated_markup_paise || 0);
+          const deltaPenalty = (payload.allocated_penalty_paise || 0) - (existing.allocated_penalty_paise || 0);
+          const deltaSurplus = (payload.unallocated_surplus_paise || 0) - (existing.unallocated_surplus_paise || 0);
+
+          if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
+            const reconOpId = `reconcile-${payload.operation_id}`;
+            const existingRecon = await tx.getFirstAsync<{ id: string }>(
+              `SELECT id FROM transactions WHERE operation_id = ?`,
+              [reconOpId]
+            );
+            if (!existingRecon) {
+              await tx.runAsync(
+                `INSERT INTO transactions (
+                   id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+                   amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
+                   unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  crypto.randomUUID(),
+                  reconOpId,
+                  payload.loan_id,
+                  'REVERSAL',
+                  0,
+                  'SYSTEM',
+                  0,
+                  deltaPrincipal,
+                  deltaMarkup,
+                  deltaPenalty,
+                  deltaSurplus,
+                  0,
+                  payload.effective_date,
+                  new Date().toISOString(),
+                ]
+              );
+            }
+          }
         }
-        // Invariant: Do NOT execute UPDATE on transactions.
-        // Transactions table has SQLite trigger prevent_transactions_update and is strictly append-only.
       }
     }
   }

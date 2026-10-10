@@ -30,6 +30,10 @@ class TransactionAdmin(admin.ModelAdmin):
     list_display = ('id', 'sequence_number', 'loan', 'transaction_type', 'amount_paise', 'effective_date', 'tenant')
     list_filter = ('transaction_type', 'payment_method', 'tenant')
     readonly_fields = ('id', 'sequence_number', 'created_at')
+    actions = None
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 @admin.register(ScheduleModification)
 class ScheduleModificationAdmin(admin.ModelAdmin):

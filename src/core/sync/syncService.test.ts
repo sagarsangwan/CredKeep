@@ -58,8 +58,8 @@ describe('SyncService & OutboxManager', () => {
       }),
 
       getAllAsync: jest.fn(async (sql: string, params: any[]) => {
-        if (sql.includes('FROM sync_outbox WHERE status = \'PENDING\'')) {
-          return outboxRows.filter((r) => r.status === 'PENDING');
+        if (sql.includes('FROM sync_outbox')) {
+          return outboxRows.filter((r) => r.status === 'PENDING' || r.status === 'FAILED');
         }
         return [];
       }),
@@ -244,6 +244,97 @@ describe('SyncService & OutboxManager', () => {
         (call: any[]) => typeof call[0] === 'string' && call[0].includes('UPDATE transactions')
       );
       expect(hasUpdateTx).toBe(false);
+    });
+
+    it('reconciles allocation deltas via append-only adjustment transaction', async () => {
+      // Mock existing transaction with optimistic allocations
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM transactions WHERE operation_id = ?')) {
+          if (params[0] === 'op-optimistic-tx') {
+            return {
+              id: 'tx-local-1',
+              loan_id: 'loan-1',
+              transaction_type: 'COLLECTION',
+              allocated_principal_paise: 20000,
+              allocated_markup_paise: 15000,
+              allocated_penalty_paise: 5000,
+              unallocated_surplus_paise: 10000,
+            };
+          }
+          if (params[0] === 'reconcile-op-optimistic-tx') return null;
+        }
+        return null;
+      });
+
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        next_cursor: 22,
+        has_more: false,
+        changes: [
+          {
+            id: 'change-tx-recon',
+            record_type: 'TRANSACTION',
+            operation_type: 'INSERT',
+            payload: {
+              id: 'tx-server-1',
+              operation_id: 'op-optimistic-tx',
+              loan_id: 'loan-1',
+              transaction_type: 'COLLECTION',
+              amount_paise: 50000,
+              allocated_principal_paise: 30000, // +10000
+              allocated_markup_paise: 15000,    // 0
+              allocated_penalty_paise: 5000,    // 0
+              unallocated_surplus_paise: 0,     // -10000
+              effective_date: '2026-01-05',
+            },
+          },
+        ],
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(1);
+      // Verify append-only adjustment transaction inserted
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO transactions'),
+        expect.arrayContaining(['reconcile-op-optimistic-tx', 'REVERSAL', 10000, 0, 0, -10000])
+      );
+    });
+
+    it('deduplicates penalty assessments matching (loan_id, effective_date)', async () => {
+      // Mock existing penalty assessment matching date
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM transactions WHERE operation_id = ? OR (loan_id = ? AND transaction_type = \'PENALTY_ASSESSMENT\' AND effective_date = ?)')) {
+          return { id: 'local-penalty-1', transaction_type: 'PENALTY_ASSESSMENT' };
+        }
+        return null;
+      });
+
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        next_cursor: 23,
+        has_more: false,
+        changes: [
+          {
+            id: 'change-pen',
+            record_type: 'TRANSACTION',
+            operation_type: 'INSERT',
+            payload: {
+              id: 'server-penalty-uuid',
+              operation_id: 'server-pen-op-id',
+              loan_id: 'loan-1',
+              transaction_type: 'PENALTY_ASSESSMENT',
+              amount_paise: 10000,
+              effective_date: '2026-01-02',
+            },
+          },
+        ],
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(1);
+      // No duplicate insert for existing penalty on that date
+      const hasDuplicatePen = (mockDb.runAsync as jest.Mock).mock.calls.some(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('INSERT INTO transactions') && call[1]?.includes('server-pen-op-id')
+      );
+      expect(hasDuplicatePen).toBe(false);
     });
 
     it('deduplicates KIST installments matching (loan_id, installment_number) without duplicating rows', async () => {

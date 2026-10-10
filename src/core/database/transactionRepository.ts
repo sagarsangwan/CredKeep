@@ -243,8 +243,11 @@ export class TransactionRepository {
         const transactionId = crypto.randomUUID();
         const operationId = `penalty-${loanId}-${date}`;
         
-        // Check if it already exists to be safe
-        const existing = await tx.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
+        // Check if it already exists to be safe (by operation_id or date)
+        const existing = await tx.getFirstAsync(
+          `SELECT id FROM transactions WHERE operation_id = ? OR (loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT' AND effective_date = ?)`,
+          [operationId, loanId, date]
+        );
         if (!existing) {
           await tx.runAsync(`
             INSERT INTO transactions (

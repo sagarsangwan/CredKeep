@@ -1,6 +1,7 @@
 import uuid
 from decimal import Decimal
 import pytest
+from django.utils import timezone
 from django.db import models
 from django.urls import reverse
 from django.contrib.auth.models import User
@@ -8,7 +9,7 @@ from rest_framework.test import APIClient
 from rest_framework.authtoken.models import Token
 
 from tenants.models import Tenant, Device
-from ledger.models import Borrower, LoanAccount, Kist, Transaction as LedgerTx, SyncLog, SyncOutbox
+from ledger.models import Borrower, LoanAccount, Kist, Transaction as LedgerTx, SyncLog, SyncOutbox, ScheduleModification
 from ledger.engine import ledger_service
 
 
@@ -230,6 +231,7 @@ def test_sync_push_record_collection_and_settlement(api_client, lender_setup):
     api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
     url = reverse('sync-push')
 
+    today_str = str(timezone.now().date())
     borrower = Borrower.objects.create(tenant=tenant, name='Kavita Patel', phone='9988776655')
     loan = LoanAccount.objects.create(
         tenant=tenant,
@@ -237,8 +239,8 @@ def test_sync_push_record_collection_and_settlement(api_client, lender_setup):
         principal_paise=100000,
         markup_factor=Decimal('0.10'),
         term_months=1,
-        start_date='2026-01-01',
-        due_day=15,
+        start_date=today_str,
+        due_day=timezone.now().date().day,
         product_type='instalment',
         status='ACTIVE'
     )
@@ -246,8 +248,8 @@ def test_sync_push_record_collection_and_settlement(api_client, lender_setup):
         tenant=tenant,
         loan=loan,
         installment_number=1,
-        original_due_date='2026-01-15',
-        effective_due_date='2026-01-15',
+        original_due_date=today_str,
+        effective_due_date=today_str,
         principal_component_paise=100000,
         markup_component_paise=10000,
         total_due_paise=110000,
@@ -263,7 +265,7 @@ def test_sync_push_record_collection_and_settlement(api_client, lender_setup):
                 'payload': {
                     'loan_id': str(loan.id),
                     'amount_paise': 110000,
-                    'effective_date': '2026-01-15',
+                    'effective_date': today_str,
                     'payment_method': 'CASH'
                 }
             }
@@ -305,17 +307,28 @@ def test_sync_push_stale_settled_loan_needs_review(api_client, lender_setup):
         product_type='instalment',
         status='SETTLED'  # Already settled
     )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-15',
+        effective_due_date='2026-01-15',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PAID'
+    )
 
     op_id = str(uuid.uuid4())
     payload = {
         'operations': [
             {
                 'operation_id': op_id,
-                'type': 'record_collection',
+                'type': 'modify_schedule',
                 'payload': {
                     'loan_id': str(loan.id),
-                    'amount_paise': 50000,
-                    'effective_date': '2026-01-20'
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-15'
                 }
             }
         ]
@@ -325,8 +338,8 @@ def test_sync_push_stale_settled_loan_needs_review(api_client, lender_setup):
     assert response.status_code == 200
     assert response.data['results'][0]['status'] == 'NEEDS_REVIEW'
 
-    # Verify no collection transaction was added
-    assert not LedgerTx.objects.filter(tenant=tenant, operation_id=op_id).exists()
+    # Verify no schedule modification record was added
+    assert not ScheduleModification.objects.filter(tenant=tenant, operation_id=op_id).exists()
 
 
 @pytest.mark.django_db
@@ -487,6 +500,12 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
     user, tenant, token = lender_setup
     api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
 
+    import datetime
+    today = timezone.now().date()
+    due_date = today - datetime.timedelta(days=5)
+    today_str = str(today)
+    due_date_str = str(due_date)
+
     borrower = Borrower.objects.create(tenant=tenant, name='Waiver Borrower', phone='9876543211')
     loan = LoanAccount.objects.create(
         tenant=tenant,
@@ -494,8 +513,8 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
         principal_paise=100000,
         markup_factor=Decimal('0.1'),
         term_months=1,
-        start_date='2026-01-01',
-        due_day=1,
+        start_date=due_date_str,
+        due_day=due_date.day,
         product_type='instalment',
         status='ACTIVE'
     )
@@ -503,8 +522,8 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
         tenant=tenant,
         loan=loan,
         installment_number=1,
-        original_due_date='2026-01-01',
-        effective_due_date='2026-01-01',
+        original_due_date=due_date_str,
+        effective_due_date=due_date_str,
         principal_component_paise=100000,
         markup_component_paise=10000,
         total_due_paise=110000,
@@ -512,7 +531,7 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
     )
 
     # Late by 5 days: assess ₹500 penalty (50,000 paise)
-    ledger_service.assess_penalties(loan, '2026-01-06')
+    ledger_service.assess_penalties(loan, today_str)
     assert loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').count() == 5
 
     # Waive ₹500 penalty via push
@@ -525,7 +544,7 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
                 "payload": {
                     "loan_id": str(loan.id),
                     "amount_paise": 50000,
-                    "effective_date": "2026-01-06"
+                    "effective_date": today_str
                 }
             }
         ]
@@ -546,7 +565,7 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
                 "payload": {
                     "loan_id": str(loan.id),
                     "amount_paise": 110000,
-                    "effective_date": "2026-01-06",
+                    "effective_date": today_str,
                     "payment_method": "CASH",
                     "is_cash": True
                 }
@@ -803,5 +822,154 @@ def test_outbox_allocates_strictly_unique_sequential_cursors(lender_setup):
     assert outbox2.sequence_number == 2
     tenant.refresh_from_db()
     assert tenant.outbox_sequence_counter == 2
+
+
+@pytest.mark.django_db
+def test_transaction_bulk_deletion_prevented(lender_setup):
+    from django.core.exceptions import ValidationError
+    from ledger.admin import TransactionAdmin
+    from django.contrib.admin.sites import AdminSite
+
+    user, tenant, token = lender_setup
+    borrower = Borrower.objects.create(tenant=tenant, name='Delete Borrower', phone='9876543297')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    tx = LedgerTx.objects.create(
+        tenant=tenant,
+        operation_id=uuid.uuid4(),
+        loan=loan,
+        transaction_type='COLLECTION',
+        amount_paise=10000,
+        allocated_principal_paise=10000,
+        effective_date='2026-01-01'
+    )
+
+    # 1. QuerySet.delete() raises ValidationError
+    with pytest.raises(ValidationError, match="bulk deletions are prohibited"):
+        LedgerTx.objects.filter(id=tx.id).delete()
+
+    # 2. TransactionAdmin denies delete permission and bulk actions
+    admin = TransactionAdmin(LedgerTx, AdminSite())
+    assert admin.has_delete_permission(None) is False
+    assert admin.actions is None
+
+
+@pytest.mark.django_db
+def test_settled_loan_payment_recorded_as_unallocated_surplus(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Settled Borrower', phone='9876543296')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='SETTLED'
+    )
+
+    op_id = str(uuid.uuid4())
+    url = reverse('sync-push')
+    res = api_client.post(url, {
+        "operations": [{
+            "type": "record_collection",
+            "operation_id": op_id,
+            "payload": {
+                "loan_id": str(loan.id),
+                "amount_paise": 25000,
+                "effective_date": "2026-01-15",
+                "payment_method": "CASH",
+                "is_cash": True
+            }
+        }]
+    }, format='json')
+
+    # Failure matrix requirement: Accepted, recorded as surplus, loan remains settled
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'ACCEPTED'
+
+    tx = loan.transactions.filter(operation_id=op_id).first()
+    assert tx is not None
+    assert tx.amount_paise == 25000
+    assert tx.unallocated_surplus_paise == 25000
+    assert tx.allocated_principal_paise == 0
+
+    loan.refresh_from_db()
+    assert loan.status == 'SETTLED'
+
+
+@pytest.mark.django_db
+def test_anti_backdating_penalty_assessment_governed_by_server_clock(api_client, lender_setup):
+    from django.utils import timezone
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Backdate Borrower', phone='9876543295')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    # Client submits payment claimed to be from 2026-01-01 (backdated)
+    # But today (server clock) is past the due date
+    op_id = str(uuid.uuid4())
+    url = reverse('sync-push')
+    res = api_client.post(url, {
+        "operations": [{
+            "type": "record_collection",
+            "operation_id": op_id,
+            "payload": {
+                "loan_id": str(loan.id),
+                "amount_paise": 50000,
+                "effective_date": "2026-01-01",
+                "payment_method": "CASH",
+                "is_cash": True
+            }
+        }]
+    }, format='json')
+
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'ACCEPTED'
+
+    # The collection receipt maintains the client's claimed effective_date
+    tx = loan.transactions.filter(operation_id=op_id).first()
+    assert str(tx.effective_date) == '2026-01-01'
+
+    # If server's clock is ahead of due date, penalties were assessed up to server clock
+    server_today = timezone.now().date().isoformat()
+    if server_today > '2026-01-01':
+        assert loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').exists()
+
 
 

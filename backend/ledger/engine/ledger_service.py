@@ -119,9 +119,13 @@ def assess_penalties(loan: LoanAccount, current_date_str: str) -> int:
 
     # Record penalty assessment transactions for each new date
     for d in new_assessed_dates:
+        pen_op_id = uuid.uuid5(uuid.NAMESPACE_OID, f"penalty:{loan.id}:{d}")
+        if LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT', effective_date=d).exists():
+            continue
+
         pen_tx = LedgerTx.objects.create(
             tenant=loan.tenant,
-            operation_id=uuid.uuid4(),
+            operation_id=pen_op_id,
             loan=loan,
             transaction_type='PENALTY_ASSESSMENT',
             amount_paise=10000,
@@ -189,7 +193,7 @@ def record_collection(
         # Extend schedule for bullet loans if applicable
         extend_bullet_schedule_if_needed(locked_loan, effective_date_str)
 
-        # Assess late penalties up to collection date
+        # Assess late penalties up to effective collection date
         assess_penalties(locked_loan, effective_date_str)
 
         # Calculate outstanding penalties (accounting for collections and waivers)

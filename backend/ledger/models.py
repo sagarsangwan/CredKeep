@@ -106,7 +106,14 @@ class Kist(models.Model):
         return f"Kist #{self.installment_number} for Loan {self.loan_id} ({self.status})"
 
 
+class TransactionQuerySet(models.QuerySet):
+    def delete(self):
+        raise ValidationError("Transaction records are append-only: bulk deletions are prohibited.")
+
+
 class Transaction(models.Model):
+    objects = TransactionQuerySet.as_manager()
+
     TRANSACTION_TYPES = [
         ('COLLECTION', 'Collection'),
         ('PENALTY_ASSESSMENT', 'Penalty Assessment'),

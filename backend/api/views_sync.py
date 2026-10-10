@@ -341,10 +341,6 @@ class SyncPushView(APIView):
             except (LoanAccount.DoesNotExist, ValueError):
                 return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
 
-            # Stale update check: settled or written off loans require review
-            if loan.status in ('SETTLED', 'WRITTEN_OFF'):
-                return 'NEEDS_REVIEW', f'Loan {loan.id} is already settled or written off.'
-
             amount_paise = int(payload.get('amount_paise', 0))
             if amount_paise <= 0:
                 return 'REJECTED', 'Payment amount must be greater than zero.'
@@ -359,6 +355,52 @@ class SyncPushView(APIView):
 
             payment_method = payload.get('payment_method', 'CASH').upper()
             is_cash = payload.get('is_cash', payment_method == 'CASH')
+
+            # Failure Matrix invariant: Money received on settled loan is recorded, marked as surplus, and loan remains settled.
+            if loan.status in ('SETTLED', 'WRITTEN_OFF'):
+                surplus_tx = LedgerTx.objects.create(
+                    tenant=tenant,
+                    operation_id=operation_id,
+                    loan=loan,
+                    transaction_type='COLLECTION',
+                    is_cash=is_cash,
+                    payment_method=payment_method,
+                    amount_paise=amount_paise,
+                    allocated_principal_paise=0,
+                    allocated_markup_paise=0,
+                    allocated_penalty_paise=0,
+                    unallocated_surplus_paise=amount_paise,
+                    effective_date=str(effective_date)
+                )
+                SyncOutbox.objects.create(
+                    tenant=tenant,
+                    record_type='TRANSACTION',
+                    record_id=surplus_tx.id,
+                    operation_type='INSERT',
+                    payload={
+                        'id': str(surplus_tx.id),
+                        'operation_id': str(surplus_tx.operation_id),
+                        'loan_id': str(loan.id),
+                        'transaction_type': surplus_tx.transaction_type,
+                        'is_cash': surplus_tx.is_cash,
+                        'payment_method': surplus_tx.payment_method,
+                        'amount_paise': surplus_tx.amount_paise,
+                        'allocated_principal_paise': 0,
+                        'allocated_markup_paise': 0,
+                        'allocated_penalty_paise': 0,
+                        'unallocated_surplus_paise': surplus_tx.unallocated_surplus_paise,
+                        'forgiven_penalty_paise': 0,
+                        'effective_date': str(surplus_tx.effective_date)
+                    }
+                )
+                return 'ACCEPTED', None
+
+            # Clock skew rule (docs/v2/10-sync-failure-matrix.md):
+            # Authoritative server clock governs penalty assessments to prevent devices
+            # from evading accrued late fees by backdating offline collection timestamps.
+            server_date_str = str(timezone.now().date())
+            assess_date_str = max(str(effective_date), server_date_str)
+            ledger_service.assess_penalties(loan, assess_date_str)
 
             ledger_service.record_collection(
                 loan=loan,
@@ -376,7 +418,7 @@ class SyncPushView(APIView):
                 return 'REJECTED', 'Missing loan_id.'
 
             try:
-                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+                loan = LoanAccount.objects.select_for_update().get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
             except (LoanAccount.DoesNotExist, ValueError):
                 return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
 
