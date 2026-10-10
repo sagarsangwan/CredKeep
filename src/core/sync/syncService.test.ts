@@ -201,7 +201,7 @@ describe('SyncService & OutboxManager', () => {
       expect(metaRows['last_synced_at']).toBeDefined();
     });
 
-    it('reconciles authoritative allocations and payment metadata on existing transaction', async () => {
+    it('respects append-only ledger trigger: does not execute UPDATE on existing transactions', async () => {
       // Mock existing transaction check to return an existing id
       mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
         if (sql.includes('FROM transactions WHERE operation_id = ?')) {
@@ -239,19 +239,63 @@ describe('SyncService & OutboxManager', () => {
 
       const pullRes = await SyncService.pullChanges(mockDb);
       expect(pullRes.pulled).toBe(1);
-      expect(mockDb.runAsync).toHaveBeenCalledWith(
-        expect.stringContaining('UPDATE transactions SET'),
-        [
-          30000, // allocated_principal_paise
-          15000, // allocated_markup_paise
-          5000,  // allocated_penalty_paise
-          0,     // unallocated_surplus_paise
-          0,     // forgiven_penalty_paise
-          0,     // is_cash (false -> 0)
-          'UPI', // payment_method
-          'op-existing-tx',
-        ]
+      // Invariant: MUST NOT execute UPDATE on transactions table
+      const hasUpdateTx = (mockDb.runAsync as jest.Mock).mock.calls.some(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('UPDATE transactions')
       );
+      expect(hasUpdateTx).toBe(false);
+    });
+
+    it('deduplicates KIST installments matching (loan_id, installment_number) without duplicating rows', async () => {
+      // Mock existing kist check to match by installment_number
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM repayment_schedules WHERE id = ? OR (loan_id = ? AND installment_number = ?)')) {
+          if (params[1] === 'loan-1' && params[2] === 1) return { id: 'local-kist-uuid-1' };
+        }
+        return null;
+      });
+
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        next_cursor: 25,
+        has_more: false,
+        changes: [
+          {
+            id: 'change-kist',
+            record_type: 'KIST',
+            operation_type: 'INSERT',
+            payload: {
+              id: 'server-kist-uuid-different',
+              loan_id: 'loan-1',
+              installment_number: 1,
+              original_due_date: '2026-01-01',
+              effective_due_date: '2026-01-01',
+              principal_component_paise: 100000,
+              markup_component_paise: 10000,
+              total_due_paise: 110000,
+              principal_paid_paise: 50000,
+              markup_paid_paise: 5000,
+              status: 'PARTIAL',
+            },
+          },
+        ],
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(1);
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE repayment_schedules SET'),
+        expect.arrayContaining(['local-kist-uuid-1'])
+      );
+    });
+
+    it('reports failure and error messages when push has failed operations', async () => {
+      jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
+      jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });
+
+      const res = await SyncService.syncAll(mockDb);
+      expect(res.success).toBe(false);
+      expect(res.errors).toBeDefined();
+      expect(res.errors![0]).toContain('1 operations failed to push');
     });
   });
 });

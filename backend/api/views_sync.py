@@ -154,8 +154,7 @@ class SyncPushView(APIView):
                         res_item["error"] = err_msg
                     results.append(res_item)
 
-            except Exception as e:
-                # Top-level failure for this operation: recover if concurrent duplicate or record REJECTED
+            except ValidationError as e:
                 err_text = str(e)
                 existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
                 if existing_log:
@@ -173,18 +172,30 @@ class SyncPushView(APIView):
                             status='REJECTED',
                             error_message=err_text
                         )
-                        results.append({
-                            "operation_id": str(operation_id),
-                            "status": "REJECTED",
-                            "error": err_text
-                        })
                     except IntegrityError:
-                        existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
-                        results.append({
-                            "operation_id": str(operation_id),
-                            "status": existing_log.status if existing_log else "REJECTED",
-                            "error": existing_log.error_message if existing_log else err_text
-                        })
+                        pass
+                    results.append({
+                        "operation_id": str(operation_id),
+                        "status": "REJECTED",
+                        "error": err_text
+                    })
+
+            except Exception as e:
+                # Transient infrastructure / database failure: do NOT poison with permanent REJECTED SyncLog
+                err_text = str(e)
+                existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                if existing_log:
+                    results.append({
+                        "operation_id": str(operation_id),
+                        "status": existing_log.status,
+                        "error": existing_log.error_message or None
+                    })
+                else:
+                    results.append({
+                        "operation_id": str(operation_id),
+                        "status": "FAILED",
+                        "error": err_text
+                    })
 
         return Response({"results": results}, status=status.HTTP_200_OK)
 
@@ -421,7 +432,7 @@ class SyncPushView(APIView):
                 return 'REJECTED', 'Missing loan_id.'
 
             try:
-                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+                loan = LoanAccount.objects.select_for_update().get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
             except (LoanAccount.DoesNotExist, ValueError):
                 return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
 
@@ -433,13 +444,38 @@ class SyncPushView(APIView):
             if 'T' in eff_date:
                 eff_date = eff_date.split('T')[0]
 
+            # Assess penalties due up to eff_date first under the loan lock
+            ledger_service.assess_penalties(loan, eff_date)
+
+            total_assessed = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+                .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+            )
+            total_penalty_paid = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type='COLLECTION')
+                .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
+            )
+            total_penalty_waived = (
+                LedgerTx.objects
+                .filter(loan=loan, transaction_type='REVERSAL')
+                .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+            )
+            outstanding_pen = max(0, total_assessed - total_penalty_paid - total_penalty_waived)
+
+            if outstanding_pen <= 0:
+                return 'REJECTED', 'No outstanding penalty to waive.'
+
+            actual_waived = min(waive_amount, outstanding_pen)
+
             tx = LedgerTx.objects.create(
                 tenant=tenant,
                 operation_id=operation_id,
                 loan=loan,
                 transaction_type='REVERSAL',
                 amount_paise=0,
-                forgiven_penalty_paise=waive_amount,
+                forgiven_penalty_paise=actual_waived,
                 effective_date=eff_date
             )
 
@@ -459,29 +495,14 @@ class SyncPushView(APIView):
             )
 
             # Check if loan settles as a result of penalty waiver
-            total_assessed = (
-                LedgerTx.objects
-                .filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
-                .aggregate(total=models.Sum('amount_paise'))['total'] or 0
-            )
-            total_penalty_paid = (
-                LedgerTx.objects
-                .filter(loan=loan, transaction_type='COLLECTION')
-                .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
-            )
-            total_penalty_waived = (
-                LedgerTx.objects
-                .filter(loan=loan, transaction_type='REVERSAL')
-                .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
-            )
-            outstanding_pen = max(0, total_assessed - total_penalty_paid - total_penalty_waived)
+            remaining_pen = outstanding_pen - actual_waived
             all_kists_paid = not loan.schedules.exclude(status='PAID').exists()
             settled = False
-            if loan.product_type == 'instalment' and all_kists_paid and outstanding_pen <= 0:
+            if loan.product_type == 'instalment' and all_kists_paid and remaining_pen <= 0:
                 loan.status = 'SETTLED'
                 loan.save(update_fields=['status'])
                 settled = True
-            elif loan.product_type == 'bullet' and all_kists_paid and outstanding_pen <= 0:
+            elif loan.product_type == 'bullet' and all_kists_paid and remaining_pen <= 0:
                 past_p = (
                     LedgerTx.objects
                     .filter(loan=loan, transaction_type='COLLECTION')

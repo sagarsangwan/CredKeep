@@ -19,9 +19,9 @@ export class TransactionRepository {
 
       await this.db.withExclusiveTransactionAsync(async (tx) => {
         // Idempotency check
-        const existing = await tx.getFirstAsync(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
+        const existing = await tx.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
         if (existing) {
-          returnResult = existing;
+          returnResult = { success: true, transactionId: existing.id, transaction: existing };
           return;
         }
 

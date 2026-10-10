@@ -126,28 +126,37 @@ describe('Cross-Loan Isolation', () => {
     txRepo = new TransactionRepository(createDbMock(dbState, null));
   });
 
+  let dbMutex = Promise.resolve();
+
   const createDbMock = (state: DbState, throwOnUpdateId: string | null = null): any => {
     return {
       withExclusiveTransactionAsync: jest.fn(async (cb: (tx: any) => Promise<void>) => {
-        // Clone state for transaction
-        const txState: DbState = {
-          loans: JSON.parse(JSON.stringify(state.loans)),
-          schedules: JSON.parse(JSON.stringify(state.schedules)),
-          transactions: JSON.parse(JSON.stringify(state.transactions)),
-          outbox: JSON.parse(JSON.stringify(state.outbox))
-        };
-        const tx = createDbMock(txState, throwOnUpdateId);
-        
+        // Enforce SQLite exclusive transaction mutex locking
+        const prevMutex = dbMutex;
+        let releaseMutex: () => void;
+        dbMutex = new Promise<void>((resolve) => {
+          releaseMutex = resolve;
+        });
+        await prevMutex;
+
         try {
+          // Clone state for transaction
+          const txState: DbState = {
+            loans: JSON.parse(JSON.stringify(state.loans)),
+            schedules: JSON.parse(JSON.stringify(state.schedules)),
+            transactions: JSON.parse(JSON.stringify(state.transactions)),
+            outbox: JSON.parse(JSON.stringify(state.outbox))
+          };
+          const tx = createDbMock(txState, throwOnUpdateId);
+          
           await cb(tx);
           // Commit
           state.loans = txState.loans;
           state.schedules = txState.schedules;
           state.transactions = txState.transactions;
           state.outbox = txState.outbox;
-        } catch (e) {
-          // Rollback (do nothing to outer state)
-          throw e;
+        } finally {
+          releaseMutex!();
         }
       }),
       getFirstAsync: jest.fn(async (query: string, params: any[] = []) => {
@@ -188,6 +197,10 @@ describe('Cross-Loan Isolation', () => {
         return [];
       }),
       runAsync: jest.fn(async (query: string, params: any[] = []) => {
+        // Enforce SQLite trigger prevent_transactions_update
+        if (query.includes('UPDATE transactions')) {
+          throw new Error('Transactions table is append-only: updates are prohibited');
+        }
         if (query.includes('INSERT INTO transactions')) {
           if (state.transactions.some(t => t.operation_id === params[1])) {
             throw new Error(`UNIQUE constraint failed: transactions.operation_id`);
@@ -238,6 +251,9 @@ describe('Cross-Loan Isolation', () => {
               }
             }
             if (query.includes('INSERT INTO repayment_schedules')) {
+              if (state.schedules.some(s => s.loan_id === params[1] && s.installment_number === params[2])) {
+                throw new Error('UNIQUE constraint failed: repayment_schedules.loan_id, repayment_schedules.installment_number');
+              }
               state.schedules.push({
                 loan_id: params[1],
                 installment_number: params[2],
@@ -345,5 +361,19 @@ describe('Cross-Loan Isolation', () => {
     expect(txs.length).toBe(1);
     const outboxOps = dbState.outbox.filter(o => o.operation_id === 'concurrent-op');
     expect(outboxOps.length).toBe(1);
+  });
+
+  it('Trigger enforcement: direct UPDATE on transactions throws append-only violation', async () => {
+    const mock = createDbMock(dbState);
+    await expect(mock.runAsync('UPDATE transactions SET amount_paise = 999 WHERE id = ?', ['tx-1']))
+      .rejects.toThrow('Transactions table is append-only: updates are prohibited');
+  });
+
+  it('Constraint enforcement: inserting duplicate installment number for same loan throws UNIQUE constraint error', async () => {
+    const mock = createDbMock(dbState);
+    const stmt = await mock.prepareAsync('INSERT INTO repayment_schedules VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    // First installment for loan-a already exists in dbState
+    await expect(stmt.executeAsync(['sched-2', 'loan-a', 1, '2026-01-01', '2026-01-01', toPaise(1000), toPaise(100), toPaise(1100)]))
+      .rejects.toThrow('UNIQUE constraint failed: repayment_schedules.loan_id, repayment_schedules.installment_number');
   });
 });

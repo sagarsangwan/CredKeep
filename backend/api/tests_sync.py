@@ -1,6 +1,7 @@
 import uuid
 from decimal import Decimal
 import pytest
+from django.db import models
 from django.urls import reverse
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
@@ -624,4 +625,183 @@ def test_concurrent_payment_retries_idempotency_recovery(api_client, lender_setu
     tx = loan.transactions.filter(transaction_type='COLLECTION').first()
     assert tx.is_cash is False
     assert tx.payment_method == 'UPI'
+
+
+@pytest.mark.django_db
+def test_temporary_infrastructure_failure_preserves_retryability(api_client, lender_setup):
+    from unittest.mock import patch
+    from django.db import OperationalError
+
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Transient Retry Borrower', phone='9876543299')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    op_id = str(uuid.uuid4())
+    payload = {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": op_id,
+                "payload": {
+                    "loan_id": str(loan.id),
+                    "amount_paise": 50000,
+                    "effective_date": "2026-01-01",
+                    "payment_method": "CASH",
+                    "is_cash": True
+                }
+            }
+        ]
+    }
+    url = reverse('sync-push')
+
+    # 1. First push encounters a transient database/infrastructure failure
+    real_record = ledger_service.record_collection
+    with patch('ledger.engine.ledger_service.record_collection', side_effect=OperationalError('database connection lost')):
+        res1 = api_client.post(url, payload, format='json')
+        assert res1.status_code == 200
+        assert res1.data['results'][0]['status'] == 'FAILED'
+
+    # Verify no poisonous permanent REJECTED log was created
+    rejected_log = SyncLog.objects.filter(tenant=tenant, operation_id=op_id, status='REJECTED').first()
+    assert rejected_log is None
+
+    # 2. Second push retries the exact same operation after recovery
+    res2 = api_client.post(url, payload, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Exactly 1 transaction is created
+    assert loan.transactions.filter(transaction_type='COLLECTION').count() == 1
+
+
+@pytest.mark.django_db
+def test_bounded_penalty_waiver_cannot_erase_future_penalties(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Waiver Borrower', phone='9876543298')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    url = reverse('sync-push')
+
+    # 1. Waiving when no penalties are outstanding is rejected
+    res_zero = api_client.post(url, {
+        "operations": [{
+            "type": "waive_penalty",
+            "operation_id": str(uuid.uuid4()),
+            "payload": {
+                "loan_id": str(loan.id),
+                "amount_paise": 50000,
+                "effective_date": "2026-01-01"
+            }
+        }]
+    }, format='json')
+    assert res_zero.status_code == 200
+    assert res_zero.data['results'][0]['status'] == 'REJECTED'
+
+    # 2. 1 overdue day passes: ₹100 penalty assessed
+    ledger_service.assess_penalties(loan, '2026-01-02')
+    assert loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').count() == 1
+
+    # 3. Client attempts an excess waiver of ₹500 (50,000 Paise) when only ₹100 (10,000 Paise) is outstanding
+    res_waive = api_client.post(url, {
+        "operations": [{
+            "type": "waive_penalty",
+            "operation_id": str(uuid.uuid4()),
+            "payload": {
+                "loan_id": str(loan.id),
+                "amount_paise": 50000,
+                "effective_date": "2026-01-02"
+            }
+        }]
+    }, format='json')
+    assert res_waive.status_code == 200
+    assert res_waive.data['results'][0]['status'] == 'ACCEPTED'
+
+    # The waiver is bounded to actual outstanding penalty (₹100 = 10,000 Paise)
+    waive_tx = loan.transactions.filter(transaction_type='REVERSAL').first()
+    assert waive_tx is not None
+    assert waive_tx.forgiven_penalty_paise == 10000  # Capped at outstanding debt!
+
+    # 4. Another day passes: new penalty of ₹100 assessed for 2026-01-03
+    ledger_service.assess_penalties(loan, '2026-01-03')
+    assert loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').count() == 2
+
+    # Verify that future penalty is NOT erased by the previous excess waiver attempt
+    total_assessed = loan.transactions.filter(transaction_type='PENALTY_ASSESSMENT').aggregate(t=models.Sum('amount_paise'))['t'] or 0
+    total_waived = loan.transactions.filter(transaction_type='REVERSAL').aggregate(t=models.Sum('forgiven_penalty_paise'))['t'] or 0
+    outstanding = total_assessed - total_waived
+    assert total_assessed == 20000  # ₹200
+    assert total_waived == 10000    # ₹100
+    assert outstanding == 10000     # ₹100 outstanding, not 0!
+
+
+@pytest.mark.django_db
+def test_outbox_allocates_strictly_unique_sequential_cursors(lender_setup):
+    user, tenant, token = lender_setup
+
+    outbox1 = SyncOutbox.objects.create(
+        tenant=tenant,
+        record_type='LOAN',
+        record_id=uuid.uuid4(),
+        operation_type='INSERT',
+        payload={'name': 'test-1'}
+    )
+    outbox2 = SyncOutbox.objects.create(
+        tenant=tenant,
+        record_type='LOAN',
+        record_id=uuid.uuid4(),
+        operation_type='INSERT',
+        payload={'name': 'test-2'}
+    )
+
+    assert outbox1.sequence_number == 1
+    assert outbox2.sequence_number == 2
+    tenant.refresh_from_db()
+    assert tenant.outbox_sequence_counter == 2
+
 

@@ -137,33 +137,58 @@ export class SyncService {
       }
     } else if (record_type === 'KIST') {
       if (operation_type === 'INSERT') {
-        await tx.runAsync(
-          `INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             effective_due_date = excluded.effective_due_date,
-             principal_paid_paise = excluded.principal_paid_paise,
-             markup_paid_paise = excluded.markup_paid_paise,
-             status = excluded.status`,
-          [
-            payload.id,
-            payload.loan_id,
-            payload.installment_number,
-            payload.original_due_date,
-            payload.effective_due_date,
-            payload.principal_component_paise || 0,
-            payload.markup_component_paise || 0,
-            payload.total_due_paise,
-            payload.principal_paid_paise || 0,
-            payload.markup_paid_paise || 0,
-            payload.status || 'PENDING',
-          ]
+        const existingKist = await tx.getFirstAsync<{ id: string }>(
+          `SELECT id FROM repayment_schedules WHERE id = ? OR (loan_id = ? AND installment_number = ?)`,
+          [payload.id, payload.loan_id, payload.installment_number]
         );
+        if (existingKist) {
+          await tx.runAsync(
+            `UPDATE repayment_schedules SET
+               effective_due_date = ?,
+               principal_paid_paise = ?,
+               markup_paid_paise = ?,
+               status = ?
+             WHERE id = ?`,
+            [
+              payload.effective_due_date,
+              payload.principal_paid_paise || 0,
+              payload.markup_paid_paise || 0,
+              payload.status || 'PENDING',
+              existingKist.id,
+            ]
+          );
+        } else {
+          await tx.runAsync(
+            `INSERT INTO repayment_schedules (
+               id, loan_id, installment_number, original_due_date, effective_due_date,
+               principal_component_paise, markup_component_paise, total_due_paise,
+               principal_paid_paise, markup_paid_paise, status
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              payload.id,
+              payload.loan_id,
+              payload.installment_number,
+              payload.original_due_date,
+              payload.effective_due_date,
+              payload.principal_component_paise || 0,
+              payload.markup_component_paise || 0,
+              payload.total_due_paise,
+              payload.principal_paid_paise || 0,
+              payload.markup_paid_paise || 0,
+              payload.status || 'PENDING',
+            ]
+          );
+        }
       } else if (operation_type === 'UPDATE') {
+        const existingKist = await tx.getFirstAsync<{ id: string }>(
+          `SELECT id FROM repayment_schedules WHERE id = ? OR (loan_id = ? AND installment_number = ?)`,
+          [payload.id, payload.loan_id, payload.installment_number]
+        );
+        const kistId = existingKist ? existingKist.id : payload.id;
         if (payload.effective_due_date) {
           await tx.runAsync(
             `UPDATE repayment_schedules SET effective_due_date = ? WHERE id = ?`,
-            [payload.effective_due_date, payload.id]
+            [payload.effective_due_date, kistId]
           );
         }
         if (payload.status !== undefined || payload.principal_paid_paise !== undefined) {
@@ -173,7 +198,7 @@ export class SyncService {
                markup_paid_paise = COALESCE(?, markup_paid_paise),
                status = COALESCE(?, status)
              WHERE id = ?`,
-            [payload.principal_paid_paise, payload.markup_paid_paise, payload.status, payload.id]
+            [payload.principal_paid_paise, payload.markup_paid_paise, payload.status, kistId]
           );
         }
       }
@@ -209,30 +234,9 @@ export class SyncService {
               payload.created_at || new Date().toISOString(),
             ]
           );
-        } else {
-          // Reconcile authoritative server allocations onto local record
-          await tx.runAsync(
-            `UPDATE transactions SET
-               allocated_principal_paise = ?,
-               allocated_markup_paise = ?,
-               allocated_penalty_paise = ?,
-               unallocated_surplus_paise = ?,
-               forgiven_penalty_paise = ?,
-               is_cash = ?,
-               payment_method = ?
-             WHERE operation_id = ?`,
-            [
-              payload.allocated_principal_paise || 0,
-              payload.allocated_markup_paise || 0,
-              payload.allocated_penalty_paise || 0,
-              payload.unallocated_surplus_paise || 0,
-              payload.forgiven_penalty_paise || 0,
-              isCash,
-              paymentMethod,
-              payload.operation_id,
-            ]
-          );
         }
+        // Invariant: Do NOT execute UPDATE on transactions.
+        // Transactions table has SQLite trigger prevent_transactions_update and is strictly append-only.
       }
     }
   }
@@ -244,10 +248,12 @@ export class SyncService {
     try {
       const pushRes = await this.pushPending(db);
       const pullRes = await this.pullChanges(db);
+      const isSuccess = pushRes.failed === 0;
       return {
         pushedCount: pushRes.pushed,
         pulledCount: pullRes.pulled,
-        success: true,
+        success: isSuccess,
+        errors: pushRes.failed > 0 ? [`${pushRes.failed} operations failed to push to server`] : undefined,
       };
     } catch (err: any) {
       return {

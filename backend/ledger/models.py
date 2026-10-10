@@ -301,18 +301,18 @@ class SyncOutbox(models.Model):
 
     class Meta:
         ordering = ['sequence_number']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'sequence_number'], name='unique_tenant_outbox_sequence')
+        ]
 
     def save(self, *args, **kwargs):
         if self.sequence_number is None:
+            from tenants.models import Tenant
             with transaction.atomic():
-                last = (
-                    SyncOutbox.objects
-                    .select_for_update()
-                    .filter(tenant=self.tenant)
-                    .order_by('-sequence_number')
-                    .first()
-                )
-                self.sequence_number = (last.sequence_number + 1) if (last and last.sequence_number) else 1
+                tenant_row = Tenant.objects.select_for_update().get(id=self.tenant_id)
+                tenant_row.outbox_sequence_counter += 1
+                tenant_row.save(update_fields=['outbox_sequence_counter'])
+                self.sequence_number = tenant_row.outbox_sequence_counter
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)

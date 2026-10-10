@@ -43,6 +43,7 @@ export async function runMigrations(db: SQLiteDatabase) {
         principal_paid_paise INTEGER NOT NULL DEFAULT 0,
         markup_paid_paise INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'PENDING',
+        UNIQUE (loan_id, installment_number),
         FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE RESTRICT
       );
     `);
