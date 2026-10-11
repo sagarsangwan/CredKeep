@@ -20,13 +20,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy project files
 COPY . /app/
+RUN chmod +x /app/scripts/render-start.sh
 
 # Expose port
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8000/api/v2/health/ || exit 1
+  CMD curl -f "http://localhost:${PORT:-8000}/api/v2/ready/" || exit 1
 
-# Start gunicorn server
-CMD ["sh", "-c", "gunicorn credkeep_backend.wsgi:application --bind 0.0.0.0:${PORT}"]
+# Validate the database role, apply pending migrations, and start Gunicorn.
+CMD ["./scripts/render-start.sh"]
