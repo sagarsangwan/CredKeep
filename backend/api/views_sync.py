@@ -118,49 +118,79 @@ class SyncPushView(APIView):
                 })
                 continue
 
-            op_type = op.get('type')
-            payload = op.get('payload', {})
-            if not isinstance(payload, dict):
-                payload = {}
-
-            # Idempotency check against SyncLog
-            existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
-            if existing_log:
-                # If an existing transaction exists, verify attribute idempotency against incoming payload
-                existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
-                if existing_tx:
-                    req_loan_id = str(payload.get('loan_id') or op.get('loan_id') or '')
-                    req_amount = payload.get('amount_paise') if 'amount_paise' in payload else op.get('amount_paise')
-                    req_date = str(payload.get('effective_date') or op.get('timestamp') or '')
-                    if 'T' in req_date:
-                        req_date = req_date.split('T')[0]
-
-                    has_conflict = False
-                    if req_loan_id and req_loan_id != str(existing_tx.loan.id):
-                        has_conflict = True
-                    if req_amount is not None and int(req_amount) != existing_tx.amount_paise:
-                        has_conflict = True
-                    if req_date and req_date != str(existing_tx.effective_date):
-                        has_conflict = True
-
-                    if has_conflict:
-                        results.append({
-                            "operation_id": str(operation_id),
-                            "status": "REJECTED",
-                            "error": f"Idempotency conflict: operation_id {operation_id} was already accepted with different payment attributes."
-                        })
-                        continue
-
-                res_item = {
-                    "operation_id": str(operation_id),
-                    "status": existing_log.status,
-                }
-                if existing_log.error_message:
-                    res_item["error"] = existing_log.error_message
-                results.append(res_item)
-                continue
-
             try:
+                op_type = op.get('type')
+                payload = op.get('payload', {})
+                if not isinstance(payload, dict):
+                    payload = {}
+
+                # Idempotency check against SyncLog
+                existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                if existing_log:
+                    # If an existing transaction exists, verify attribute idempotency against incoming payload
+                    existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                    if existing_tx:
+                        req_loan_id = str(payload.get('loan_id') or op.get('loan_id') or '')
+                        raw_req_amount = payload.get('amount_paise') if 'amount_paise' in payload else op.get('amount_paise')
+                        req_date = str(payload.get('effective_date') or op.get('timestamp') or '')
+                        if 'T' in req_date:
+                            req_date = req_date.split('T')[0]
+
+                        has_conflict = False
+                        if req_loan_id and req_loan_id != str(existing_tx.loan.id):
+                            has_conflict = True
+                        if req_date and req_date != str(existing_tx.effective_date):
+                            has_conflict = True
+
+                        if existing_tx.transaction_type == 'COLLECTION':
+                            raw_method = payload.get('payment_method') or op.get('payment_method')
+                            if raw_method is not None and not isinstance(raw_method, str):
+                                has_conflict = True
+                            else:
+                                req_method = (raw_method or 'CASH').upper()
+                                req_is_cash = payload.get('is_cash', req_method == 'CASH')
+                                if not isinstance(req_is_cash, bool):
+                                    req_is_cash = req_method == 'CASH'
+                                if req_method != existing_tx.payment_method or bool(req_is_cash) != bool(existing_tx.is_cash):
+                                    has_conflict = True
+
+                            if raw_req_amount is not None:
+                                if isinstance(raw_req_amount, bool) or not isinstance(raw_req_amount, int):
+                                    has_conflict = True
+                                elif raw_req_amount != existing_tx.amount_paise:
+                                    has_conflict = True
+
+                        elif existing_tx.transaction_type == 'REVERSAL':
+                            # For penalty waivers
+                            outbox_rec = SyncOutbox.objects.filter(tenant=tenant, record_id=existing_tx.id).first()
+                            stored_req_amount = (
+                                outbox_rec.payload.get('requested_amount_paise', existing_tx.forgiven_penalty_paise)
+                                if outbox_rec and isinstance(outbox_rec.payload, dict)
+                                else existing_tx.forgiven_penalty_paise
+                            )
+                            if raw_req_amount is not None:
+                                if isinstance(raw_req_amount, bool) or not isinstance(raw_req_amount, int):
+                                    has_conflict = True
+                                elif raw_req_amount != stored_req_amount and raw_req_amount != existing_tx.forgiven_penalty_paise:
+                                    has_conflict = True
+
+                        if has_conflict:
+                            results.append({
+                                "operation_id": str(operation_id),
+                                "status": "REJECTED",
+                                "error": f"Idempotency conflict: operation_id {operation_id} was already processed with different attributes."
+                            })
+                            continue
+
+                    res_item = {
+                        "operation_id": str(operation_id),
+                        "status": existing_log.status,
+                    }
+                    if existing_log.error_message:
+                        res_item["error"] = existing_log.error_message
+                    results.append(res_item)
+                    continue
+
                 with transaction.atomic():
                     res_status, err_msg = self._process_operation(
                         tenant=tenant,
@@ -452,7 +482,9 @@ class SyncPushView(APIView):
                         str(existing_tx.loan.id) != str(loan.id) or
                         existing_tx.amount_paise != amount_paise or
                         str(existing_tx.effective_date) != str(effective_date) or
-                        existing_tx.transaction_type != 'COLLECTION'
+                        existing_tx.transaction_type != 'COLLECTION' or
+                        existing_tx.payment_method != payment_method or
+                        bool(existing_tx.is_cash) != bool(is_cash)
                     ):
                         return 'REJECTED', f"Idempotency conflict: operation_id {operation_id} already exists with different payment attributes."
                     return 'ACCEPTED', None
@@ -746,6 +778,7 @@ class SyncPushView(APIView):
                     'loan_id': str(loan.id),
                     'transaction_type': tx.transaction_type,
                     'forgiven_penalty_paise': tx.forgiven_penalty_paise,
+                    'requested_amount_paise': waive_amount,
                     'effective_date': str(tx.effective_date)
                 }
             )

@@ -2202,6 +2202,180 @@ def test_sync_push_record_collection_idempotency_conflict_different_amount(api_c
     assert tx.amount_paise == 5000
 
 
+@pytest.mark.django_db
+def test_sync_push_record_collection_idempotency_conflict_changed_payment_method(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Idemp Method', phone='9876543292')
+    loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+
+    # 1. First push with CASH
+    payload1 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 5000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'CASH',
+                    'is_cash': True
+                }
+            }
+        ]
+    }
+    res1 = api_client.post(url, payload1, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Conflicting reuse with UPI
+    payload2 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 5000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'UPI',
+                    'is_cash': False
+                }
+            }
+        ]
+    }
+    res2 = api_client.post(url, payload2, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res2.data['results'][0]['error']
+    tx = LedgerTx.objects.get(loan=loan, operation_id=op_id)
+    assert tx.payment_method == 'CASH'
+
+
+@pytest.mark.django_db
+def test_sync_push_waive_penalty_retry_identical_accepted(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Waive Retry', phone='9876543293')
+    loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    # Create an overdue kist and penalty assessment
+    Kist.objects.create(
+        tenant=tenant, loan=loan, installment_number=1,
+        original_due_date='2026-01-01', effective_due_date='2026-01-01',
+        principal_component_paise=100000, markup_component_paise=10000,
+        total_due_paise=110000, status='PENDING'
+    )
+    LedgerTx.objects.create(
+        tenant=tenant, loan=loan, operation_id=uuid.uuid4(),
+        transaction_type='PENALTY_ASSESSMENT', amount_paise=500,
+        effective_date='2026-01-02'
+    )
+
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 500,
+                    'effective_date': '2026-01-02',
+                    'reason': 'Good conduct waiver'
+                }
+            }
+        ]
+    }
+
+    # 1. Initial waiver push
+    res1 = api_client.post(url, payload, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Identical retry with same op_id -> must be ACCEPTED (idempotent retry)
+    res2 = api_client.post(url, payload, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'ACCEPTED'
+
+
+@pytest.mark.django_db
+def test_sync_push_malformed_retry_returns_rejected_not_500(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Malformed', phone='9876543294')
+    loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+
+    # 1. Accepted payment
+    payload1 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 2000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'CASH'
+                }
+            }
+        ]
+    }
+    res1 = api_client.post(url, payload1, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Malformed retry with string amount inside mixed batch
+    valid_op_id = str(uuid.uuid4())
+    payload2 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': "not-an-integer",
+                    'effective_date': '2026-01-02'
+                }
+            },
+            {
+                'operation_id': valid_op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 1000,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }
+    res2 = api_client.post(url, payload2, format='json')
+    assert res2.status_code == 200
+    assert len(res2.data['results']) == 2
+    # The malformed retry is REJECTED without failing the whole request or 500'ing
+    assert res2.data['results'][0]['status'] == 'REJECTED'
+    # The valid second operation is processed cleanly
+    assert res2.data['results'][1]['status'] == 'ACCEPTED'
+
+
+
 
 
 

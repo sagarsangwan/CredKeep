@@ -191,7 +191,9 @@ def record_collection(
                 str(existing.loan.id) != str(loan.id) or
                 existing.amount_paise != payment_amount or
                 str(existing.effective_date) != str(effective_date_str) or
-                existing.transaction_type != 'COLLECTION'
+                existing.transaction_type != 'COLLECTION' or
+                existing.payment_method != payment_method or
+                bool(existing.is_cash) != bool(is_cash)
             ):
                 raise ValueError(
                     f"Idempotency conflict: operation_id {operation_id} already exists with different payment attributes."
@@ -210,7 +212,9 @@ def record_collection(
                         str(existing_locked.loan.id) != str(loan.id) or
                         existing_locked.amount_paise != payment_amount or
                         str(existing_locked.effective_date) != str(effective_date_str) or
-                        existing_locked.transaction_type != 'COLLECTION'
+                        existing_locked.transaction_type != 'COLLECTION' or
+                        existing_locked.payment_method != payment_method or
+                        bool(existing_locked.is_cash) != bool(is_cash)
                     ):
                         raise ValueError(
                             f"Idempotency conflict: operation_id {operation_id} already exists with different payment attributes."

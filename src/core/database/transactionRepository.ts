@@ -35,7 +35,9 @@ export class TransactionRepository {
             existing.loan_id !== loanId ||
             existing.amount_paise !== paymentAmount ||
             existing.effective_date !== effectiveDate ||
-            existing.transaction_type !== 'COLLECTION'
+            existing.transaction_type !== 'COLLECTION' ||
+            existing.payment_method !== 'CASH' ||
+            existing.is_cash !== 1
           ) {
             throw new Error(`Idempotency conflict: operation_id ${operationId} already exists with different payment attributes.`);
           }
