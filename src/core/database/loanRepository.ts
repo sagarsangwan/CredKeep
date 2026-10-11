@@ -17,6 +17,26 @@ export type Loan = {
   created_at: string;
 };
 
+function generateUuid(): string {
+  try {
+    if (crypto && typeof crypto.randomUUID === 'function') {
+      const id = crypto.randomUUID();
+      if (id) return id;
+    }
+  } catch {}
+  try {
+    if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+      const id = globalThis.crypto.randomUUID();
+      if (id) return id;
+    }
+  } catch {}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export class LoanRepository {
   constructor(private db: SQLiteDatabase) {}
 
@@ -25,13 +45,51 @@ export class LoanRepository {
     options: ScheduleOptions,
     clientOpId?: string
   ): Promise<Loan> {
-    const loanId = crypto.randomUUID();
+    let resolvedLoan: Loan | null = null;
+    const loanId = generateUuid();
     const created_at = new Date().toISOString();
     
     const schedule = generateSchedule(options);
 
     await this.db.withExclusiveTransactionAsync(async (tx) => {
       const txHandle = tx || this.db;
+
+      if (clientOpId) {
+        const existingOutbox = await txHandle.getFirstAsync<any>(
+          `SELECT status, error_message, payload FROM sync_outbox WHERE operation_id = ?`,
+          [clientOpId]
+        );
+        if (existingOutbox) {
+          if (existingOutbox.status === 'REJECTED') {
+            throw new Error(
+              `Loan creation operation ${clientOpId} was rejected: ${existingOutbox.error_message || 'Terminal rejection'}`
+            );
+          }
+          let parsed: any;
+          try {
+            parsed = JSON.parse(existingOutbox.payload);
+          } catch {
+            parsed = {};
+          }
+          if (
+            parsed.borrower_id !== borrowerId ||
+            parsed.principal_paise !== options.principal ||
+            parsed.markup_factor !== options.markupFactor ||
+            parsed.term_months !== options.termMonths ||
+            parsed.start_date !== options.startDate ||
+            parsed.due_day !== options.dueDay ||
+            parsed.product_type !== options.productType
+          ) {
+            throw new Error(`Idempotency conflict: operation_id ${clientOpId} already exists with different loan attributes.`);
+          }
+          const existingLoan = await txHandle.getFirstAsync<Loan>(`SELECT * FROM loans WHERE id = ?`, [parsed.id]);
+          if (existingLoan) {
+            resolvedLoan = existingLoan;
+            return;
+          }
+        }
+      }
+
       await txHandle.runAsync(
         `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -47,7 +105,7 @@ export class LoanRepository {
       try {
         for (const kist of schedule) {
           await statement.executeAsync([
-            crypto.randomUUID(),
+            generateUuid(),
             loanId,
             kist.kistNumber,
             kist.dueDate,
@@ -76,6 +134,10 @@ export class LoanRepository {
         },
       });
     });
+
+    if (resolvedLoan) {
+      return resolvedLoan;
+    }
 
     return (await this.getById(loanId))!;
   }

@@ -60,15 +60,35 @@ export class AuthStore {
   }
 
   static async getDeviceId(): Promise<string> {
+    const gen = () => {
+      try {
+        if (crypto && typeof crypto.randomUUID === 'function') {
+          const id = crypto.randomUUID();
+          if (id) return id;
+        }
+      } catch {}
+      try {
+        if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+          const id = globalThis.crypto.randomUUID();
+          if (id) return id;
+        }
+      } catch {}
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    };
+
     try {
       let deviceId = await SecureStore.getItemAsync(KEY_DEVICE_ID);
       if (!deviceId) {
-        deviceId = crypto.randomUUID();
+        deviceId = gen();
         await SecureStore.setItemAsync(KEY_DEVICE_ID, deviceId);
       }
       return deviceId;
     } catch {
-      return crypto.randomUUID();
+      return gen();
     }
   }
 

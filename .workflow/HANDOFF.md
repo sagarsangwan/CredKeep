@@ -1,32 +1,32 @@
-# Task Handoff
+# Task Handoff & State Summary
 
-## Handoff Detail
-- **Task ID:** V2 Phase 6: Migration & Ops (CK-V2-MIG-001, CK-V2-OPS-001, CK-V2-QA-001)
-- **Completed Changes:**
-  - **V1 Local Data Extractor (`CK-V2-MIG-001`)**:
-    - Created `src/core/migration/v1Extractor.ts` (`V1DataExtractor`):
-      - Extracts local SQLite borrowers, active loans, and collection transactions.
-      - Structures them into dependency-ordered sync push operations (`create_borrower` -> `create_loan` -> `record_collection`).
-      - Atomically enqueues into `sync_outbox`, triggers `SyncService.pushPending()`, and records migration metadata (`v1_migration_completed: true`).
-    - Added unit test suite in `src/core/migration/v1Extractor.test.ts` (4 passed).
-  - **Dockerize & Deploy (`CK-V2-OPS-001`)**:
-    - Created `backend/Dockerfile` with multi-stage python:3.13-slim base, non-root best practices, health check, gunicorn server runner, and migration execution on boot.
-    - Created `backend/.dockerignore`.
-    - Created root `render.yaml` infrastructure blueprint for Render web service deployment with free plan configuration, health check path, and environment variables.
-    - Updated `backend/requirements.txt` with production dependencies (clean UTF-8).
-  - **Testing**:
-    - 50 mobile Jest tests passed across 12 suites.
-    - 0 TypeScript compiler errors.
-    - 0 ESLint errors.
-    - 37 Django backend pytest tests passed.
-    - 0 Django system check issues.
-- **Files Created/Modified:**
-  - `src/core/migration/v1Extractor.ts`
-  - `src/core/migration/v1Extractor.test.ts`
-  - `backend/Dockerfile`
-  - `backend/.dockerignore`
-  - `render.yaml`
-  - `backend/requirements.txt`
-  - `.workflow/V2_TASKS.md`
-  - `.workflow/STATE.md`
-- **Next Stage:** Execute independent Codex QA verification across all V2 work.
+## Emergency Stop & Status (Handoff)
+- **Branch:** `feat/v2/migration-and-ops`
+- **Head Commit:** `1470019` (`feat(migration): reconstruct repayment allocations for settled loans, unify waiver identity, and verify server portfolio`)
+- **QA Loop Status:** HALTED (Iteration 25 finished; Iteration 26 NOT launched).
+- **Total Completed Codex QA Iterations:** 25
+- **Last Completed Codex Verdict:** `REWORK` on review range `8a3be8d → 1470019` (Iteration 25).
+
+## Remaining Findings from Iteration 25
+- **Standards P1:** Later penalties alter earlier payment allocations (`syncService.ts:455`) — *Newly discovered in Iteration 25*.
+- **Standards P1:** Loan creation retries commit duplicate local loans (`loanRepository.ts:28`) — *Newly discovered in Iteration 25*.
+- **Spec P1:** Outstanding bullet principal omitted in portfolio summary calculation (`views_sync.py:1091`) — *Newly discovered in Iteration 25*.
+- **Spec P2:** Per-loan balances omit penalties in portfolio summary (`views_sync.py:1117`) — *Newly discovered in Iteration 25*.
+- *(Note: Iteration 24's findings on settled loan repayment reconstruction, waiver identity rekeying, and authoritative portfolio reconciliation were completely fixed and verified in commit `1470019`).*
+
+## Verified Quality Gates
+- **Unit / Integration Tests:** 111 Jest tests passed across all 12 test suites.
+- **Type Checking:** `npx tsc --noEmit` — 0 errors.
+- **Linting:** `npx expo lint` — 0 errors, 17 warnings.
+- **Backend Tests:** `pytest backend` — 77 passed, 3 skipped (PostgreSQL RLS tests skipped under SQLite mock).
+
+## Real Infrastructure & Device Verification Status
+- **Real Django + PostgreSQL Server Tested:** UNKNOWN / NO (tested locally with SQLite and psycopg3 mocks; live containerized/cloud DB not run end-to-end).
+- **Mobile Login/Register Against Actual Backend:** NO (tested in isolation/mocks only).
+- **Offline Payments Synchronize to PostgreSQL:** NO (tested against local Django/SQLite sync endpoints only).
+- **Android Physical Device Verification:** NO (`CK-V2-QA-001` pending).
+
+## Immediate Priority: V2 End-to-End Vertical Slice
+Objective is NOT repository-wide Codex review. Priority is demonstrating:
+Register lender → Log in → Add borrower → Create loan → Record payment → Sync to Django/PostgreSQL → Verify on second authenticated device.
+

@@ -122,7 +122,7 @@ class SyncPushView(APIView):
                 continue
 
             try:
-                op_type = op.get('type')
+                op_type = op.get('type') or op.get('operation_type')
                 payload = op.get('payload', {})
                 if not isinstance(payload, dict):
                     payload = {}
@@ -1113,16 +1113,48 @@ class PortfolioSummaryView(APIView):
         outstanding_penalty = max(0, total_pen_assessed - total_pen_paid - total_pen_waived)
 
         loan_details = []
+        outstanding_bullet_principal = 0
         for l in loans:
             l_kists = l.schedules.all()
             l_due = sum(k.total_due_paise for k in l_kists)
             l_paid = sum(k.principal_paid_paise + k.markup_paid_paise for k in l_kists)
-            rem = max(0, l_due - l_paid)
+            rem_sched = max(0, l_due - l_paid)
+
+            rem_bullet_p = 0
+            if l.product_type == 'bullet' and l.status == 'ACTIVE':
+                p_paid = (
+                    LedgerTx.objects
+                    .filter(loan=l, transaction_type='COLLECTION')
+                    .aggregate(total=models.Sum('allocated_principal_paise'))['total'] or 0
+                )
+                rem_bullet_p = max(0, l.principal_paise - p_paid)
+                outstanding_bullet_principal += rem_bullet_p
+
+            rem_pen = 0
+            if l.status == 'ACTIVE':
+                l_pen_assessed = (
+                    LedgerTx.objects
+                    .filter(loan=l, transaction_type='PENALTY_ASSESSMENT')
+                    .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+                )
+                l_pen_paid = (
+                    LedgerTx.objects
+                    .filter(loan=l, transaction_type='COLLECTION')
+                    .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
+                )
+                l_pen_waived = (
+                    LedgerTx.objects
+                    .filter(loan=l, transaction_type='REVERSAL')
+                    .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+                )
+                rem_pen = max(0, l_pen_assessed - l_pen_paid - l_pen_waived)
+
+            total_loan_outstanding = rem_sched + rem_bullet_p + rem_pen
             loan_details.append({
                 'id': str(l.id),
                 'status': l.status,
                 'principal_paise': l.principal_paise,
-                'outstanding_balance_paise': rem
+                'outstanding_balance_paise': total_loan_outstanding
             })
 
         return Response({
@@ -1134,7 +1166,7 @@ class PortfolioSummaryView(APIView):
             'total_collections_paise': total_collections_paise,
             'total_collections_count': total_collections_count,
             'total_waivers_paise': total_waivers_paise,
-            'total_outstanding_balance_paise': outstanding_schedule_balance + outstanding_penalty,
+            'total_outstanding_balance_paise': outstanding_schedule_balance + outstanding_bullet_principal + outstanding_penalty,
             'loans': loan_details
         }, status=status.HTTP_200_OK)
 
