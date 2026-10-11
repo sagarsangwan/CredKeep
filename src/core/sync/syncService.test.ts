@@ -297,7 +297,7 @@ describe('SyncService & OutboxManager', () => {
       // Verify append-only adjustment transaction inserted
       expect(mockDb.runAsync).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO transactions'),
-        expect.arrayContaining([expect.stringMatching(/^reconcile-op-optimistic-tx/), 'REVERSAL', 10000, 0, 0, -10000])
+        expect.arrayContaining([expect.stringMatching(/^reconcile(::|-)op-optimistic-tx/), 'REVERSAL', 10000, 0, 0, -10000])
       );
     });
 

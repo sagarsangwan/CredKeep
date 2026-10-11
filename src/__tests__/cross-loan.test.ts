@@ -1102,7 +1102,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(kist?.markup_paid_paise).toBe(0);
 
     // Compensating REVERSAL transaction was recorded in ledger
-    const reallocTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-p2%'`);
+    const reallocTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-p2%' OR operation_id LIKE 'realloc::op-p2%')`);
     expect(reallocTx).not.toBeNull();
     expect(reallocTx?.allocated_penalty_paise).toBe(100);
     expect(reallocTx?.allocated_principal_paise).toBe(-100);
@@ -1120,7 +1120,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
             AND (
               transactions.operation_id = so.operation_id
               OR transactions.operation_id = 'reversal-' || so.operation_id
-              OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+              OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%' OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
             )
         )
     `);
@@ -1171,7 +1171,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // 1. First rejection: server rejects Payment 1
     await SyncService.revertRejectedPayment(db, 'op-seq2-p1', 'Server rejected payment 1');
-    const p2Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-seq2-p2%'`);
+    const p2Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-seq2-p2%' OR operation_id LIKE 'realloc::op-seq2-p2%')`);
     expect(p2Realloc?.allocated_penalty_paise).toBe(100);
     expect(p2Realloc?.allocated_principal_paise).toBe(-100);
 
@@ -1202,7 +1202,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
             AND (
               transactions.operation_id = so.operation_id
               OR transactions.operation_id = 'reversal-' || so.operation_id
-              OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+              OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%' OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
             )
         )
     `);
@@ -1217,7 +1217,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
       FROM transactions
       WHERE operation_id = 'op-seq2-p2'
          OR operation_id = 'reversal-op-seq2-p2'
-         OR operation_id LIKE 'realloc-op-seq2-p2%'
+         OR operation_id LIKE 'realloc-op-seq2-p2%' OR operation_id LIKE 'realloc::op-seq2-p2%'
     `);
     expect(p2Total?.principal).toBe(0);
     expect(p2Total?.penalty).toBe(0);
@@ -1277,13 +1277,13 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Reject P1: P2 now reallocates to penalty (100 paise), P3 reallocates to markup (100 paise)
     await SyncService.revertRejectedPayment(db, 'op-seq3-p1', 'Reject 1');
-    const p2Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-seq3-p2%' ORDER BY sequence_number DESC LIMIT 1`);
+    const p2Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-seq3-p2%' OR operation_id LIKE 'realloc::op-seq3-p2%') ORDER BY sequence_number DESC LIMIT 1`);
     expect(p2Realloc?.allocated_penalty_paise).toBe(100);
     expect(p2Realloc?.allocated_markup_paise).toBe(-100);
 
     // Reject P2: P3 now reallocates to penalty (100 paise)!
     await SyncService.revertRejectedPayment(db, 'op-seq3-p2', 'Reject 2');
-    const p3Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-seq3-p3%' ORDER BY sequence_number DESC LIMIT 1`);
+    const p3Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-seq3-p3%' OR operation_id LIKE 'realloc::op-seq3-p3%') ORDER BY sequence_number DESC LIMIT 1`);
     expect(p3Realloc?.allocated_penalty_paise).toBe(100);
     expect(p3Realloc?.allocated_markup_paise).toBe(-100);
 
@@ -1294,7 +1294,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         COALESCE(SUM(allocated_markup_paise), 0) as markup,
         COALESCE(SUM(allocated_penalty_paise), 0) as penalty
       FROM transactions
-      WHERE operation_id = 'op-seq3-p3' OR operation_id LIKE 'realloc-op-seq3-p3%'
+      WHERE operation_id = 'op-seq3-p3' OR operation_id LIKE 'realloc-op-seq3-p3%' OR operation_id LIKE 'realloc::op-seq3-p3%'
     `);
     expect(p3NetBeforeRej3?.penalty).toBe(100);
     expect(p3NetBeforeRej3?.markup).toBe(0);
@@ -1306,7 +1306,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         COALESCE(SUM(allocated_markup_paise), 0) as markup,
         COALESCE(SUM(allocated_penalty_paise), 0) as penalty
       FROM transactions
-      WHERE operation_id = 'op-seq3-p2' OR operation_id = 'reversal-op-seq3-p2' OR operation_id LIKE 'realloc-op-seq3-p2%'
+      WHERE operation_id = 'op-seq3-p2' OR operation_id = 'reversal-op-seq3-p2' OR operation_id LIKE 'realloc-op-seq3-p2%' OR operation_id LIKE 'realloc::op-seq3-p2%'
     `);
     expect(p2Net?.markup).toBe(0);
     expect(p2Net?.penalty).toBe(0);
@@ -1320,7 +1320,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         COALESCE(SUM(allocated_principal_paise), 0) as principal,
         COALESCE(SUM(allocated_penalty_paise), 0) as penalty
       FROM transactions
-      WHERE operation_id = 'op-seq3-p3' OR operation_id = 'reversal-op-seq3-p3' OR operation_id LIKE 'realloc-op-seq3-p3%'
+      WHERE operation_id = 'op-seq3-p3' OR operation_id = 'reversal-op-seq3-p3' OR operation_id LIKE 'realloc-op-seq3-p3%' OR operation_id LIKE 'realloc::op-seq3-p3%'
     `);
     expect(p3Net?.principal).toBe(0);
     expect(p3Net?.penalty).toBe(0);
@@ -1464,7 +1464,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Confirm that locally P2 has an append-only realloc delta (+100 penalty, -100 principal)
     const reallocTx = await db.getFirstAsync<any>(`
-      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-rec-p2-%'
+      SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-rec-p2-%' OR operation_id LIKE 'realloc::op-rec-p2::%')
     `);
     expect(reallocTx).not.toBeNull();
     expect(reallocTx?.allocated_penalty_paise).toBe(100);
@@ -1501,7 +1501,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
       WHERE loan_id = 'loan-rec-confirm'
         AND (
           operation_id = 'op-rec-p2'
-          OR operation_id LIKE 'realloc-op-rec-p2-%'
+          OR operation_id LIKE 'realloc-op-rec-p2-%' OR operation_id LIKE 'realloc::op-rec-p2::%'
           OR operation_id LIKE 'reconcile-op-rec-p2-%'
         )
     `);
@@ -1628,7 +1628,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Compensating realloc delta MUST be appended in transactions ledger
     const reallocTx = await db.getFirstAsync<any>(`
-      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-agree-p1-%'
+      SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-agree-p1-%' OR operation_id LIKE 'realloc::op-agree-p1::%')
     `);
     expect(reallocTx).not.toBeNull();
     // Reallocation shifted 1000 paise from principal to markup!
@@ -1642,7 +1642,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         COALESCE(SUM(allocated_markup_paise), 0) as netMarkup
       FROM transactions
       WHERE loan_id = 'loan-replay-agree'
-        AND (operation_id = 'op-agree-p1' OR operation_id LIKE 'realloc-op-agree-p1-%')
+        AND (operation_id = 'op-agree-p1' OR operation_id LIKE 'realloc-op-agree-p1-%' OR operation_id LIKE 'realloc::op-agree-p1::%')
     `);
     const schedule = await db.getFirstAsync<any>(`
       SELECT principal_paid_paise, markup_paid_paise FROM repayment_schedules WHERE id = 'kist-agree-1'
@@ -1658,7 +1658,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     await SyncService.reapplyPendingCollections(db, 'loan-replay-agree');
 
     const totalAdjCount = await db.getFirstAsync<{ count: number }>(`
-      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-agree-p1-%'
+      SELECT COUNT(*) as count FROM transactions WHERE (operation_id LIKE 'realloc-op-agree-p1-%' OR operation_id LIKE 'realloc::op-agree-p1::%')
     `);
     expect(totalAdjCount?.count).toBe(1);
   });
@@ -1693,7 +1693,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Snapshot state after 1st replay
     const adjCount1 = await db.getFirstAsync<{ count: number }>(`
-      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-pen-p1-%'
+      SELECT COUNT(*) as count FROM transactions WHERE (operation_id LIKE 'realloc-op-pen-p1-%' OR operation_id LIKE 'realloc::op-pen-p1::%')
     `);
     expect(adjCount1?.count).toBe(1);
 
@@ -1719,7 +1719,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     await SyncService.reapplyPendingCollections(db, 'loan-pen-repeat');
 
     const adjCountAfter = await db.getFirstAsync<{ count: number }>(`
-      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-pen-p1-%'
+      SELECT COUNT(*) as count FROM transactions WHERE (operation_id LIKE 'realloc-op-pen-p1-%' OR operation_id LIKE 'realloc::op-pen-p1::%')
     `);
     const ledgerTotalsAfter = await db.getFirstAsync<any>(`
       SELECT
@@ -1772,7 +1772,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Snapshot state after 1st replay
     const adjCount1 = await db.getFirstAsync<{ count: number }>(`
-      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-bullet-p1-%'
+      SELECT COUNT(*) as count FROM transactions WHERE (operation_id LIKE 'realloc-op-bullet-p1-%' OR operation_id LIKE 'realloc::op-bullet-p1::%')
     `);
     expect(adjCount1?.count).toBe(1);
 
@@ -1803,7 +1803,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     await SyncService.reapplyPendingCollections(db, 'loan-bullet-repeat');
 
     const adjCountAfter = await db.getFirstAsync<{ count: number }>(`
-      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-bullet-p1-%'
+      SELECT COUNT(*) as count FROM transactions WHERE (operation_id LIKE 'realloc-op-bullet-p1-%' OR operation_id LIKE 'realloc::op-bullet-p1::%')
     `);
     const ledgerTotalsAfter = await db.getFirstAsync<any>(`
       SELECT
@@ -1902,7 +1902,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Pending collection must have reallocated funds to satisfy the 200 penalty
     const reallocTx = await db.getFirstAsync<any>(`
-      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-ptx-1-%'
+      SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-ptx-1-%' OR operation_id LIKE 'realloc::op-ptx-1::%')
     `);
     expect(reallocTx).not.toBeNull();
     expect(reallocTx?.allocated_penalty_paise).toBe(200);
@@ -1988,7 +1988,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Pending collection must have reallocated the 300 funds away from penalty to markup
     const reallocTx = await db.getFirstAsync<any>(`
-      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-pw-1-%'
+      SELECT * FROM transactions WHERE (operation_id LIKE 'realloc-op-pw-1-%' OR operation_id LIKE 'realloc::op-pw-1::%')
     `);
     expect(reallocTx).not.toBeNull();
     // Delta should reduce penalty by 300 (-300) and increase markup by 300 (+300)
@@ -2415,5 +2415,138 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     // Total outbox records count remains exactly 3 (no duplicate records created)
     const totalOutbox = await db.getFirstAsync<any>(`SELECT COUNT(*) as cnt FROM sync_outbox`);
     expect(totalOutbox.cnt).toBe(3);
+  });
+
+  it('migration of non-UUID historical transactions re-keys rows and prevents duplicate receipts upon pull', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = '11111111-2222-3333-4444-555555555555';
+    const loanId = '22222222-3333-4444-5555-666666666666';
+    const legacyTxId = 'local-v1-tx-1';
+    const legacyOpId = 'legacy-v1-op-1'; // Non-UUID!
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Mig Borrower 2', '9876543117', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-mig-2', ?, 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`, [loanId]);
+    await db.runAsync(`INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at) VALUES (?, ?, ?, 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')`, [legacyTxId, legacyOpId, loanId]);
+
+    // Extract V1 records and verify deterministic UUID re-keying
+    const extracted = await V1DataExtractor.extract(db);
+    const ops = V1DataExtractor.buildPushPayloads(extracted);
+    const txOp = ops.find(o => o.type === 'record_collection')!;
+    expect(txOp).toBeDefined();
+    // Deterministic UUID generated for legacy transaction
+    expect(txOp.operation_id).not.toBe(legacyOpId);
+
+    // Run migration
+    await V1DataExtractor.migrateToCloud(db);
+
+    // Verify local transaction row has been re-keyed so local DB matches server operation ID
+    const localTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE loan_id = ?`, [loanId]);
+    expect(localTx.operation_id).toBe(txOp.operation_id);
+
+    // Now simulate subsequent pull from server returning the migrated collection with the server UUID
+    const serverDelta = {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: txOp.operation_id,
+        operation_id: txOp.operation_id,
+        loan_id: loanId,
+        transaction_type: 'COLLECTION',
+        is_cash: true,
+        payment_method: 'CASH',
+        amount_paise: 1000,
+        allocated_principal_paise: 1000,
+        allocated_markup_paise: 0,
+        allocated_penalty_paise: 0,
+        unallocated_surplus_paise: 0,
+        forgiven_penalty_paise: 0,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02T00:00:00Z',
+      }
+    };
+
+    await SyncService.applyServerChange(db, serverDelta);
+
+    // Invariant: Total receipts must remain EXACTLY 1 (1000 paise), NOT duplicated to 2 (2000 paise)
+    const txCount = await db.getFirstAsync<any>(`SELECT COUNT(*) as count, SUM(amount_paise) as total FROM transactions WHERE loan_id = ?`, [loanId]);
+    expect(txCount.count).toBe(1);
+    expect(txCount.total).toBe(1000);
+  });
+
+  it('prevents same-loan prefix collisions when compensating adjustments are calculated', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-prefix-collision';
+    const loanId = 'loan-prefix-collision';
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Prefix Borrower', '9876543118', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 200000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-col-1', ?, 1, '2026-01-01', '2026-01-01', 200000, 0, 200000, 0, 0, 'PENDING')`, [loanId]);
+
+    const opParent = 'op';
+    const opChild = 'op-child';
+
+    // Payment 1: parent payment 'op' of 50000 paise
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
+      VALUES ('tx-op-parent', ?, ?, 'COLLECTION', 50000, 50000, 0, 0, 0, '2026-01-02', '2026-01-02')
+    `, [opParent, loanId]);
+
+    // Payment 2: child payment 'op-child' of 30000 paise with an adjustment on the same loan
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
+      VALUES ('tx-op-child', ?, ?, 'COLLECTION', 30000, 30000, 0, 0, 0, '2026-01-03', '2026-01-03')
+    `, [opChild, loanId]);
+
+    // Child payment had an adjustment transaction
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
+      VALUES ('tx-op-child-adj', 'realloc::op-child::adj-1', ?, 'REVERSAL', 0, -5000, 5000, 0, 0, '2026-01-03', '2026-01-03')
+    `, [loanId]);
+
+    // Outbox has pending/rejected entry for parent op
+    await OutboxManager.enqueue(db, {
+      operationId: opParent,
+      operationType: 'record_collection',
+      payload: { loan_id: loanId, amount_paise: 50000, effective_date: '2026-01-02' }
+    });
+
+    // Revert parent payment 'op'
+    await SyncService.revertRejectedPayment(db, opParent, 'Server rejected parent payment op');
+
+    // The compensating reversal for 'op' MUST compensate EXACTLY 50000 principal (parent payment),
+    // and MUST NOT match or incorporate child adjustment (-5000 principal)!
+    const parentReversal = await db.getFirstAsync<any>(
+      `SELECT * FROM transactions WHERE operation_id = 'reversal::' || ? OR operation_id = 'reversal-' || ?`,
+      [opParent, opParent]
+    );
+    expect(parentReversal).not.toBeNull();
+    // Principal reversal must be -50000, NOT -45000!
+    expect(parentReversal.allocated_principal_paise).toBe(-50000);
+    expect(parentReversal.allocated_markup_paise).toBe(0);
+
+    // Child transactions and adjustments remain completely intact and child was not reverted
+    const childAdj = await db.getFirstAsync<any>(
+      `SELECT * FROM transactions WHERE id = 'tx-op-child-adj'`
+    );
+    expect(childAdj).not.toBeNull();
+    expect(childAdj.allocated_principal_paise).toBe(-5000);
+    expect(childAdj.allocated_markup_paise).toBe(5000);
+
+    const childReversal = await db.getFirstAsync<any>(
+      `SELECT * FROM transactions WHERE operation_id LIKE '%reversal%' AND operation_id LIKE '%op-child%'`
+    );
+    expect(childReversal).toBeNull();
+
+    // Total receipts for child remain exactly 30000 paise
+    const childNet = await db.getFirstAsync<any>(`
+      SELECT SUM(amount_paise) as amount, SUM(allocated_principal_paise) as principal, SUM(allocated_markup_paise) as markup
+      FROM transactions
+      WHERE operation_id = ? OR instr(operation_id, 'realloc::' || ? || '::') = 1
+    `, [opChild, opChild]);
+    expect(childNet.amount).toBe(30000);
+    expect(childNet.principal).toBe(30000);
+    expect(childNet.markup).toBe(0);
   });
 });

@@ -90,12 +90,10 @@ export class TransactionRepository {
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
                    OR transactions.operation_id = 'reversal::' || so.operation_id
+
                    OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                   OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                    OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                   OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                   OR transactions.operation_id = 'reconcile-' || so.operation_id
-                   OR transactions.operation_id = 'reconcile::' || so.operation_id
                  )
              )`,
           [loanId]
@@ -138,12 +136,10 @@ export class TransactionRepository {
                      transactions.operation_id = so.operation_id
                      OR transactions.operation_id = 'reversal-' || so.operation_id
                      OR transactions.operation_id = 'reversal::' || so.operation_id
+
                      OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                     OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                      OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                     OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                     OR transactions.operation_id = 'reconcile-' || so.operation_id
-                     OR transactions.operation_id = 'reconcile::' || so.operation_id
                    )
                )`,
             [loanId]

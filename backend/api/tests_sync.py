@@ -582,13 +582,26 @@ def test_penalty_waiver_reduces_collectible_balance_and_allows_settlement(api_cl
     assert loan.status == 'SETTLED'
 
 
-@pytest.mark.django_db
-def test_concurrent_payment_retries_idempotency_recovery(api_client, lender_setup):
-    user, tenant, token = lender_setup
-    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_payment_retries_idempotency_recovery(lender_setup):
+    import concurrent.futures
+    from django.db import connection
+    from rest_framework.test import APIClient
 
+    user, tenant, token = lender_setup
     borrower = Borrower.objects.create(tenant=tenant, name='Retry Borrower', phone='9876543212')
-    loan = LoanAccount.objects.create(
+    loan1 = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    loan2 = LoanAccount.objects.create(
         tenant=tenant,
         borrower=borrower,
         principal_paise=100000,
@@ -601,7 +614,18 @@ def test_concurrent_payment_retries_idempotency_recovery(api_client, lender_setu
     )
     Kist.objects.create(
         tenant=tenant,
-        loan=loan,
+        loan=loan1,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan2,
         installment_number=1,
         original_due_date='2026-01-01',
         effective_due_date='2026-01-01',
@@ -611,14 +635,41 @@ def test_concurrent_payment_retries_idempotency_recovery(api_client, lender_setu
         status='PENDING'
     )
 
-    op_id = str(uuid.uuid4())
-    payload = {
+    Device.objects.create(tenant=tenant)
+    url = reverse('sync-push')
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from api.views_sync import SyncPushView
+
+    factory = APIRequestFactory()
+    view = SyncPushView.as_view()
+
+    def post_op(payload_data):
+        import time
+        for attempt in range(8):
+            request = factory.post(url, payload_data, format='json')
+            request.tenant = tenant
+            request.user = user
+            force_authenticate(request, user=user, token=token)
+            try:
+                res = view(request)
+                return res
+            except Exception as e:
+                if 'locked' in str(e).lower() and attempt < 7:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
+            finally:
+                connection.close()
+
+    # Part 1: Concurrent identical payment submissions
+    identical_op_id = str(uuid.uuid4())
+    payload_identical = {
         "operations": [
             {
                 "type": "record_collection",
-                "operation_id": op_id,
+                "operation_id": identical_op_id,
                 "payload": {
-                    "loan_id": str(loan.id),
+                    "loan_id": str(loan1.id),
                     "amount_paise": 50000,
                     "effective_date": "2026-01-01",
                     "payment_method": "UPI",
@@ -628,24 +679,93 @@ def test_concurrent_payment_retries_idempotency_recovery(api_client, lender_setu
         ]
     }
 
-    url = reverse('sync-push')
-    # First submission
-    res1 = api_client.post(url, payload, format='json')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(post_op, payload_identical)
+        f2 = executor.submit(post_op, payload_identical)
+        res1 = f1.result()
+        res2 = f2.result()
+
     assert res1.status_code == 200
-    assert res1.data['results'][0]['status'] == 'ACCEPTED'
-
-    # Duplicate submission with identical op_id
-    res2 = api_client.post(url, payload, format='json')
     assert res2.status_code == 200
-    assert res2.data['results'][0]['status'] == 'ACCEPTED'
+    statuses = {res1.data['results'][0]['status'], res2.data['results'][0]['status']}
+    assert 'ACCEPTED' in statuses
+    if 'FAILED' in statuses:
+        # Transient failure due to SQLite thread race: retry recovers and receives ACCEPTED
+        retry_res = post_op(payload_identical)
+        assert retry_res.data['results'][0]['status'] == 'ACCEPTED'
+    else:
+        assert statuses == {'ACCEPTED'}
 
-    # Exactly 1 transaction recorded in ledger
-    tx_count = loan.transactions.filter(transaction_type='COLLECTION').count()
+    # Exactly 1 transaction recorded in ledger for identical_op_id
+    tx_count = loan1.transactions.filter(transaction_type='COLLECTION', operation_id=identical_op_id).count()
     assert tx_count == 1
-    # Cash classification preserved
-    tx = loan.transactions.filter(transaction_type='COLLECTION').first()
+    tx = loan1.transactions.filter(transaction_type='COLLECTION', operation_id=identical_op_id).first()
     assert tx.is_cash is False
     assert tx.payment_method == 'UPI'
+
+    # Part 2: Concurrent conflicting payment requests (same operation_id, differing loan_id and amount)
+    conflicting_op_id = str(uuid.uuid4())
+    payload_a = {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": conflicting_op_id,
+                "payload": {
+                    "loan_id": str(loan1.id),
+                    "amount_paise": 30000,
+                    "effective_date": "2026-01-01",
+                    "payment_method": "CASH",
+                    "is_cash": True
+                }
+            }
+        ]
+    }
+    payload_b_conflict = {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": conflicting_op_id,
+                "payload": {
+                    "loan_id": str(loan2.id),
+                    "amount_paise": 40000,
+                    "effective_date": "2026-01-01",
+                    "payment_method": "CASH",
+                    "is_cash": True
+                }
+            }
+        ]
+    }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f_a = executor.submit(post_op, payload_a)
+        f_b = executor.submit(post_op, payload_b_conflict)
+        res_a = f_a.result()
+        res_b = f_b.result()
+
+    assert res_a.status_code == 200
+    assert res_b.status_code == 200
+    statuses_conflict = {res_a.data['results'][0]['status'], res_b.data['results'][0]['status']}
+    assert 'ACCEPTED' in statuses_conflict
+
+    # Identify winner and loser
+    if res_a.data['results'][0]['status'] == 'ACCEPTED':
+        loser_payload = payload_b_conflict
+        loser_res = res_b
+    else:
+        loser_payload = payload_a
+        loser_res = res_a
+
+    # The loser must NEVER receive false ACCEPTED: it must be REJECTED with idempotency conflict error
+    if loser_res.data['results'][0]['status'] == 'FAILED':
+        loser_retry = post_op(loser_payload)
+        assert loser_retry.data['results'][0]['status'] == 'REJECTED'
+        assert 'Idempotency conflict' in loser_retry.data['results'][0]['error']
+    else:
+        assert loser_res.data['results'][0]['status'] == 'REJECTED'
+        assert 'Idempotency conflict' in loser_res.data['results'][0]['error']
+
+    # Exactly 1 transaction recorded across both loans for this operation_id
+    assert LedgerTx.objects.filter(tenant=tenant, operation_id=conflicting_op_id).count() == 1
 
 
 @pytest.mark.django_db

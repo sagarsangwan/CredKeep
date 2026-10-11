@@ -5,6 +5,7 @@ import { AuthStore } from '../auth/authStore';
 import { OutboxManager, registerOutboxRevertHandler } from './outbox';
 import { allocatePayment } from '../domain/allocation';
 import { Paise } from '../domain/money';
+import { isUuid, deterministicUuid } from '../migration/uuidUtils';
 
 export interface SyncResult {
   pushedCount: number;
@@ -300,9 +301,23 @@ export class SyncService {
           );
         } else {
           existing = await tx.getFirstAsync<any>(
-            `SELECT * FROM transactions WHERE operation_id = ?`,
-            [payload.operation_id]
+            `SELECT * FROM transactions WHERE operation_id = ? OR id = ?`,
+            [payload.operation_id, payload.id || payload.operation_id]
           );
+          if (!existing) {
+            const allLocalTx = await tx.getAllAsync<any>(
+              `SELECT id, operation_id, loan_id, effective_date, amount_paise, transaction_type, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise FROM transactions WHERE transaction_type = 'COLLECTION'`
+            );
+            for (const ltx of allLocalTx || []) {
+              const expectedMigOpId = ltx.operation_id && isUuid(ltx.operation_id)
+                ? ltx.operation_id
+                : deterministicUuid(`mig-tx-${ltx.id || ltx.operation_id || `${ltx.loan_id}-${ltx.effective_date}-${ltx.amount_paise}`}`);
+              if (expectedMigOpId === payload.operation_id || ltx.id === payload.id || ltx.operation_id === payload.operation_id) {
+                existing = ltx;
+                break;
+              }
+            }
+          }
         }
         if (!existing) {
           await tx.runAsync(
@@ -345,14 +360,12 @@ export class SyncService {
              WHERE loan_id = ?
                AND (
                  operation_id = ?
+
                  OR instr(operation_id, 'realloc::' || ? || '::') = 1
-                 OR instr(operation_id, 'realloc-' || ? || '-') = 1
+
                  OR instr(operation_id, 'reconcile::' || ? || '::') = 1
-                 OR instr(operation_id, 'reconcile-' || ? || '-') = 1
-                 OR operation_id = 'reconcile-' || ?
-                 OR operation_id = 'reconcile::' || ?
                )`,
-            [payload.loan_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id]
+            [payload.loan_id, payload.operation_id, payload.operation_id, payload.operation_id]
           );
 
           const currentPrincipal = netAllocRow?.netPrincipal ?? (existing.allocated_principal_paise || 0);
@@ -367,7 +380,7 @@ export class SyncService {
 
           if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
             const reconId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('recon-' + Date.now() + '-' + Math.random().toString(36).substring(2));
-            const reconOpId = `reconcile-${payload.operation_id}-${reconId.substring(0, 8)}`;
+            const reconOpId = `reconcile::${payload.operation_id}::${reconId.substring(0, 8)}`;
             await tx.runAsync(
               `INSERT INTO transactions (
                  id, operation_id, loan_id, transaction_type, is_cash, payment_method,
@@ -442,12 +455,10 @@ export class SyncService {
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
                  OR transactions.operation_id = 'reversal::' || so.operation_id
+
                  OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                  OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                 OR transactions.operation_id = 'reconcile-' || so.operation_id
-                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )
            THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
@@ -470,12 +481,10 @@ export class SyncService {
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
                  OR transactions.operation_id = 'reversal::' || so.operation_id
+
                  OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                  OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                 OR transactions.operation_id = 'reconcile-' || so.operation_id
-                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )`,
         [loanId]
@@ -548,14 +557,12 @@ export class SyncService {
            WHERE loan_id = ?
              AND (
                operation_id = ?
+
                OR instr(operation_id, 'realloc::' || ? || '::') = 1
-               OR instr(operation_id, 'realloc-' || ? || '-') = 1
+
                OR instr(operation_id, 'reconcile::' || ? || '::') = 1
-               OR instr(operation_id, 'reconcile-' || ? || '-') = 1
-               OR operation_id = 'reconcile-' || ?
-               OR operation_id = 'reconcile::' || ?
              )`,
-          [loanId, item.operation_id, item.operation_id, item.operation_id, item.operation_id, item.operation_id, item.operation_id, item.operation_id]
+          [loanId, item.operation_id, item.operation_id, item.operation_id]
         );
 
         const currentPrincipal = currentColNet?.currentPrincipal ?? 0;
@@ -570,7 +577,7 @@ export class SyncService {
 
         if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
           const reallocId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('realloc-' + Date.now() + '-' + Math.random().toString(36).substring(2));
-          const reallocOpId = `realloc-${item.operation_id}-${reallocId.substring(0, 8)}`;
+          const reallocOpId = `realloc::${item.operation_id}::${reallocId.substring(0, 8)}`;
           await tx.runAsync(
             `INSERT INTO transactions (
                id, operation_id, loan_id, transaction_type, is_cash, payment_method,
@@ -671,14 +678,12 @@ export class SyncService {
          WHERE loan_id = ?
            AND (
              operation_id = ?
+
              OR instr(operation_id, 'realloc::' || ? || '::') = 1
-             OR instr(operation_id, 'realloc-' || ? || '-') = 1
+
              OR instr(operation_id, 'reconcile::' || ? || '::') = 1
-             OR instr(operation_id, 'reconcile-' || ? || '-') = 1
-             OR operation_id = 'reconcile-' || ?
-             OR operation_id = 'reconcile::' || ?
            )`,
-        [origTx.loan_id, operationId, operationId, operationId, operationId, operationId, operationId, operationId]
+        [origTx.loan_id, operationId, operationId, operationId]
       );
 
       const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
@@ -762,17 +767,13 @@ export class SyncService {
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
                    OR transactions.operation_id = 'reversal::' || so.operation_id
+
                    OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                   OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                    OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                   OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                   OR transactions.operation_id = 'reconcile-' || so.operation_id
-                   OR transactions.operation_id = 'reconcile::' || so.operation_id
                  )
              )
-             AND operation_id NOT LIKE 'realloc-%'
              AND operation_id NOT LIKE 'realloc::%'
-             AND operation_id NOT LIKE 'reconcile-%'
              AND operation_id NOT LIKE 'reconcile::%'
              AND effective_date <= ?
              THEN allocated_penalty_paise ELSE 0 END), 0) as deltaPenalty
@@ -843,14 +844,12 @@ export class SyncService {
          WHERE loan_id = ?
            AND (
              operation_id = ?
+
              OR instr(operation_id, 'realloc::' || ? || '::') = 1
-             OR instr(operation_id, 'realloc-' || ? || '-') = 1
+
              OR instr(operation_id, 'reconcile::' || ? || '::') = 1
-             OR instr(operation_id, 'reconcile-' || ? || '-') = 1
-             OR operation_id = 'reconcile-' || ?
-             OR operation_id = 'reconcile::' || ?
            )`,
-        [loanId, col.operation_id, col.operation_id, col.operation_id, col.operation_id, col.operation_id, col.operation_id, col.operation_id]
+        [loanId, col.operation_id, col.operation_id, col.operation_id]
       );
 
       const currentPrincipal = currentColNet?.currentPrincipal ?? (col.allocated_principal_paise || 0);
@@ -865,7 +864,7 @@ export class SyncService {
 
       if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
         const reallocId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('realloc-' + Date.now() + '-' + Math.random().toString(36).substring(2));
-        const reallocOpId = `realloc-${col.operation_id}-${reallocId.substring(0, 8)}`;
+        const reallocOpId = `realloc::${col.operation_id}::${reallocId.substring(0, 8)}`;
         await tx.runAsync(
           `INSERT INTO transactions (
              id, operation_id, loan_id, transaction_type, is_cash, payment_method,
@@ -917,17 +916,13 @@ export class SyncService {
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
                  OR transactions.operation_id = 'reversal::' || so.operation_id
+
                  OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                  OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                 OR transactions.operation_id = 'reconcile-' || so.operation_id
-                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )
-           AND operation_id NOT LIKE 'realloc-%'
            AND operation_id NOT LIKE 'realloc::%'
-           AND operation_id NOT LIKE 'reconcile-%'
            AND operation_id NOT LIKE 'reconcile::%'
            THEN allocated_penalty_paise ELSE 0 END), 0) as reconPenalty
        FROM transactions WHERE loan_id = ?`,
@@ -961,12 +956,10 @@ export class SyncService {
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
                  OR transactions.operation_id = 'reversal::' || so.operation_id
+
                  OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+
                  OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
-                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
-                 OR transactions.operation_id = 'reconcile-' || so.operation_id
-                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )`,
         [loanId]
