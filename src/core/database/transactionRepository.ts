@@ -82,13 +82,18 @@ export class TransactionRepository {
            WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
              AND NOT EXISTS (
                SELECT 1 FROM sync_outbox so
-               WHERE so.status = 'REJECTED'
+               WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+                 AND so.status = 'REJECTED'
                  AND (
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
-                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                   OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                   OR transactions.operation_id = 'reversal::' || so.operation_id
+                   OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                   OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                   OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                   OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
                    OR transactions.operation_id = 'reconcile-' || so.operation_id
+                   OR transactions.operation_id = 'reconcile::' || so.operation_id
                  )
              )`,
           [loanId]
@@ -125,13 +130,18 @@ export class TransactionRepository {
              WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
                AND NOT EXISTS (
                  SELECT 1 FROM sync_outbox so
-                 WHERE so.status = 'REJECTED'
+                 WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+                   AND so.status = 'REJECTED'
                    AND (
                      transactions.operation_id = so.operation_id
                      OR transactions.operation_id = 'reversal-' || so.operation_id
-                     OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                     OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                     OR transactions.operation_id = 'reversal::' || so.operation_id
+                     OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                     OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                     OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                     OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
                      OR transactions.operation_id = 'reconcile-' || so.operation_id
+                     OR transactions.operation_id = 'reconcile::' || so.operation_id
                    )
                )`,
             [loanId]
@@ -188,13 +198,15 @@ export class TransactionRepository {
         }
         
         const totalPrincipalPaid = result.updatedKists.reduce((acc, k) => acc + k.principalPaid, 0);
-        if (loan.product_type === 'instalment') {
-          if (totalPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
-             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
-          }
-        } else if (loan.product_type === 'bullet') {
-          if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
-             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+        if (loan.status !== 'WRITTEN_OFF') {
+          if (loan.product_type === 'instalment') {
+            if (totalPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+               await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+            }
+          } else if (loan.product_type === 'bullet') {
+            if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+               await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+            }
           }
         }
 
@@ -288,7 +300,7 @@ export class TransactionRepository {
 
     if (newPenaltyAmount > 0) {
       for (const date of newAssessedDates) {
-        const transactionId = crypto.randomUUID();
+        const transactionId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('penalty-' + Date.now() + '-' + Math.random().toString(36).substring(2));
         const operationId = `penalty-${loanId}-${date}`;
         
         // Check if it already exists to be safe (by operation_id or date)

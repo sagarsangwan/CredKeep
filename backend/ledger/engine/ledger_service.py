@@ -3,6 +3,7 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Optional
 from django.db import transaction, models
+from django.utils import timezone
 from django.db.utils import OperationalError
 from django.core.exceptions import ValidationError
 from ledger.models import LoanAccount, Kist, Transaction as LedgerTx, SyncOutbox
@@ -198,11 +199,13 @@ def record_collection(
                 if existing_locked:
                     return {'status': 'ALREADY_EXISTS', 'transaction': existing_locked}
 
-                # Extend schedule for bullet loans if applicable
-                extend_bullet_schedule_if_needed(locked_loan, effective_date_str)
+                # Extend schedule for bullet loans bounded by server clock
+                server_date_str = str(timezone.now().date())
+                sched_date_str = min(effective_date_str, server_date_str)
+                extend_bullet_schedule_if_needed(locked_loan, sched_date_str)
 
-                # Assess late penalties up to effective collection date
-                assess_penalties(locked_loan, effective_date_str)
+                # Assess late penalties bounded by server clock
+                assess_penalties(locked_loan, sched_date_str)
 
                 # Calculate outstanding penalties (accounting for collections and waivers)
                 total_assessed = (

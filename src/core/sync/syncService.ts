@@ -344,11 +344,14 @@ export class SyncService {
              WHERE loan_id = ?
                AND (
                  operation_id = ?
-                 OR operation_id LIKE 'realloc-' || ? || '-%'
-                 OR operation_id LIKE 'reconcile-' || ? || '-%'
+                 OR instr(operation_id, 'realloc::' || ? || '::') = 1
+                 OR instr(operation_id, 'realloc-' || ? || '-') = 1
+                 OR instr(operation_id, 'reconcile::' || ? || '::') = 1
+                 OR instr(operation_id, 'reconcile-' || ? || '-') = 1
                  OR operation_id = 'reconcile-' || ?
+                 OR operation_id = 'reconcile::' || ?
                )`,
-            [payload.loan_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id]
+            [payload.loan_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id]
           );
 
           const currentPrincipal = netAllocRow?.netPrincipal ?? (existing.allocated_principal_paise || 0);
@@ -432,13 +435,18 @@ export class SyncService {
          COALESCE(SUM(CASE WHEN transaction_type IN ('COLLECTION', 'REVERSAL')
            AND NOT EXISTS (
              SELECT 1 FROM sync_outbox so
-             WHERE so.status IN ('PENDING', 'REJECTED')
+             WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+               AND so.status IN ('PENDING', 'REJECTED')
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                 OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                 OR transactions.operation_id = 'reversal::' || so.operation_id
+                 OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                 OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
                  OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )
            THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
@@ -455,13 +463,18 @@ export class SyncService {
          WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
            AND NOT EXISTS (
              SELECT 1 FROM sync_outbox so
-             WHERE so.status IN ('PENDING', 'REJECTED')
+             WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+               AND so.status IN ('PENDING', 'REJECTED')
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                 OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                 OR transactions.operation_id = 'reversal::' || so.operation_id
+                 OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                 OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
                  OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )`,
         [loanId]
@@ -534,11 +547,14 @@ export class SyncService {
            WHERE loan_id = ?
              AND (
                operation_id = ?
-               OR operation_id LIKE 'realloc-' || ? || '-%'
-               OR operation_id LIKE 'reconcile-' || ? || '-%'
+               OR instr(operation_id, 'realloc::' || ? || '::') = 1
+               OR instr(operation_id, 'realloc-' || ? || '-') = 1
+               OR instr(operation_id, 'reconcile::' || ? || '::') = 1
+               OR instr(operation_id, 'reconcile-' || ? || '-') = 1
                OR operation_id = 'reconcile-' || ?
+               OR operation_id = 'reconcile::' || ?
              )`,
-          [loanId, item.operation_id, item.operation_id, item.operation_id, item.operation_id]
+          [loanId, item.operation_id, item.operation_id, item.operation_id, item.operation_id, item.operation_id, item.operation_id, item.operation_id]
         );
 
         const currentPrincipal = currentColNet?.currentPrincipal ?? 0;
@@ -599,14 +615,18 @@ export class SyncService {
     );
     const allPaid = finalKists.length > 0 && finalKists.every((k) => k.status === 'PAID');
     if (loan) {
-      let isSettled = false;
-      if (loan.product_type === 'instalment') {
-        const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
-        isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise && outstandingPenalty <= 0;
-      } else if (loan.product_type === 'bullet') {
-        isSettled = allPaid && replayedBulletPrincipalPaid >= loan.principal_paise && outstandingPenalty <= 0;
+      if (loan.status === 'WRITTEN_OFF') {
+        // Authoritative WRITTEN_OFF terminal status must be preserved
+      } else {
+        let isSettled = false;
+        if (loan.product_type === 'instalment') {
+          const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
+          isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise && outstandingPenalty <= 0;
+        } else if (loan.product_type === 'bullet') {
+          isSettled = allPaid && replayedBulletPrincipalPaid >= loan.principal_paise && outstandingPenalty <= 0;
+        }
+        await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [isSettled ? 'SETTLED' : 'ACTIVE', loanId]);
       }
-      await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [isSettled ? 'SETTLED' : 'ACTIVE', loanId]);
     }
   }
 
@@ -650,11 +670,14 @@ export class SyncService {
          WHERE loan_id = ?
            AND (
              operation_id = ?
-             OR operation_id LIKE 'realloc-' || ? || '-%'
-             OR operation_id LIKE 'reconcile-' || ? || '-%'
+             OR instr(operation_id, 'realloc::' || ? || '::') = 1
+             OR instr(operation_id, 'realloc-' || ? || '-') = 1
+             OR instr(operation_id, 'reconcile::' || ? || '::') = 1
+             OR instr(operation_id, 'reconcile-' || ? || '-') = 1
              OR operation_id = 'reconcile-' || ?
+             OR operation_id = 'reconcile::' || ?
            )`,
-        [origTx.loan_id, operationId, operationId, operationId, operationId]
+        [origTx.loan_id, operationId, operationId, operationId, operationId, operationId, operationId, operationId]
       );
 
       const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
@@ -727,22 +750,29 @@ export class SyncService {
          FROM transactions WHERE loan_id = ?`,
         [col.effective_date, col.effective_date, loanId]
       );
-      const reconRow = await tx.getFirstAsync<{ deltaPenalty: number }>(
+       const reconRow = await tx.getFirstAsync<{ deltaPenalty: number }>(
         `SELECT
            COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
              AND NOT EXISTS (
                SELECT 1 FROM sync_outbox so
-               WHERE so.status = 'REJECTED'
+               WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+                 AND so.status = 'REJECTED'
                  AND (
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
-                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
-                OR transactions.operation_id = 'reconcile-' || so.operation_id
+                   OR transactions.operation_id = 'reversal::' || so.operation_id
+                   OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                   OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                   OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                   OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
+                   OR transactions.operation_id = 'reconcile-' || so.operation_id
+                   OR transactions.operation_id = 'reconcile::' || so.operation_id
                  )
              )
              AND operation_id NOT LIKE 'realloc-%'
+             AND operation_id NOT LIKE 'realloc::%'
              AND operation_id NOT LIKE 'reconcile-%'
+             AND operation_id NOT LIKE 'reconcile::%'
              AND effective_date <= ?
              THEN allocated_penalty_paise ELSE 0 END), 0) as deltaPenalty
          FROM transactions WHERE loan_id = ?`,
@@ -812,11 +842,14 @@ export class SyncService {
          WHERE loan_id = ?
            AND (
              operation_id = ?
-             OR operation_id LIKE 'realloc-' || ? || '-%'
-             OR operation_id LIKE 'reconcile-' || ? || '-%'
+             OR instr(operation_id, 'realloc::' || ? || '::') = 1
+             OR instr(operation_id, 'realloc-' || ? || '-') = 1
+             OR instr(operation_id, 'reconcile::' || ? || '::') = 1
+             OR instr(operation_id, 'reconcile-' || ? || '-') = 1
              OR operation_id = 'reconcile-' || ?
+             OR operation_id = 'reconcile::' || ?
            )`,
-        [loanId, col.operation_id, col.operation_id, col.operation_id, col.operation_id]
+        [loanId, col.operation_id, col.operation_id, col.operation_id, col.operation_id, col.operation_id, col.operation_id, col.operation_id]
       );
 
       const currentPrincipal = currentColNet?.currentPrincipal ?? (col.allocated_principal_paise || 0);
@@ -877,17 +910,24 @@ export class SyncService {
          COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
            AND NOT EXISTS (
              SELECT 1 FROM sync_outbox so
-             WHERE so.status = 'REJECTED'
+             WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+               AND so.status = 'REJECTED'
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
-                OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 OR transactions.operation_id = 'reversal::' || so.operation_id
+                 OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                 OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
+                 OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )
            AND operation_id NOT LIKE 'realloc-%'
+           AND operation_id NOT LIKE 'realloc::%'
            AND operation_id NOT LIKE 'reconcile-%'
+           AND operation_id NOT LIKE 'reconcile::%'
            THEN allocated_penalty_paise ELSE 0 END), 0) as reconPenalty
        FROM transactions WHERE loan_id = ?`,
       [loanId]
@@ -914,13 +954,18 @@ export class SyncService {
          WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
            AND NOT EXISTS (
              SELECT 1 FROM sync_outbox so
-             WHERE so.status = 'REJECTED'
+             WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+               AND so.status = 'REJECTED'
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
-                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
-                OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 OR transactions.operation_id = 'reversal::' || so.operation_id
+                 OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'realloc-' || so.operation_id || '-') = 1
+                 OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                 OR instr(transactions.operation_id, 'reconcile-' || so.operation_id || '-') = 1
+                 OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 OR transactions.operation_id = 'reconcile::' || so.operation_id
                )
            )`,
         [loanId]
@@ -929,8 +974,10 @@ export class SyncService {
       isSettled = allPaid && bulletPrincipalPaid >= loan.principal_paise && finalRemainingPenalty <= 0;
     }
 
-    const newStatus = isSettled ? 'SETTLED' : 'ACTIVE';
-    await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [newStatus, loanId]);
+    if (loan && loan.status !== 'WRITTEN_OFF') {
+      const newStatus = isSettled ? 'SETTLED' : 'ACTIVE';
+      await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [newStatus, loanId]);
+    }
   }
 
   /**

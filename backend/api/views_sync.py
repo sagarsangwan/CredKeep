@@ -460,9 +460,10 @@ class SyncPushView(APIView):
 
             # Clock skew rule (docs/v2/10-sync-failure-matrix.md):
             # Authoritative server clock governs penalty assessments to prevent devices
-            # from evading accrued late fees by backdating offline collection timestamps.
+            # from evading accrued late fees by backdating offline collection timestamps,
+            # and bounds assessments so future timestamps cannot assess unearned late fees.
             server_date_str = str(timezone.now().date())
-            assess_date_str = max(str(effective_date), server_date_str)
+            assess_date_str = server_date_str
             ledger_service.assess_penalties(loan, assess_date_str)
 
             ledger_service.record_collection(
@@ -530,7 +531,7 @@ class SyncPushView(APIView):
             if 'T' in eff_today:
                 eff_today = eff_today.split('T')[0]
             server_date_str = str(timezone.now().date())
-            assess_date_str = max(eff_today, server_date_str)
+            assess_date_str = server_date_str
             ledger_service.assess_penalties(loan, assess_date_str)
 
             actual_waived = 0
@@ -654,9 +655,11 @@ class SyncPushView(APIView):
                 return 'REJECTED', 'Waiver amount must be an exact positive integer in paise.'
             waive_amount = raw_waive
 
-            eff_date = str(payload.get('effective_date') or timezone.now().date())
-            if 'T' in eff_date:
-                eff_date = eff_date.split('T')[0]
+            server_date_str = str(timezone.now().date())
+            raw_eff = str(payload.get('effective_date') or server_date_str)
+            if 'T' in raw_eff:
+                raw_eff = raw_eff.split('T')[0]
+            eff_date = min(raw_eff, server_date_str)
 
             # Assess penalties due up to eff_date first under the loan lock
             ledger_service.assess_penalties(loan, eff_date)

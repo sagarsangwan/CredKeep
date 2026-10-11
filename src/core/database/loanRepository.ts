@@ -133,8 +133,9 @@ export class LoanRepository {
       
       try {
         while (nextDueDate <= currentDate || nextInstalmentNumber === lastKist.installment_number + 1 /* always add at least one if we entered */) {
+          const kistId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('kist-' + Date.now() + '-' + Math.random().toString(36).substring(2));
           await statement.executeAsync([
-            crypto.randomUUID(),
+            kistId,
             loanId,
             nextInstalmentNumber,
             nextDueDate,

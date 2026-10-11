@@ -1956,6 +1956,137 @@ def test_rejected_penalty_waiver_rolls_back_schedule_and_outbox_mutations(api_cl
     assert loan.status == 'ACTIVE'
 
 
+@pytest.mark.django_db
+def test_future_dated_collection_does_not_assess_future_penalties_or_extend_bullet_schedule(api_client, lender_setup):
+    """
+    Verifies that a collection with a future timestamp is bounded by the authoritative server clock
+    and does not assess unearned future late penalties or extend bullet schedules ahead of server time.
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    today = timezone.now().date()
+    future_date = today + timedelta(days=60)
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Future Date', phone='9876543998')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date=str(today),
+        due_day=today.day,
+        product_type='bullet',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date=str(today),
+        effective_due_date=str(today),
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    initial_kist_count = loan.schedules.count()
+
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 5000,
+                    'effective_date': str(future_date),
+                    'payment_method': 'CASH',
+                    'is_cash': True
+                }
+            }
+        ]
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Bullet schedule must not have been extended into the future beyond server clock
+    assert loan.schedules.count() == initial_kist_count
+    # No future penalty assessments beyond server clock
+    future_penalties = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT', effective_date__gt=today)
+    assert future_penalties.count() == 0
+
+
+@pytest.mark.django_db
+def test_future_dated_postponement_does_not_assess_future_penalties(api_client, lender_setup):
+    """
+    Verifies that a postponement modification with a future effective_date does not assess
+    unearned future late penalties beyond the server clock.
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    today = timezone.now().date()
+    future_date = today + timedelta(days=45)
+    revised_date = today + timedelta(days=90)
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Future Postpone', phone='9876543999')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date=str(today),
+        due_day=today.day,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date=str(today),
+        effective_due_date=str(today),
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': str(revised_date),
+                    'effective_date': str(future_date),  # Claimed future modification date
+                    'accrued_penalty_action': 'NONE',
+                    'reason': 'Future modification test'
+                }
+            }
+        ]
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # No penalties assessed beyond server today
+    future_penalties = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT', effective_date__gt=today)
+    assert future_penalties.count() == 0
+
+
+
 
 
 

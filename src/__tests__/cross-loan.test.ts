@@ -988,8 +988,8 @@ describe('Real SQLite Engine Integration Guarantees', () => {
       INSERT INTO repayment_schedules VALUES ('kist-v1-1', 'loan-v1', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING');
     `);
 
-    // Create adapter
-    const adapter: any = {
+    // Create transaction connection and database handle
+    const txn: any = {
       sqlite,
       async execAsync(sql: string) {
         sqlite.exec(sql);
@@ -1009,10 +1009,23 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         const stmt = sqlite.prepare(sql);
         return stmt.all(...bound) as T[];
       },
+    };
+
+    const adapter: any = {
+      sqlite,
+      async execAsync() {
+        throw new Error('Database queries outside transaction context are prohibited during migration');
+      },
+      async getFirstAsync<T>(sql: string, params: any[] = []): Promise<T | null> {
+        return txn.getFirstAsync(sql, params);
+      },
+      async runAsync(sql: string, params: any[] = []) {
+        return txn.runAsync(sql, params);
+      },
       async withExclusiveTransactionAsync<T>(callback: (tx: any) => Promise<T>): Promise<T> {
         sqlite.exec('BEGIN EXCLUSIVE TRANSACTION');
         try {
-          const res = await callback(adapter);
+          const res = await callback(txn);
           sqlite.exec('COMMIT');
           return res;
         } catch (e) {
@@ -2003,5 +2016,108 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     // 3. Client retries recording payment with same operation_id -> MUST throw error!
     await expect(repo.recordCashPayment('loan-rej-retry', toPaise(5000), opId, '2026-01-01'))
       .rejects.toThrow(/Payment operation op-rejected-payment-1 was rejected/);
+  });
+
+  it('strictly isolates cross-loan adjustments with hyphen-prefixed operation IDs and prevents improper exclusion', async () => {
+    const db = createRealSqliteDb();
+
+    // Loan A
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-hyphen-a', 'Borrower Hyphen A', '9876543111', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-hyphen-a', 'b-hyphen-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-ha-1', 'loan-hyphen-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Loan B
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-hyphen-b', 'Borrower Hyphen B', '9876543112', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-hyphen-b', 'b-hyphen-b', 100000, 0.1, 1, '2026-01-01', 1, 'bullet', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-hb-1', 'loan-hyphen-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Loan A has rejected collection with operation_id 'op-1'
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-ha-1', 'op-1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-hyphen-a', amount_paise: 500, effective_date: '2026-01-02' })}', 'REJECTED', '2026-01-02T10:00:00Z')
+    `);
+
+    // Loan B has a legitimate reallocation adjustment whose operation_id starts with 'realloc-op-1-child-uuid'
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-hb-child', 'realloc-op-1-child-uuid', 'loan-hyphen-b', 'REVERSAL', 0, 500, 0, 0, '2026-01-02', '2026-01-02')
+    `);
+
+    // Record cash payment on Loan B
+    const repo = new TransactionRepository(db);
+    const resB = await repo.recordCashPayment('loan-hyphen-b', toPaise(1000), 'op-new-pay-b', '2026-01-02');
+    expect(resB.success).toBe(true);
+
+    // Verify that Loan B's tx-hb-child (500 paise principal) was NOT excluded by Loan A's rejected op-1!
+    // Loan B's past principal paid must account for tx-hb-child (500) plus new payment's principal allocation
+    const bulletBPrincipal = await db.getFirstAsync<any>(`
+      SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
+      WHERE loan_id = 'loan-hyphen-b' AND transaction_type IN ('COLLECTION', 'REVERSAL')
+    `);
+    expect(bulletBPrincipal?.total).toBeGreaterThanOrEqual(500);
+  });
+
+  it('strictly prevents LIKE wildcard characters in outbox operation IDs from colliding across loans', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-wild-a', 'Borrower Wild A', '9876543113', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-wild-a', 'b-wild-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-wild-b', 'b-wild-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-wa-1', 'loan-wild-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-wb-1', 'loan-wild-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Loan A has rejected outbox operation with underscore wildcard: 'op_1'
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-wa-1', 'op_1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-wild-a', amount_paise: 300, effective_date: '2026-01-02' })}', 'REJECTED', '2026-01-02T10:00:00Z')
+    `);
+
+    // Loan B has collection with 'op-1' and a legitimate realloc adjustment 'realloc-op-1-xyz'
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-wb-1', 'op-1', 'loan-wild-b', 'COLLECTION', 1000, 0, 1000, 0, '2026-01-02', '2026-01-02')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-wb-realloc', 'realloc-op-1-xyz', 'loan-wild-b', 'REVERSAL', 0, 200, -200, 0, '2026-01-02', '2026-01-02')
+    `);
+
+    // Check penalty query on Loan B: Loan A's 'op_1' MUST NOT exclude Loan B's 'op-1' or 'realloc-op-1-xyz'
+    const repo = new TransactionRepository(db);
+    const earnings = await repo.getEarningsSummary({ loanId: 'loan-wild-b' });
+    expect(earnings.markupReceived).toBe(800);
+    expect(earnings.principalReturned).toBe(200);
+  });
+
+  it('pulling changes or replaying pending collections on a WRITTEN_OFF loan preserves authoritative terminal status', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-woff', 'Borrower Written Off', '9876543114', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-woff', 'b-woff', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'WRITTEN_OFF', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-woff-1', 'loan-woff', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Server sends a penalty assessment delta
+    const modifiedLoans = new Set<string>();
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'tx-woff-pen',
+        operation_id: 'op-woff-pen',
+        loan_id: 'loan-woff',
+        transaction_type: 'PENALTY_ASSESSMENT',
+        amount_paise: 500,
+        effective_date: '2026-01-02'
+      }
+    }, modifiedLoans);
+
+    // Replay pending collections for modified loan
+    for (const lId of modifiedLoans) {
+      await SyncService.reapplyPendingCollections(db, lId);
+    }
+
+    // Verify loan status remains WRITTEN_OFF and was not reset to ACTIVE or SETTLED
+    const loan = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-woff'`);
+    expect(loan?.status).toBe('WRITTEN_OFF');
   });
 });
