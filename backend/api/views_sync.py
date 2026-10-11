@@ -229,13 +229,50 @@ class SyncPushView(APIView):
                             if payload.get('principal_paise') and payload.get('principal_paise') != orig_p.get('principal_paise'):
                                 has_conflict = True
                                 conflict_reason = "Idempotency conflict: loan principal changed."
-                        elif op_type == 'postpone_due_date':
-                            if payload.get('loan_id') and str(payload.get('loan_id')) != str(orig_p.get('loan_id')):
+                        elif op_type in ('modify_schedule', 'postpone_due_date'):
+                            req_loan = str(payload.get('loan_id') or op.get('loan_id') or '')
+                            if req_loan and orig_p.get('loan_id') and req_loan != str(orig_p.get('loan_id')):
                                 has_conflict = True
-                                conflict_reason = "Idempotency conflict: postponement loan_id changed."
-                            if payload.get('revised_effective_due_date') and str(payload.get('revised_effective_due_date')) != str(orig_p.get('revised_effective_due_date')):
+                                conflict_reason = "Idempotency conflict: modify_schedule loan_id changed."
+                            if payload.get('kist_id') and orig_p.get('kist_id') and str(payload.get('kist_id')) != str(orig_p.get('kist_id')):
                                 has_conflict = True
-                                conflict_reason = "Idempotency conflict: revised_effective_due_date changed."
+                                conflict_reason = "Idempotency conflict: modify_schedule kist_id changed."
+                            if payload.get('installment_number') is not None and orig_p.get('installment_number') is not None and str(payload.get('installment_number')) != str(orig_p.get('installment_number')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule installment_number changed."
+                            if payload.get('revised_effective_due_date') and orig_p.get('revised_effective_due_date') and str(payload.get('revised_effective_due_date')) != str(orig_p.get('revised_effective_due_date')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule revised_effective_due_date changed."
+                            if payload.get('accrued_penalty_action', 'NONE') != orig_p.get('accrued_penalty_action', 'NONE'):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule accrued_penalty_action changed."
+                            if payload.get('waived_penalty_paise', 0) != orig_p.get('waived_penalty_paise', 0):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule waived_penalty_paise changed."
+
+                    # Verify against persisted ScheduleModification record if present
+                    if not has_conflict and op_type in ('modify_schedule', 'postpone_due_date'):
+                        existing_mod = ScheduleModification.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                        if existing_mod:
+                            req_loan = str(payload.get('loan_id') or op.get('loan_id') or '')
+                            if req_loan and req_loan != str(existing_mod.loan.id):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule loan_id changed."
+                            if payload.get('revised_effective_due_date') and str(payload.get('revised_effective_due_date')) != str(existing_mod.revised_effective_due_date):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule revised_effective_due_date changed."
+                            if payload.get('kist_id') and str(payload.get('kist_id')) != str(existing_mod.kist.id):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule kist_id changed."
+                            if payload.get('installment_number') is not None and int(payload.get('installment_number')) != existing_mod.kist.installment_number:
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule installment_number changed."
+                            if payload.get('accrued_penalty_action') and payload.get('accrued_penalty_action') != existing_mod.accrued_penalty_action:
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule accrued_penalty_action changed."
+                            if payload.get('waived_penalty_paise') is not None and payload.get('waived_penalty_paise') != existing_mod.waived_penalty_paise:
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: modify_schedule waived_penalty_paise changed."
 
                     if has_conflict:
                         results.append({

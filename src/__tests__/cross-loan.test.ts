@@ -3,6 +3,7 @@ import { TransactionRepository } from '../core/database/transactionRepository';
 import { Paise, toPaise } from '../core/domain/money';
 import { OutboxManager } from '../core/sync/outbox';
 import { SyncService } from '../core/sync/syncService';
+import { V1DataExtractor } from '../core/migration/v1Extractor';
 import { runMigrations } from '../core/database/schema';
 import { getDatabaseName } from '../core/database/dbName';
 import { AuthStore } from '../core/auth/authStore';
@@ -2047,10 +2048,10 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     `);
 
     // Loan B has a legitimate adjustment transaction whose operation_id starts with 'realloc-op-1-child-uuid'
-    // that satisfied Loan B's 500 paise penalty
+    // that satisfied Loan B's 500 paise penalty (conserving total allocations: -500 markup + 500 penalty = 0 amount)
     await db.runAsync(`
       INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
-      VALUES ('tx-hb-child', 'realloc-op-1-child-uuid', 'loan-hyphen-b', 'REVERSAL', 0, 0, 0, 500, 0, '2026-01-01', '2026-01-01')
+      VALUES ('tx-hb-child', 'realloc-op-1-child-uuid', 'loan-hyphen-b', 'REVERSAL', 0, 0, -500, 500, 0, '2026-01-01', '2026-01-01')
     `);
 
     // Record cash payment on Loan B
@@ -2077,11 +2078,37 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     `);
 
     await SyncService.reapplyPendingCollections(db, 'loan-hyphen-b');
-    const replayedTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-hb-pending'`);
-    expect(replayedTx.allocated_penalty_paise).toBe(0);
-    expect(replayedTx.allocated_markup_paise).toBe(500);
-    expect(replayedTx.allocated_principal_paise).toBe(0);
-    expect(replayedTx.unallocated_surplus_paise).toBe(0);
+    const netAllocRow = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(amount_paise), 0) as netAmount,
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty,
+        COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
+      FROM transactions
+      WHERE loan_id = 'loan-hyphen-b'
+        AND (
+          operation_id = 'op-hb-pending'
+          OR instr(operation_id, 'realloc-op-hb-pending-') = 1
+          OR instr(operation_id, 'realloc::op-hb-pending::') = 1
+        )
+    `);
+    expect(netAllocRow.netPenalty).toBe(0);
+    expect(netAllocRow.netMarkup).toBe(500);
+    expect(netAllocRow.netPrincipal).toBe(0);
+    expect(netAllocRow.netSurplus).toBe(0);
+    expect(netAllocRow.netAmount).toBe(500);
+
+    const scheduleB = await db.getFirstAsync<any>(
+      `SELECT * FROM repayment_schedules WHERE loan_id = 'loan-hyphen-b' AND installment_number = 1`
+    );
+    expect(scheduleB.markup_paid_paise).toBe(1500);
+    expect(scheduleB.principal_paid_paise).toBe(0);
+
+    const loanATxCount = await db.getFirstAsync<any>(
+      `SELECT COUNT(*) as count FROM transactions WHERE loan_id = 'loan-hyphen-a'`
+    );
+    expect(loanATxCount.count).toBe(0);
   });
 
   it('strictly prevents LIKE wildcard characters in outbox operation IDs from colliding across loans', async () => {
@@ -2127,11 +2154,37 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Replay pending collections for Loan B: Loan A's 'op_1' MUST NOT exclude Loan B's 'op-1' or 'realloc-op-1-xyz'
     await SyncService.reapplyPendingCollections(db, 'loan-wild-b');
-    const replayedTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-wb-pending'`);
-    expect(replayedTx.allocated_penalty_paise).toBe(0);
-    expect(replayedTx.allocated_markup_paise).toBe(1000);
-    expect(replayedTx.allocated_principal_paise).toBe(0);
-    expect(replayedTx.unallocated_surplus_paise).toBe(0);
+    const netAllocRowWild = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(amount_paise), 0) as netAmount,
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty,
+        COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
+      FROM transactions
+      WHERE loan_id = 'loan-wild-b'
+        AND (
+          operation_id = 'op-wb-pending'
+          OR instr(operation_id, 'realloc-op-wb-pending-') = 1
+          OR instr(operation_id, 'realloc::op-wb-pending::') = 1
+        )
+    `);
+    expect(netAllocRowWild.netPenalty).toBe(0);
+    expect(netAllocRowWild.netMarkup).toBe(1000);
+    expect(netAllocRowWild.netPrincipal).toBe(0);
+    expect(netAllocRowWild.netSurplus).toBe(0);
+    expect(netAllocRowWild.netAmount).toBe(1000);
+
+    const scheduleWildB = await db.getFirstAsync<any>(
+      `SELECT * FROM repayment_schedules WHERE loan_id = 'loan-wild-b' AND installment_number = 1`
+    );
+    expect(scheduleWildB.markup_paid_paise).toBe(1000);
+    expect(scheduleWildB.principal_paid_paise).toBe(0);
+
+    const loanWildATxCount = await db.getFirstAsync<any>(
+      `SELECT COUNT(*) as count FROM transactions WHERE loan_id = 'loan-wild-a'`
+    );
+    expect(loanWildATxCount.count).toBe(0);
 
     // Record cash payment on Loan B and verify exact allocations
     const repo = new TransactionRepository(db);
@@ -2228,42 +2281,139 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(kist.status).toBe('PENDING');
   });
 
-  it('migration retry resumes without UNIQUE constraint failure on sync_outbox.operation_id', async () => {
+  it('pulling changes preserves schedule credit for unresolved NEEDS_REVIEW collections until resolution', async () => {
     const db = createRealSqliteDb();
 
-    await db.runAsync(`INSERT INTO borrowers VALUES ('b-mig', 'Mig Borrower', '9876543116', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-mig', 'b-mig', 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-mig-1', 'loan-mig', 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`);
-    await db.runAsync(`INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at) VALUES ('tx-mig-1', 'op-mig-1', 'loan-mig', 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')`);
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-rev', 'Borrower Review', '9876543118', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-rev', 'b-rev', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`
+      INSERT INTO repayment_schedules (
+        id, loan_id, installment_number, original_due_date, effective_due_date,
+        principal_component_paise, markup_component_paise, total_due_paise,
+        principal_paid_paise, markup_paid_paise, status,
+        server_principal_paid_paise, server_markup_paid_paise, server_status
+      ) VALUES (
+        'kist-rev-1', 'loan-rev', 1, '2026-01-01', '2026-01-01',
+        100000, 10000, 110000, 0, 0, 'PENDING',
+        0, 0, 'PENDING'
+      )
+    `);
 
-    // First enqueue of the collection operation
-    const opId = 'op-mig-1';
-    const rec1 = await OutboxManager.enqueue(db, {
-      operationId: opId,
-      operationType: 'record_collection',
-      payload: { loan_id: 'loan-mig', amount_paise: 1000 }
-    });
-    expect(rec1.operation_id).toBe(opId);
+    // Record cash payment of 10000 paise on due date (pays markup in full)
+    const repo = new TransactionRepository(db);
+    const payRes = await repo.recordCashPayment('loan-rev', 10000 as Paise, 'op-rev-pay-1', '2026-01-01');
+    expect(payRes.success).toBe(true);
 
-    // Retry / re-enqueue MUST NOT throw UNIQUE constraint error
-    let error: any = null;
-    let rec2: any = null;
-    try {
-      rec2 = await OutboxManager.enqueue(db, {
-        operationId: opId,
-        operationType: 'record_collection',
-        payload: { loan_id: 'loan-mig', amount_paise: 1000 }
-      });
-    } catch (e) {
-      error = e;
-    }
-    expect(error).toBeNull();
-    expect(rec2.operation_id).toBe(opId);
+    // Verify schedule was credited initially
+    let kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rev-1'`);
+    expect(kist.markup_paid_paise).toBe(10000);
 
-    const outboxCount = await db.getFirstAsync<any>(
-      `SELECT COUNT(*) as cnt FROM sync_outbox WHERE operation_id = ?`,
-      [opId]
+    // Simulate push receiving NEEDS_REVIEW conflict from server
+    await db.runAsync(
+      `UPDATE sync_outbox SET status = 'NEEDS_REVIEW', error_message = 'Concurrent modification on server' WHERE operation_id = 'op-rev-pay-1'`
     );
-    expect(outboxCount.cnt).toBe(1);
+
+    // Now a subsequent sync cycle pulls changes from server (e.g. server sends updated due date or penalty assessment)
+    const modifiedLoans = new Set<string>();
+    await SyncService.applyServerChange(
+      db,
+      {
+        record_type: 'KIST',
+        operation_type: 'UPDATE',
+        payload: {
+          id: 'kist-rev-1',
+          loan_id: 'loan-rev',
+          installment_number: 1,
+          effective_due_date: '2026-01-15',
+          server_principal_paid_paise: 0,
+          server_markup_paid_paise: 0,
+          server_status: 'PENDING',
+        },
+      },
+      modifiedLoans
+    );
+    expect(modifiedLoans.has('loan-rev')).toBe(true);
+
+    // Replay pending collections runs as part of pull
+    await SyncService.reapplyPendingCollections(db, 'loan-rev');
+
+    // CRITICAL: Schedule credit for the NEEDS_REVIEW collection MUST NOT be lost!
+    kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rev-1'`);
+    expect(kist.markup_paid_paise).toBe(10000);
+
+    // Net ledger allocations across payment and adjustments remain 10000 paise
+    const netAlloc = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(amount_paise), 0) as netAmount,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup
+      FROM transactions
+      WHERE loan_id = 'loan-rev'
+        AND (
+          operation_id = 'op-rev-pay-1'
+          OR instr(operation_id, 'realloc-op-rev-pay-1-') = 1
+        )
+    `);
+    expect(netAlloc.netAmount).toBe(10000);
+    expect(netAlloc.netMarkup).toBe(10000);
+  });
+
+  it('partial migration retry resumes without duplicate primary key failures or orphaned records', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = '11111111-2222-3333-4444-555555555555';
+    const loanId = '22222222-3333-4444-5555-666666666666';
+    const txId = '33333333-4444-5555-6666-777777777777';
+    const txOpId = '44444444-5555-6666-7777-888888888888';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Mig Borrower', '9876543116', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-mig-1', ?, 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`, [loanId]);
+    await db.runAsync(`INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at) VALUES (?, ?, ?, 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')`, [txId, txOpId, loanId]);
+
+    // Extract V1 records and verify deterministic operation IDs
+    const extracted = await V1DataExtractor.extract(db);
+    const ops1 = V1DataExtractor.buildPushPayloads(extracted);
+    const ops2 = V1DataExtractor.buildPushPayloads(extracted);
+    expect(ops1[0].operation_id).toBe(ops2[0].operation_id);
+    expect(ops1[1].operation_id).toBe(ops2[1].operation_id);
+    expect(ops1[2].operation_id).toBe(ops2[2].operation_id);
+
+    // Enqueue operations
+    for (const op of ops1) {
+      await OutboxManager.enqueue(db, {
+        operationId: op.operation_id,
+        operationType: op.type,
+        payload: op.payload,
+      });
+    }
+
+    // Simulate partial push: borrower and loan succeeded and are marked SYNCED
+    await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED' WHERE operation_id = ?`, [ops1[0].operation_id]);
+    await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED' WHERE operation_id = ?`, [ops1[1].operation_id]);
+
+    // Transaction remains PENDING
+    const pendingBefore = await OutboxManager.getPending(db);
+    expect(pendingBefore.length).toBe(1);
+    expect(pendingBefore[0].operation_id).toBe(ops1[2].operation_id);
+
+    // Re-running retry re-enqueues idempotently without UNIQUE constraint errors
+    // and correctly preserves existing SYNCED statuses
+    for (const op of ops2) {
+      await OutboxManager.enqueue(db, {
+        operationId: op.operation_id,
+        operationType: op.type,
+        payload: op.payload,
+      });
+    }
+
+    const borrowerOutbox = await db.getFirstAsync<any>(`SELECT status FROM sync_outbox WHERE operation_id = ?`, [ops1[0].operation_id]);
+    expect(borrowerOutbox.status).toBe('SYNCED');
+
+    const loanOutbox = await db.getFirstAsync<any>(`SELECT status FROM sync_outbox WHERE operation_id = ?`, [ops1[1].operation_id]);
+    expect(loanOutbox.status).toBe('SYNCED');
+
+    // Total outbox records count remains exactly 3 (no duplicate records created)
+    const totalOutbox = await db.getFirstAsync<any>(`SELECT COUNT(*) as cnt FROM sync_outbox`);
+    expect(totalOutbox.cnt).toBe(3);
   });
 });

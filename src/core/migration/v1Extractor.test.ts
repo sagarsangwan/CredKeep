@@ -9,11 +9,31 @@ jest.mock('../sync/syncService', () => ({
 }));
 
 const mockMeta: Record<string, string> = {};
+const mockOutbox = new Map<string, string>();
+
+jest.mock('../sync/syncService', () => ({
+  SyncService: {
+    pushPending: jest.fn(async () => {
+      let count = 0;
+      for (const [id, st] of mockOutbox.entries()) {
+        if (st === 'PENDING') {
+          mockOutbox.set(id, 'SYNCED');
+          count++;
+        }
+      }
+      return { pushed: count, failed: 0 };
+    }),
+  },
+}));
 
 jest.mock('../sync/outbox', () => {
   return {
     OutboxManager: {
-      enqueue: jest.fn(async () => {}),
+      enqueue: jest.fn(async (_db, params) => {
+        if (!mockOutbox.has(params.operationId)) {
+          mockOutbox.set(params.operationId, 'PENDING');
+        }
+      }),
       setMeta: jest.fn(async (_db, k, v) => {
         mockMeta[k] = v;
       }),
@@ -29,6 +49,7 @@ describe('V1DataExtractor', () => {
     for (const key of Object.keys(mockMeta)) {
       delete mockMeta[key];
     }
+    mockOutbox.clear();
     jest.clearAllMocks();
     mockDb = {
       getAllAsync: jest.fn(async (sql: string) => {
@@ -67,6 +88,15 @@ describe('V1DataExtractor', () => {
               created_at: '2026-02-01',
             },
           ];
+        }
+        if (sql.includes('FROM sync_outbox')) {
+          const synced: any[] = [];
+          for (const [id, st] of mockOutbox.entries()) {
+            if (st === 'SYNCED') {
+              synced.push({ operation_id: id, status: 'SYNCED' });
+            }
+          }
+          return synced;
         }
         return [];
       }),
@@ -129,6 +159,32 @@ describe('V1DataExtractor', () => {
 
     expect(operations[2].type).toBe('record_collection');
     expect(operations[2].payload.amount_paise).toBe(260000);
+
+    // Verify deterministic operation IDs across multiple runs
+    const operationsSecondRun = V1DataExtractor.buildPushPayloads(extracted);
+    expect(operationsSecondRun[0].operation_id).toBe(operations[0].operation_id);
+    expect(operationsSecondRun[1].operation_id).toBe(operations[1].operation_id);
+    expect(operationsSecondRun[2].operation_id).toBe(operations[2].operation_id);
+  });
+
+  it('resumes partial migration when previous attempt synced some operations', async () => {
+    const extracted = await V1DataExtractor.extract(mockDb);
+    const operations = V1DataExtractor.buildPushPayloads(extracted);
+
+    // Simulate first attempt: borrower (op 0) and loan (op 1) synced, transaction (op 2) remains PENDING
+    mockOutbox.set(operations[0].operation_id, 'SYNCED');
+    mockOutbox.set(operations[1].operation_id, 'SYNCED');
+    mockOutbox.set(operations[2].operation_id, 'PENDING');
+
+    // On resume attempt, pushPending only pushes the remaining 1 pending operation
+    (SyncService.pushPending as jest.Mock).mockImplementationOnce(async () => {
+      mockOutbox.set(operations[2].operation_id, 'SYNCED');
+      return { pushed: 1, failed: 0 };
+    });
+
+    const summary = await V1DataExtractor.migrateToCloud(mockDb);
+    expect(summary.success).toBe(true);
+    expect(await V1DataExtractor.isMigrationCompleted(mockDb)).toBe(true);
   });
 
   it('executes full migration to cloud and marks metadata', async () => {

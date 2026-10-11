@@ -2542,6 +2542,153 @@ def test_sync_push_waive_penalty_retry_changed_amount_rejected(api_client, lende
     assert res_identical.data['results'][0]['status'] == 'ACCEPTED'
 
 
+@pytest.mark.django_db
+def test_sync_push_modify_schedule_retry_changed_attributes_rejected(api_client, lender_setup):
+    """
+    Verifies that modify_schedule retries with changed attributes (loan_id, installment_number,
+    revised_effective_due_date, accrued_penalty_action, waived_penalty_paise) are rejected
+    with idempotency conflicts rather than returning ACCEPTED.
+    """
+    user, test_tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+    borrower = Borrower.objects.create(tenant=test_tenant, name="Mod Sched User", phone="9988776655")
+    loan = LoanAccount.objects.create(
+        tenant=test_tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=3,
+        start_date="2026-01-01",
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist1 = Kist.objects.create(
+        tenant=test_tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date="2026-02-01",
+        effective_due_date="2026-02-01",
+        principal_component_paise=33333,
+        markup_component_paise=3333,
+        total_due_paise=36666,
+        status='PENDING'
+    )
+    kist2 = Kist.objects.create(
+        tenant=test_tenant,
+        loan=loan,
+        installment_number=2,
+        original_due_date="2026-03-01",
+        effective_due_date="2026-03-01",
+        principal_component_paise=33333,
+        markup_component_paise=3333,
+        total_due_paise=36666,
+        status='PENDING'
+    )
+
+    mod_op_id = str(uuid.uuid4())
+
+    # 1. Initial valid schedule modification
+    res1 = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-15',
+                    'accrued_penalty_action': 'NONE',
+                    'waived_penalty_paise': 0
+                }
+            }
+        ]
+    }, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Identical retry returns ACCEPTED
+    res_identical = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-15',
+                    'accrued_penalty_action': 'NONE',
+                    'waived_penalty_paise': 0
+                }
+            }
+        ]
+    }, format='json')
+    assert res_identical.status_code == 200
+    assert res_identical.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 3. Changed revised_effective_due_date -> REJECTED
+    res_changed_date = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-28',
+                    'accrued_penalty_action': 'NONE',
+                    'waived_penalty_paise': 0
+                }
+            }
+        ]
+    }, format='json')
+    assert res_changed_date.status_code == 200
+    assert res_changed_date.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_changed_date.data['results'][0]['error']
+
+    # 4. Changed kist/installment_number -> REJECTED
+    res_changed_kist = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 2,
+                    'revised_effective_due_date': '2026-02-15',
+                    'accrued_penalty_action': 'NONE',
+                    'waived_penalty_paise': 0
+                }
+            }
+        ]
+    }, format='json')
+    assert res_changed_kist.status_code == 200
+    assert res_changed_kist.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_changed_kist.data['results'][0]['error']
+
+    # 5. Changed accrued_penalty_action -> REJECTED
+    res_changed_action = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-15',
+                    'accrued_penalty_action': 'WAIVE',
+                    'waived_penalty_paise': 0
+                }
+            }
+        ]
+    }, format='json')
+    assert res_changed_action.status_code == 200
+    assert res_changed_action.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_changed_action.data['results'][0]['error']
+
+
+
 
 
 

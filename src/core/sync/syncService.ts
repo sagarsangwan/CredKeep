@@ -415,7 +415,7 @@ export class SyncService {
     );
 
     const pendingOutbox = await tx.getAllAsync<{ operation_id: string; payload: string }>(
-      `SELECT operation_id, payload FROM sync_outbox WHERE status = 'PENDING' AND operation_type = 'record_collection' ORDER BY created_at ASC`
+      `SELECT operation_id, payload FROM sync_outbox WHERE status IN ('PENDING', 'NEEDS_REVIEW') AND operation_type = 'record_collection' ORDER BY created_at ASC`
     );
 
     const relevant = pendingOutbox.filter((item) => {
@@ -429,7 +429,7 @@ export class SyncService {
 
     const loan = await tx.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
 
-    // Calculate actual outstanding penalties dynamically (excluding pending and rejected collections and all their adjustments)
+    // Calculate actual outstanding penalties dynamically (excluding pending, needs-review, and rejected collections and all their adjustments)
     const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
       `SELECT
          COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' THEN amount_paise ELSE 0 END), 0) as assessed,
@@ -437,7 +437,7 @@ export class SyncService {
            AND NOT EXISTS (
              SELECT 1 FROM sync_outbox so
              WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
-               AND so.status IN ('PENDING', 'REJECTED')
+               AND so.status IN ('PENDING', 'NEEDS_REVIEW', 'REJECTED')
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
@@ -465,7 +465,7 @@ export class SyncService {
            AND NOT EXISTS (
              SELECT 1 FROM sync_outbox so
              WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
-               AND so.status IN ('PENDING', 'REJECTED')
+               AND so.status IN ('PENDING', 'NEEDS_REVIEW', 'REJECTED')
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id

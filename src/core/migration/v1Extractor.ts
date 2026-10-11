@@ -1,5 +1,5 @@
 import { SQLiteDatabase } from 'expo-sqlite';
-import * as crypto from 'expo-crypto';
+import CryptoJS from 'crypto-js';
 import { OutboxManager } from '../sync/outbox';
 import { SyncService } from '../sync/syncService';
 
@@ -50,6 +50,15 @@ export interface MigrationSummary {
   error?: string;
 }
 
+function isUuid(str: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+export function deterministicUuid(seed: string): string {
+  const hash = CryptoJS.MD5(seed).toString();
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+}
+
 export class V1DataExtractor {
   /**
    * Extracts all existing V1 portfolio records from local SQLite
@@ -71,7 +80,7 @@ export class V1DataExtractor {
   }
 
   /**
-   * Structures extracted records into ordered push operations
+   * Structures extracted records into ordered push operations with deterministic operation IDs
    */
   static buildPushPayloads(extracted: V1ExtractionResult): {
     operation_id: string;
@@ -84,10 +93,10 @@ export class V1DataExtractor {
       payload: Record<string, any>;
     }[] = [];
 
-    // 1. Borrower creations
+    // 1. Borrower creations (deterministic operation ID derived from borrower ID)
     for (const b of extracted.borrowers) {
       operations.push({
-        operation_id: crypto.randomUUID(),
+        operation_id: deterministicUuid(`mig-borrower-${b.id}`),
         type: 'create_borrower',
         payload: {
           id: b.id,
@@ -97,10 +106,10 @@ export class V1DataExtractor {
       });
     }
 
-    // 2. Loan creations
+    // 2. Loan creations (deterministic operation ID derived from loan ID)
     for (const l of extracted.loans) {
       operations.push({
-        operation_id: crypto.randomUUID(),
+        operation_id: deterministicUuid(`mig-loan-${l.id}`),
         type: 'create_loan',
         payload: {
           id: l.id,
@@ -115,10 +124,14 @@ export class V1DataExtractor {
       });
     }
 
-    // 3. Historical collections
+    // 3. Historical collections (preserve existing operation ID if UUID, otherwise deterministic hash)
     for (const tx of extracted.transactions) {
+      const opId = tx.operation_id && isUuid(tx.operation_id)
+        ? tx.operation_id
+        : deterministicUuid(`mig-tx-${tx.id || tx.operation_id || `${tx.loan_id}-${tx.effective_date}-${tx.amount_paise}`}`);
+
       operations.push({
-        operation_id: tx.operation_id || crypto.randomUUID(),
+        operation_id: opId,
         type: 'record_collection',
         payload: {
           loan_id: tx.loan_id,
@@ -180,9 +193,23 @@ export class V1DataExtractor {
       // Execute push
       const pushResult = await SyncService.pushPending(db);
 
-      const isSuccessful =
-        pushResult.failed === 0 &&
-        (operations.length === 0 || pushResult.pushed === operations.length);
+      // Determine migration completion from outbox status of all extracted operations
+      const opIds = operations.map((op) => op.operation_id);
+      let allSynced = false;
+      if (opIds.length === 0) {
+        allSynced = true;
+      } else if (typeof (db as any).getAllAsync === 'function') {
+        const placeholders = opIds.map(() => '?').join(',');
+        const syncedRecords = await (db as any).getAllAsync(
+          `SELECT operation_id FROM sync_outbox WHERE operation_id IN (${placeholders}) AND status = 'SYNCED'`,
+          opIds
+        );
+        allSynced = (syncedRecords || []).length === opIds.length;
+      } else {
+        allSynced = pushResult.failed === 0 && pushResult.pushed === opIds.length;
+      }
+
+      const isSuccessful = pushResult.failed === 0 && allSynced;
 
       // Record migration status ONLY when all required operations are successfully accepted
       if (isSuccessful) {
