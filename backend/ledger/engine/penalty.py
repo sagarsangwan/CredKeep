@@ -49,7 +49,8 @@ def calculate_new_penalties(
     earliest_unpaid_due_date: Optional[str] = None
 
     for kist in state.kists:
-        if not kist.is_fully_paid:
+        unpaid = kist.amount_due - kist.amount_paid
+        if not kist.is_fully_paid and unpaid > 0:
             if earliest_unpaid_due_date is None or kist.due_date < earliest_unpaid_due_date:
                 earliest_unpaid_due_date = kist.due_date
 

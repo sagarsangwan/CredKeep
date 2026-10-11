@@ -59,4 +59,19 @@ describe('Penalty Engine', () => {
     expect(result.newPenaltyAmount).toBe(0);
     expect(result.newAssessedDates.length).toBe(0);
   });
+
+  it('does not assess penalty on zero-value installments even if marked not fully paid', () => {
+    const state: LoanPenaltyState = {
+      loanId: '1',
+      rule: { dailyRatePaise: toPaise(100) },
+      kists: [
+        { kistNumber: 1, dueDate: '2026-10-01', amountDue: toPaise(0), amountPaid: toPaise(0), isFullyPaid: false }
+      ],
+      assessedDates: new Set()
+    };
+
+    const result = calculateNewPenalties(state, '2026-10-06');
+    expect(result.newPenaltyAmount).toBe(0);
+    expect(result.newAssessedDates.length).toBe(0);
+  });
 });

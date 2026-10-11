@@ -61,6 +61,7 @@ class LoanAccount(models.Model):
             CheckConstraint(condition=Q(principal_paise__gt=0), name='check_loan_positive_principal'),
             CheckConstraint(condition=Q(due_day__gte=1) & Q(due_day__lte=31), name='check_loan_valid_due_day'),
             CheckConstraint(condition=Q(term_months__gt=0), name='check_loan_positive_term'),
+            CheckConstraint(condition=Q(markup_factor__gte=0), name='check_loan_markup_factor_non_negative'),
         ]
 
     def __str__(self):
@@ -106,7 +107,20 @@ class Kist(models.Model):
         return f"Kist #{self.installment_number} for Loan {self.loan_id} ({self.status})"
 
 
+class TransactionQuerySet(models.QuerySet):
+    def delete(self):
+        raise ValidationError("Transaction records are append-only: bulk deletions are prohibited.")
+
+    def update(self, **kwargs):
+        raise ValidationError("Transaction records are append-only: bulk updates are prohibited.")
+
+    def bulk_update(self, objs, fields, **kwargs):
+        raise ValidationError("Transaction records are append-only: bulk updates are prohibited.")
+
+
 class Transaction(models.Model):
+    objects = TransactionQuerySet.as_manager()
+
     TRANSACTION_TYPES = [
         ('COLLECTION', 'Collection'),
         ('PENALTY_ASSESSMENT', 'Penalty Assessment'),
@@ -149,6 +163,7 @@ class Transaction(models.Model):
         ordering = ['tenant', 'sequence_number']
         constraints = [
             UniqueConstraint(fields=['tenant', 'operation_id'], name='unique_tenant_transaction_operation'),
+            UniqueConstraint(fields=['tenant', 'sequence_number'], name='unique_tenant_transaction_sequence'),
             CheckConstraint(condition=Q(amount_paise__gte=0), name='check_transaction_amount_non_negative'),
             CheckConstraint(
                 condition=Q(
@@ -158,6 +173,15 @@ class Transaction(models.Model):
                     unallocated_surplus_paise__gte=0,
                 ),
                 name='check_transaction_allocations_non_negative'
+            ),
+            CheckConstraint(
+                condition=~Q(transaction_type='COLLECTION') | Q(
+                    amount_paise=models.F('allocated_principal_paise') +
+                                 models.F('allocated_markup_paise') +
+                                 models.F('allocated_penalty_paise') +
+                                 models.F('unallocated_surplus_paise')
+                ),
+                name='check_transaction_collection_conservation'
             ),
         ]
 
@@ -186,14 +210,20 @@ class Transaction(models.Model):
         if self.sequence_number is None:
             # Atomic per-tenant sequence assignment
             with transaction.atomic():
-                last = (
-                    Transaction.objects
-                    .select_for_update()
-                    .filter(tenant=self.tenant)
-                    .order_by('-sequence_number')
-                    .first()
-                )
-                self.sequence_number = (last.sequence_number + 1) if (last and last.sequence_number) else 1
+                from tenants.models import Tenant
+                tenant = Tenant.objects.select_for_update().get(id=self.tenant_id)
+                if tenant.transaction_sequence_counter == 0:
+                    last = (
+                        Transaction.objects
+                        .filter(tenant=tenant)
+                        .order_by('-sequence_number')
+                        .first()
+                    )
+                    if last and last.sequence_number:
+                        tenant.transaction_sequence_counter = last.sequence_number
+                tenant.transaction_sequence_counter += 1
+                tenant.save(update_fields=['transaction_sequence_counter'])
+                self.sequence_number = tenant.transaction_sequence_counter
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)
@@ -266,6 +296,8 @@ class SyncLog(models.Model):
         related_name='sync_logs'
     )
     operation_id = models.UUIDField(db_index=True)
+    operation_type = models.CharField(max_length=64, blank=True, default='')
+    request_payload = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES)
     error_message = models.TextField(blank=True, default='')
     server_timestamp = models.DateTimeField(auto_now_add=True)
@@ -301,18 +333,18 @@ class SyncOutbox(models.Model):
 
     class Meta:
         ordering = ['sequence_number']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'sequence_number'], name='unique_tenant_outbox_sequence')
+        ]
 
     def save(self, *args, **kwargs):
         if self.sequence_number is None:
+            from tenants.models import Tenant
             with transaction.atomic():
-                last = (
-                    SyncOutbox.objects
-                    .select_for_update()
-                    .filter(tenant=self.tenant)
-                    .order_by('-sequence_number')
-                    .first()
-                )
-                self.sequence_number = (last.sequence_number + 1) if (last and last.sequence_number) else 1
+                tenant_row = Tenant.objects.select_for_update().get(id=self.tenant_id)
+                tenant_row.outbox_sequence_counter += 1
+                tenant_row.save(update_fields=['outbox_sequence_counter'])
+                self.sequence_number = tenant_row.outbox_sequence_counter
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)

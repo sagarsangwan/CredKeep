@@ -38,6 +38,10 @@ export function calculateNextDueDate(startDateStr: string, monthsToAdd: number, 
 
 export function generateSchedule(options: ScheduleOptions): ScheduledKist[] {
   const { principal, markupFactor, termMonths, startDate, dueDay, productType } = options;
+
+  if (!Number.isFinite(markupFactor) || markupFactor < 0) {
+    throw new Error('markupFactor must be a finite non-negative number');
+  }
   
   const totalMarkup = multiplyPaise(principal, markupFactor);
   const totalRepayment = addPaise(principal, totalMarkup);

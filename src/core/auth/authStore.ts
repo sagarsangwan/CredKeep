@@ -23,6 +23,8 @@ export interface AuthSession {
   tenant: TenantInfo | null;
 }
 
+export type AuthChangeListener = (tenantId: string | null) => void;
+
 export class AuthStore {
   static async getToken(): Promise<string | null> {
     try {
@@ -70,6 +72,25 @@ export class AuthStore {
     }
   }
 
+  private static listeners = new Set<AuthChangeListener>();
+
+  static onAuthChange(listener: AuthChangeListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private static notifyListeners(tenantId: string | null): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(tenantId);
+      } catch {
+        // Ignore listener exceptions
+      }
+    }
+  }
+
   static async setAuth(session: AuthSession): Promise<void> {
     await SecureStore.setItemAsync(KEY_AUTH_TOKEN, session.token);
     await SecureStore.setItemAsync(KEY_USER_INFO, JSON.stringify(session.user));
@@ -77,6 +98,7 @@ export class AuthStore {
       await SecureStore.setItemAsync(KEY_TENANT_ID, session.tenant.id);
       await SecureStore.setItemAsync(KEY_TENANT_NAME, session.tenant.name);
     }
+    this.notifyListeners(session.tenant ? session.tenant.id : null);
   }
 
   static async clearAuth(): Promise<void> {
@@ -88,6 +110,7 @@ export class AuthStore {
     } catch {
       // Ignore clear errors on missing keys
     }
+    this.notifyListeners(null);
   }
 
   static async isAuthenticated(): Promise<boolean> {

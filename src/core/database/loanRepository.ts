@@ -1,6 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { ScheduleOptions, generateSchedule, calculateNextDueDate } from '../domain/schedule';
+import { multiplyPaise, Paise } from '../domain/money';
 import { OutboxManager } from '../sync/outbox';
 
 export type Loan = {
@@ -30,13 +31,14 @@ export class LoanRepository {
     const schedule = generateSchedule(options);
 
     await this.db.withExclusiveTransactionAsync(async (tx) => {
-      await this.db.runAsync(
+      const txHandle = tx || this.db;
+      await txHandle.runAsync(
         `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [loanId, borrowerId, options.principal, options.markupFactor, options.termMonths, options.startDate, options.dueDay, options.productType, created_at]
       );
       
-      const statement = await this.db.prepareAsync(`
+      const statement = await txHandle.prepareAsync(`
         INSERT INTO repayment_schedules 
         (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -59,24 +61,20 @@ export class LoanRepository {
         await statement.finalizeAsync();
       }
 
-      try {
-        await OutboxManager.enqueue(this.db, {
-          operationId: clientOpId,
-          operationType: 'create_loan',
-          payload: {
-            id: loanId,
-            borrower_id: borrowerId,
-            principal_paise: options.principal,
-            markup_factor: options.markupFactor,
-            term_months: options.termMonths,
-            start_date: options.startDate,
-            due_day: options.dueDay,
-            product_type: options.productType,
-          },
-        });
-      } catch {
-        // Non-blocking
-      }
+      await OutboxManager.enqueue(txHandle, {
+        operationId: clientOpId,
+        operationType: 'create_loan',
+        payload: {
+          id: loanId,
+          borrower_id: borrowerId,
+          principal_paise: options.principal,
+          markup_factor: options.markupFactor,
+          term_months: options.termMonths,
+          start_date: options.startDate,
+          due_day: options.dueDay,
+          product_type: options.productType,
+        },
+      });
     });
 
     return (await this.getById(loanId))!;
@@ -119,7 +117,7 @@ export class LoanRepository {
     
     // If the last kist's due date is in the past, generate new ones until we pass currentDate
     if (lastKist.effective_due_date < currentDate) {
-      const totalMarkup = loan.principal_paise * loan.markup_factor;
+      const totalMarkup = multiplyPaise(loan.principal_paise as Paise, loan.markup_factor);
       const markupDuePerMonth = Math.floor(totalMarkup / loan.term_months);
       
       let nextInstalmentNumber = lastKist.installment_number + 1;
@@ -135,8 +133,9 @@ export class LoanRepository {
       
       try {
         while (nextDueDate <= currentDate || nextInstalmentNumber === lastKist.installment_number + 1 /* always add at least one if we entered */) {
+          const kistId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('kist-' + Date.now() + '-' + Math.random().toString(36).substring(2));
           await statement.executeAsync([
-            crypto.randomUUID(),
+            kistId,
             loanId,
             nextInstalmentNumber,
             nextDueDate,

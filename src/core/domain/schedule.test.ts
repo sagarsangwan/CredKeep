@@ -103,5 +103,18 @@ describe('Schedule Generation', () => {
       
       expect(schedule[0].dueDate).toBe('2024-02-29');
     });
+
+    it('cross-engine parity: principal 100,050 paise and markup_factor 0.29 matches backend exact rounding', () => {
+      const schedule = generateSchedule({
+        principal: 100050 as any,
+        markupFactor: 0.29,
+        termMonths: 3,
+        startDate: '2026-01-01',
+        dueDay: 1,
+        productType: 'instalment'
+      });
+      const totalMarkup = schedule.reduce((sum, k) => sum + k.markupDue, 0);
+      expect(totalMarkup).toBe(29015);
+    });
   });
 });

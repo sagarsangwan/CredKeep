@@ -1,6 +1,6 @@
 import calendar
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Union
 
 @dataclass
@@ -57,10 +57,16 @@ def generate_schedule(
     - Instalment loans: both principal and markup divided across term_months.
     - Bullet loans: only markup due in monthly kists (principal due at settlement).
     """
+    if markup_factor is None or markup_factor < 0:
+        raise ValueError("markup_factor must be non-negative")
+    if isinstance(markup_factor, Decimal) and (markup_factor.is_nan() or markup_factor.is_infinite()):
+        raise ValueError("markup_factor must be a finite number")
+
     if isinstance(markup_factor, float):
-        total_markup = round(principal_paise * markup_factor)
+        markup_dec = Decimal(str(markup_factor))
     else:
-        total_markup = int(round(Decimal(principal_paise) * markup_factor))
+        markup_dec = Decimal(markup_factor)
+    total_markup = int((Decimal(principal_paise) * markup_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
 
     schedule: List[ScheduledKistData] = []
 
@@ -87,5 +93,7 @@ def generate_schedule(
                 principal_due=0,
                 markup_due=markup_instalments[i]
             ))
+    else:
+        raise ValueError(f"Unsupported product_type '{product_type}'. Must be 'instalment' or 'bullet'.")
 
     return schedule

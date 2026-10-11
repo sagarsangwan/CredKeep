@@ -3,7 +3,7 @@ import { SQLiteDatabase } from 'expo-sqlite';
 export async function runMigrations(db: SQLiteDatabase) {
   await db.withExclusiveTransactionAsync(async (tx) => {
     // 1. Borrowers table
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS borrowers (
         id TEXT PRIMARY KEY NOT NULL,
         name TEXT NOT NULL,
@@ -13,7 +13,7 @@ export async function runMigrations(db: SQLiteDatabase) {
     `);
 
     // 2. Loans table
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS loans (
         id TEXT PRIMARY KEY NOT NULL,
         borrower_id TEXT NOT NULL,
@@ -30,7 +30,7 @@ export async function runMigrations(db: SQLiteDatabase) {
     `);
 
     // 3. Repayment Schedules
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS repayment_schedules (
         id TEXT PRIMARY KEY NOT NULL,
         loan_id TEXT NOT NULL,
@@ -43,12 +43,29 @@ export async function runMigrations(db: SQLiteDatabase) {
         principal_paid_paise INTEGER NOT NULL DEFAULT 0,
         markup_paid_paise INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'PENDING',
+        server_principal_paid_paise INTEGER NOT NULL DEFAULT 0,
+        server_markup_paid_paise INTEGER NOT NULL DEFAULT 0,
+        server_status TEXT NOT NULL DEFAULT 'PENDING',
+        UNIQUE (loan_id, installment_number),
         FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE RESTRICT
       );
     `);
 
+    const columns: any[] = await (tx as any).getAllAsync(`PRAGMA table_info(repayment_schedules);`);
+    const colNames = new Set((columns || []).map((c: any) => c.name));
+    if (!colNames.has('server_principal_paid_paise')) {
+      await tx.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_principal_paid_paise INTEGER NOT NULL DEFAULT 0;`);
+    }
+    if (!colNames.has('server_markup_paid_paise')) {
+      await tx.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_markup_paid_paise INTEGER NOT NULL DEFAULT 0;`);
+    }
+    if (!colNames.has('server_status')) {
+      await tx.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_status TEXT NOT NULL DEFAULT 'PENDING';`);
+    }
+    await tx.execAsync(`CREATE UNIQUE INDEX IF NOT EXISTS idx_repayment_schedules_loan_installment ON repayment_schedules (loan_id, installment_number);`);
+
     // 4. Transactions table (Fixing the duplicate PK defect)
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS transactions (
         id TEXT UNIQUE NOT NULL,
         operation_id TEXT UNIQUE NOT NULL,
@@ -72,7 +89,7 @@ export async function runMigrations(db: SQLiteDatabase) {
     `);
 
     // Prevent transactions update/delete
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TRIGGER IF NOT EXISTS prevent_transactions_update
       BEFORE UPDATE ON transactions
       BEGIN
@@ -80,7 +97,7 @@ export async function runMigrations(db: SQLiteDatabase) {
       END;
     `);
 
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TRIGGER IF NOT EXISTS prevent_transactions_delete
       BEFORE DELETE ON transactions
       BEGIN
@@ -89,7 +106,7 @@ export async function runMigrations(db: SQLiteDatabase) {
     `);
 
     // 5. Schedule Modifications
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS schedule_modifications (
         id TEXT PRIMARY KEY NOT NULL,
         loan_id TEXT NOT NULL,
@@ -107,7 +124,7 @@ export async function runMigrations(db: SQLiteDatabase) {
     `);
 
     // 6. Sync Outbox (Offline-first client mutations queue)
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS sync_outbox (
         id TEXT PRIMARY KEY NOT NULL,
         operation_id TEXT UNIQUE NOT NULL,
@@ -120,7 +137,7 @@ export async function runMigrations(db: SQLiteDatabase) {
     `);
 
     // 7. Sync Meta (Sync state, cursors, timestamps)
-    await db.execAsync(`
+    await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS sync_meta (
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL

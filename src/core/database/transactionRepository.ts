@@ -19,9 +19,29 @@ export class TransactionRepository {
 
       await this.db.withExclusiveTransactionAsync(async (tx) => {
         // Idempotency check
-        const existing = await tx.getFirstAsync(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
+        const outboxRec = await tx.getFirstAsync<any>(
+          `SELECT status, error_message FROM sync_outbox WHERE operation_id = ?`,
+          [operationId]
+        );
+        if (outboxRec && outboxRec.status === 'REJECTED') {
+          throw new Error(
+            `Payment operation ${operationId} was rejected: ${outboxRec.error_message || 'Terminal rejection'}`
+          );
+        }
+
+        const existing = await tx.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
         if (existing) {
-          returnResult = existing;
+          if (
+            existing.loan_id !== loanId ||
+            existing.amount_paise !== paymentAmount ||
+            existing.effective_date !== effectiveDate ||
+            existing.transaction_type !== 'COLLECTION' ||
+            existing.payment_method !== 'CASH' ||
+            existing.is_cash !== 1
+          ) {
+            throw new Error(`Idempotency conflict: operation_id ${operationId} already exists with different payment attributes.`);
+          }
+          returnResult = { success: true, transactionId: existing.id, transaction: existing };
           return;
         }
 
@@ -54,23 +74,43 @@ export class TransactionRepository {
         await this.assessPenalties(loanId, effectiveDate, tx);
 
         // Fetch outstanding penalty
-        // Outstanding penalty = (Total PENALTY_ASSESSMENT amounts) - (Total allocated_penalty_paise from all collections)
+        // Outstanding penalty = (Total PENALTY_ASSESSMENT amounts) - (Total allocated_penalty_paise from collections and reversals) - (forgiven_penalty_paise from waivers)
         const penaltyAssessments = await tx.getFirstAsync<any>(
           `SELECT SUM(amount_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT'`,
           [loanId]
         );
         const penaltyPaid = await tx.getFirstAsync<any>(
-          `SELECT SUM(allocated_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+          `SELECT SUM(allocated_penalty_paise) as total FROM transactions
+           WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+             AND NOT EXISTS (
+               SELECT 1 FROM sync_outbox so
+               WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+                 AND so.status = 'REJECTED'
+                 AND (
+                   transactions.operation_id = so.operation_id
+                   OR transactions.operation_id = 'reversal-' || so.operation_id
+                   OR transactions.operation_id = 'reversal::' || so.operation_id
+
+                   OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+
+                   OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                 )
+             )`,
+          [loanId]
+        );
+        const penaltyForgiven = await tx.getFirstAsync<any>(
+          `SELECT SUM(forgiven_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type IN ('WAIVER', 'REVERSAL')`,
           [loanId]
         );
         
         const totalPenaltyAssessed = (penaltyAssessments?.total || 0) as number;
         const totalPenaltyPaid = (penaltyPaid?.total || 0) as number;
-        const outstandingPenalty = Math.max(0, totalPenaltyAssessed - totalPenaltyPaid) as Paise;
+        const totalPenaltyForgiven = (penaltyForgiven?.total || 0) as number;
+        const outstandingPenalty = Math.max(0, totalPenaltyAssessed - totalPenaltyPaid - totalPenaltyForgiven) as Paise;
   
         const result = allocatePayment({ paymentAmount, kists, outstandingPenalty });
         
-        const transactionId = crypto.randomUUID();
+        const transactionId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('tx-' + Date.now() + '-' + Math.random().toString(36).substring(2));
         const createdAt = new Date().toISOString();
         
         let allocatedPrincipal = 0;
@@ -86,7 +126,22 @@ export class TransactionRepository {
         let pastPrincipalPaid = 0;
         if (loan.product_type === 'bullet') {
           const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
-            `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'COLLECTION'`,
+            `SELECT SUM(allocated_principal_paise) as total FROM transactions
+             WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_outbox so
+                 WHERE json_extract(so.payload, '$.loan_id') = transactions.loan_id
+                   AND so.status = 'REJECTED'
+                   AND (
+                     transactions.operation_id = so.operation_id
+                     OR transactions.operation_id = 'reversal-' || so.operation_id
+                     OR transactions.operation_id = 'reversal::' || so.operation_id
+
+                     OR instr(transactions.operation_id, 'realloc::' || so.operation_id || '::') = 1
+
+                     OR instr(transactions.operation_id, 'reconcile::' || so.operation_id || '::') = 1
+                   )
+               )`,
             [loanId]
           );
           pastPrincipalPaid = pastPrincipalPaidRes?.total || 0;
@@ -140,31 +195,30 @@ export class TransactionRepository {
           }
         }
         
-        if (loan.product_type === 'instalment') {
-          if (allKistsPaid && result.remainingPenalty <= 0) {
-             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
-          }
-        } else if (loan.product_type === 'bullet') {
-          if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
-             await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+        const totalPrincipalPaid = result.updatedKists.reduce((acc, k) => acc + k.principalPaid, 0);
+        if (loan.status !== 'WRITTEN_OFF') {
+          if (loan.product_type === 'instalment') {
+            if (totalPrincipalPaid >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+               await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+            }
+          } else if (loan.product_type === 'bullet') {
+            if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
+               await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
+            }
           }
         }
 
-        try {
-          await OutboxManager.enqueue(this.db, {
-            operationId,
-            operationType: 'record_collection',
-            payload: {
-              loan_id: loanId,
-              amount_paise: paymentAmount,
-              effective_date: effectiveDate,
-              payment_method: 'CASH',
-              is_cash: true,
-            },
-          });
-        } catch {
-          // Non-blocking
-        }
+        await OutboxManager.enqueue(tx || this.db, {
+          operationId,
+          operationType: 'record_collection',
+          payload: {
+            loan_id: loanId,
+            amount_paise: paymentAmount,
+            effective_date: effectiveDate,
+            payment_method: 'CASH',
+            is_cash: true,
+          },
+        });
         
         returnResult = { success: true, transactionId, result };
       });
@@ -199,7 +253,7 @@ export class TransactionRepository {
         dueDate: k.effective_due_date,
         amountDue: k.total_due_paise,
         amountPaid: k.principal_paid_paise + k.markup_paid_paise,
-        isFullyPaid: k.status === 'PAID'
+        isFullyPaid: k.status === 'PAID' || (k.total_due_paise <= (k.principal_paid_paise + k.markup_paid_paise))
       })),
       assessedDates
     };
@@ -235,7 +289,7 @@ export class TransactionRepository {
         dueDate: k.effective_due_date,
         amountDue: k.total_due_paise,
         amountPaid: k.principal_paid_paise + k.markup_paid_paise,
-        isFullyPaid: k.status === 'PAID'
+        isFullyPaid: k.status === 'PAID' || (k.total_due_paise <= (k.principal_paid_paise + k.markup_paid_paise))
       })),
       assessedDates
     };
@@ -244,11 +298,14 @@ export class TransactionRepository {
 
     if (newPenaltyAmount > 0) {
       for (const date of newAssessedDates) {
-        const transactionId = crypto.randomUUID();
+        const transactionId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('penalty-' + Date.now() + '-' + Math.random().toString(36).substring(2));
         const operationId = `penalty-${loanId}-${date}`;
         
-        // Check if it already exists to be safe
-        const existing = await tx.getFirstAsync(`SELECT id FROM transactions WHERE operation_id = ?`, [operationId]);
+        // Check if it already exists to be safe (by operation_id or date)
+        const existing = await tx.getFirstAsync(
+          `SELECT id FROM transactions WHERE operation_id = ? OR (loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT' AND effective_date = ?)`,
+          [operationId, loanId, date]
+        );
         if (!existing) {
           await tx.runAsync(`
             INSERT INTO transactions (
@@ -297,7 +354,7 @@ export class TransactionRepository {
         SUM(t.forgiven_penalty_paise) as penalty_waived
       FROM transactions t
       JOIN loans l ON t.loan_id = l.id
-      ${whereStr} AND t.transaction_type = 'COLLECTION'
+      ${whereStr} AND t.transaction_type IN ('COLLECTION', 'REVERSAL')
     `, params);
 
     // Calculate outstanding (what is due but not paid)
@@ -363,7 +420,7 @@ export class TransactionRepository {
         const paidQuery = await this.db.getFirstAsync<any>(`
           SELECT SUM(allocated_principal_paise) as paid_principal, SUM(forgiven_principal_paise) as waived_principal
           FROM transactions 
-          WHERE loan_id = ?
+          WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
         `, [loan.id]);
         const paid = paidQuery?.paid_principal || 0;
         const waived = paidQuery?.waived_principal || 0;

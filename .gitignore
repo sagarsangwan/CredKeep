@@ -98,4 +98,5 @@ backend/.venv/
 .pytest_cache/
 .coverage
 htmlcov/
+.jest-cache/
 

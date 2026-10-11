@@ -12,7 +12,7 @@ describe('LoanRepository Integration', () => {
     statements = [];
     mockDb = {
       withExclusiveTransactionAsync: jest.fn(async (cb) => {
-        await cb();
+        await cb(mockDb);
       }),
       runAsync: jest.fn(async (query, params) => {
         queries.push({ query, params });

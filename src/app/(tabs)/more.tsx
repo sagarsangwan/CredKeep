@@ -20,6 +20,7 @@ export default function MoreScreen() {
   const [tenantName, setTenantName] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [needsReviewCount, setNeedsReviewCount] = useState(0);
 
   const loadAuthAndSyncState = useCallback(async () => {
     const userInfo = await AuthStore.getUserInfo();
@@ -33,6 +34,8 @@ export default function MoreScreen() {
         const d = new Date(syncMeta);
         setLastSyncTime(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       }
+      const reviewItems = await OutboxManager.getNeedsReview(db);
+      setNeedsReviewCount(reviewItems.length);
     }
   }, [db]);
 
@@ -40,6 +43,29 @@ export default function MoreScreen() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadAuthAndSyncState();
   }, [loadAuthAndSyncState]);
+
+  const promptResolveConflicts = (count: number) => {
+    if (!db) return;
+    Alert.alert(
+      'Conflicts Require Review',
+      `${count} operation(s) require review due to server conflicts (e.g. actions on settled loans). Would you like to discard them?`,
+      [
+        { text: 'Review Later', style: 'cancel' },
+        {
+          text: 'Discard Conflicts',
+          style: 'destructive',
+          onPress: async () => {
+            const items = await OutboxManager.getNeedsReview(db);
+            for (const item of items) {
+              await OutboxManager.resolveNeedsReview(db, item.operation_id, 'DISCARD');
+            }
+            Alert.alert('Resolved', 'Conflicting operations have been discarded.');
+            await loadAuthAndSyncState();
+          },
+        },
+      ]
+    );
+  };
 
   const handleSyncNow = async () => {
     if (!db) return;
@@ -66,6 +92,10 @@ export default function MoreScreen() {
           'Sync Complete',
           `Successfully pushed ${res.pushedCount} operations and pulled ${res.pulledCount} server updates.`
         );
+      } else if (res.needsReviewCount && res.needsReviewCount > 0) {
+        triggerRefresh();
+        await loadAuthAndSyncState();
+        promptResolveConflicts(res.needsReviewCount);
       } else {
         Alert.alert('Sync Incomplete', res.errors?.[0] || 'Sync completed with warnings.');
       }
@@ -146,6 +176,26 @@ export default function MoreScreen() {
             )}
           </View>
         </Card>
+
+        {/* Conflict Resolution Prompt */}
+        {needsReviewCount > 0 && (
+          <Card style={[styles.syncCard, { borderColor: theme.colors.error, borderWidth: 1 }]}>
+            <Typography variant="titleMd" color={theme.colors.error}>
+              ⚠️ Action Required: {needsReviewCount} Conflict(s)
+            </Typography>
+            <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 4 }}>
+              Offline updates clashed with changes from another device (e.g. actions on settled loans).
+            </Typography>
+            <View style={styles.syncActions}>
+              <Button
+                title="Resolve Conflicts"
+                variant="secondary"
+                onPress={() => promptResolveConflicts(needsReviewCount)}
+                style={styles.actionBtn}
+              />
+            </View>
+          </Card>
+        )}
 
         {/* Existing Navigation Menu */}
         <View style={styles.list}>

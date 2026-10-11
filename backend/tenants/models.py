@@ -14,6 +14,8 @@ class Tenant(models.Model):
         on_delete=models.CASCADE,
         related_name='owned_tenant'
     )
+    outbox_sequence_counter = models.BigIntegerField(default=0)
+    transaction_sequence_counter = models.BigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

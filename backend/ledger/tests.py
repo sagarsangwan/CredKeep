@@ -540,3 +540,19 @@ def test_ledger_service_record_collection_bullet_loan_settlement(tenant_fixture,
     assert tx.unallocated_surplus_paise == 0
     assert tx.allocated_principal_paise + tx.allocated_markup_paise + tx.allocated_penalty_paise + tx.unallocated_surplus_paise == tx.amount_paise
 
+
+def test_cross_engine_rounding_parity():
+    from ledger.engine.schedule import generate_schedule
+    # 100,050 paise principal with 0.29 markup factor: exact round-half-up markup is 29,015 paise on both mobile and backend
+    schedule = generate_schedule(
+        principal_paise=100050,
+        markup_factor=0.29,
+        term_months=3,
+        start_date_str='2026-01-01',
+        due_day=1,
+        product_type='instalment'
+    )
+    total_markup = sum(k.markup_due for k in schedule)
+    assert total_markup == 29015
+
+

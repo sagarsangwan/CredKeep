@@ -37,7 +37,24 @@ export function subtractPaise(a: Paise, b: Paise): Paise {
 }
 
 export function multiplyPaise(a: Paise, factor: number): Paise {
-  const result = Math.round(a * factor);
+  if (!Number.isFinite(factor) || factor < 0) {
+    throw new Error('Markup factor must be a finite non-negative number');
+  }
+  // To prevent IEEE 754 floating-point drift (e.g. 100050 * 0.29 producing 29014.499999999996 instead of 29014.5),
+  // parse the decimal string to perform exact decimal scaling with round-half-up arithmetic matching backend.
+  const str = factor.toString();
+  if (!str.includes('.')) {
+    const result = Math.round(a * factor);
+    ensureSafeInteger(result);
+    return result as Paise;
+  }
+  const [intPart, fracPart] = str.split('.');
+  const scale = 10n ** BigInt(fracPart.length);
+  const intFactor = BigInt(intPart) * scale + BigInt(fracPart);
+  const num = BigInt(a) * intFactor;
+  // Exact round-half-up: (2 * num + scale) / (2 * scale)
+  const rounded = (2n * num + scale) / (2n * scale);
+  const result = Number(rounded);
   ensureSafeInteger(result);
   return result as Paise;
 }

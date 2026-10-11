@@ -5,6 +5,7 @@ import { runMigrations } from './schema';
 import { BorrowerRepository } from './borrowerRepository';
 import { LoanRepository } from './loanRepository';
 import { TransactionRepository } from './transactionRepository';
+import { AuthStore } from '../auth/authStore';
 
 type DatabaseContextType = {
   db: SQLiteDatabase | null;
@@ -14,6 +15,7 @@ type DatabaseContextType = {
   error: Error | null;
   refreshVersion: number;
   triggerRefresh: () => void;
+  switchTenant: (tenantId?: string | null) => Promise<void>;
 };
 
 const DatabaseContext = createContext<DatabaseContextType>({
@@ -24,6 +26,7 @@ const DatabaseContext = createContext<DatabaseContextType>({
   error: null,
   refreshVersion: 0,
   triggerRefresh: () => {},
+  switchTenant: async () => {},
 });
 
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
@@ -33,7 +36,7 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     setRefreshVersion(v => v + 1);
   }, []);
 
-  const [state, setState] = useState<Omit<DatabaseContextType, 'refreshVersion' | 'triggerRefresh'>>({
+  const [state, setState] = useState<Omit<DatabaseContextType, 'refreshVersion' | 'triggerRefresh' | 'switchTenant'>>({
     db: null,
     borrowers: null,
     loans: null,
@@ -41,28 +44,47 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     error: null,
   });
 
-  useEffect(() => {
-    async function setup() {
-      try {
-        const db = await initDatabase();
-        await runMigrations(db);
-        
-        setState({
+  const loadDatabase = useCallback(async (tenantId?: string | null) => {
+    try {
+      const db = await initDatabase(tenantId);
+      await runMigrations(db);
+
+      setState(prev => {
+        if (prev.db && prev.db !== db && typeof (prev.db as any).closeAsync === 'function') {
+          (prev.db as any).closeAsync().catch(() => {});
+        }
+        return {
           db,
           borrowers: new BorrowerRepository(db),
           loans: new LoanRepository(db),
           transactions: new TransactionRepository(db),
           error: null,
-        });
-      } catch (e: any) {
-        setState(prev => ({ ...prev, error: e }));
-      }
+        };
+      });
+      setRefreshVersion(v => v + 1);
+    } catch (e: any) {
+      setState(prev => ({ ...prev, error: e }));
     }
-    setup();
   }, []);
 
+  const switchTenant = useCallback(async (tenantId?: string | null) => {
+    await loadDatabase(tenantId);
+  }, [loadDatabase]);
+
+  useEffect(() => {
+    loadDatabase();
+
+    const unsubscribe = AuthStore.onAuthChange((newTenantId) => {
+      loadDatabase(newTenantId);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [loadDatabase]);
+
   return (
-    <DatabaseContext.Provider value={{ ...state, refreshVersion, triggerRefresh }}>
+    <DatabaseContext.Provider value={{ ...state, refreshVersion, triggerRefresh, switchTenant }}>
       {children}
     </DatabaseContext.Provider>
   );

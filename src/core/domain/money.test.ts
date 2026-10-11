@@ -44,6 +44,12 @@ describe('Money', () => {
       expect(multiplyPaise(a, 1.3)).toBe(2600000);
     });
 
+    it('performs exact decimal round-half-up matching backend Python Decimal arithmetic (cross-engine parity)', () => {
+      // 100050 * 0.29 in IEEE-754 floats drifts to 29014.499999999996 which naive Math.round rounds to 29014.
+      // With exact decimal round-half-up, 100050 * 0.29 = 29014.50 which rounds up to 29015.
+      expect(multiplyPaise(100050 as Paise, 0.29)).toBe(29015);
+    });
+
     it('allocates rounding remainders exactly when dividing', () => {
       // 26000 / 3 = 8666.666...
       // Should give [866667, 866667, 866666] in paise

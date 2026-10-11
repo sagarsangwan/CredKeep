@@ -16,20 +16,19 @@ export class BorrowerRepository {
     const id = crypto.randomUUID();
     const created_at = new Date().toISOString();
     
-    await this.db.runAsync(
-      `INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, ?, ?, ?)`,
-      [id, name, phone, created_at]
-    );
+    await this.db.withExclusiveTransactionAsync(async (tx) => {
+      const txHandle = tx || this.db;
+      await txHandle.runAsync(
+        `INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, ?, ?, ?)`,
+        [id, name, phone, created_at]
+      );
 
-    try {
-      await OutboxManager.enqueue(this.db, {
+      await OutboxManager.enqueue(txHandle, {
         operationId: clientOpId,
         operationType: 'create_borrower',
         payload: { id, name, phone },
       });
-    } catch {
-      // Outbox failure should not block local borrower creation
-    }
+    });
     
     return { id, name, phone, created_at };
   }
