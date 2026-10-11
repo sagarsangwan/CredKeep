@@ -4,6 +4,7 @@ import { allocatePayment, KistAllocationState } from '../domain/allocation';
 import { Paise, toPaise } from '../domain/money';
 import { LoanRepository } from './loanRepository';
 import { calculateNewPenalties } from '../domain/penalty';
+import { OutboxManager } from '../sync/outbox';
 
 export class TransactionRepository {
   constructor(private db: SQLiteDatabase) {}
@@ -147,6 +148,22 @@ export class TransactionRepository {
           if ((pastPrincipalPaid + allocatedPrincipal) >= loan.principal_paise && allKistsPaid && result.remainingPenalty <= 0) {
              await tx.runAsync(`UPDATE loans SET status = 'SETTLED' WHERE id = ?`, [loanId]);
           }
+        }
+
+        try {
+          await OutboxManager.enqueue(this.db, {
+            operationId,
+            operationType: 'record_collection',
+            payload: {
+              loan_id: loanId,
+              amount_paise: paymentAmount,
+              effective_date: effectiveDate,
+              payment_method: 'CASH',
+              is_cash: true,
+            },
+          });
+        } catch {
+          // Non-blocking
         }
         
         returnResult = { success: true, transactionId, result };

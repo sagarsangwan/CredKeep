@@ -37,11 +37,11 @@ This backlog drives the autonomous execution of CredKeep V2.
   - *Scope:* Return state changes since `cursor`.
 
 ## Phase 5: Mobile Integration
-- [ ] **CK-V2-MOB-001**: Mobile Auth UI & SecureStore
+- [x] **CK-V2-MOB-001**: Mobile Auth UI & SecureStore
   - *Scope:* Add Login/Register screens, store JWT in SecureStore.
-- [ ] **CK-V2-MOB-002**: Sync Client & Outbox
+- [x] **CK-V2-MOB-002**: Sync Client & Outbox
   - *Scope:* Modify local SQLite to mark pending txns, send to PUSH endpoint.
-- [ ] **CK-V2-MOB-003**: Apply Server State
+- [x] **CK-V2-MOB-003**: Apply Server State
   - *Scope:* Fetch from PULL endpoint, update local SQLite.
 
 ## Phase 6: Migration & Ops
