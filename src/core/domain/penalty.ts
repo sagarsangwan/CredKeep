@@ -45,7 +45,8 @@ export function calculateNewPenalties(
   let earliestUnpaidDueDate = null;
 
   for (const kist of state.kists) {
-    if (!kist.isFullyPaid && (earliestUnpaidDueDate === null || kist.dueDate < earliestUnpaidDueDate)) {
+    const unpaid = kist.amountDue - kist.amountPaid;
+    if (!kist.isFullyPaid && unpaid > 0 && (earliestUnpaidDueDate === null || kist.dueDate < earliestUnpaidDueDate)) {
       earliestUnpaidDueDate = kist.dueDate;
     }
   }

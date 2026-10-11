@@ -307,42 +307,64 @@ export class SyncService {
           );
         } else if (existing.transaction_type === 'COLLECTION' && payload.transaction_type === 'COLLECTION') {
           // Reconcile authoritative server allocations via append-only adjustment transaction, respecting trigger
-          const deltaPrincipal = (payload.allocated_principal_paise || 0) - (existing.allocated_principal_paise || 0);
-          const deltaMarkup = (payload.allocated_markup_paise || 0) - (existing.allocated_markup_paise || 0);
-          const deltaPenalty = (payload.allocated_penalty_paise || 0) - (existing.allocated_penalty_paise || 0);
-          const deltaSurplus = (payload.unallocated_surplus_paise || 0) - (existing.unallocated_surplus_paise || 0);
+          const netAllocRow = await tx.getFirstAsync<{
+            netPrincipal: number;
+            netMarkup: number;
+            netPenalty: number;
+            netSurplus: number;
+          }>(
+            `SELECT
+               COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+               COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+               COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty,
+               COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
+             FROM transactions
+             WHERE loan_id = ?
+               AND (
+                 operation_id = ?
+                 OR operation_id LIKE 'realloc-' || ? || '-%'
+                 OR operation_id LIKE 'reconcile-' || ? || '-%'
+                 OR operation_id = 'reconcile-' || ?
+               )`,
+            [payload.loan_id, payload.operation_id, payload.operation_id, payload.operation_id, payload.operation_id]
+          );
+
+          const currentPrincipal = netAllocRow?.netPrincipal ?? (existing.allocated_principal_paise || 0);
+          const currentMarkup = netAllocRow?.netMarkup ?? (existing.allocated_markup_paise || 0);
+          const currentPenalty = netAllocRow?.netPenalty ?? (existing.allocated_penalty_paise || 0);
+          const currentSurplus = netAllocRow?.netSurplus ?? (existing.unallocated_surplus_paise || 0);
+
+          const deltaPrincipal = (payload.allocated_principal_paise || 0) - currentPrincipal;
+          const deltaMarkup = (payload.allocated_markup_paise || 0) - currentMarkup;
+          const deltaPenalty = (payload.allocated_penalty_paise || 0) - currentPenalty;
+          const deltaSurplus = (payload.unallocated_surplus_paise || 0) - currentSurplus;
 
           if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
-            const reconOpId = `reconcile-${payload.operation_id}`;
-            const existingRecon = await tx.getFirstAsync<{ id: string }>(
-              `SELECT id FROM transactions WHERE operation_id = ?`,
-              [reconOpId]
+            const reconId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('recon-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+            const reconOpId = `reconcile-${payload.operation_id}-${reconId.substring(0, 8)}`;
+            await tx.runAsync(
+              `INSERT INTO transactions (
+                 id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+                 amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
+                 unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                reconId,
+                reconOpId,
+                payload.loan_id,
+                'REVERSAL',
+                0,
+                'SYSTEM',
+                0,
+                deltaPrincipal,
+                deltaMarkup,
+                deltaPenalty,
+                deltaSurplus,
+                0,
+                payload.effective_date,
+                new Date().toISOString(),
+              ]
             );
-            if (!existingRecon) {
-              await tx.runAsync(
-                `INSERT INTO transactions (
-                   id, operation_id, loan_id, transaction_type, is_cash, payment_method,
-                   amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
-                   unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  crypto.randomUUID(),
-                  reconOpId,
-                  payload.loan_id,
-                  'REVERSAL',
-                  0,
-                  'SYSTEM',
-                  0,
-                  deltaPrincipal,
-                  deltaMarkup,
-                  deltaPenalty,
-                  deltaSurplus,
-                  0,
-                  payload.effective_date,
-                  new Date().toISOString(),
-                ]
-              );
-            }
           }
         }
       }
@@ -393,7 +415,9 @@ export class SyncService {
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                OR transactions.operation_id = 'reconcile-' || so.operation_id
                )
            )
            THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
@@ -469,7 +493,9 @@ export class SyncService {
                  AND (
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
-                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                OR transactions.operation_id = 'reconcile-' || so.operation_id
                  )
              )`,
           [loanId]
@@ -518,8 +544,14 @@ export class SyncService {
            COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty,
            COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
          FROM transactions
-         WHERE operation_id = ? OR operation_id LIKE ?`,
-        [operationId, `realloc-${operationId}%`]
+         WHERE loan_id = ?
+           AND (
+             operation_id = ?
+             OR operation_id LIKE 'realloc-' || ? || '-%'
+             OR operation_id LIKE 'reconcile-' || ? || '-%'
+             OR operation_id = 'reconcile-' || ?
+           )`,
+        [origTx.loan_id, operationId, operationId, operationId, operationId]
       );
 
       const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
@@ -601,10 +633,13 @@ export class SyncService {
                  AND (
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
-                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                OR transactions.operation_id = 'reconcile-' || so.operation_id
                  )
              )
              AND operation_id NOT LIKE 'realloc-%'
+             AND operation_id NOT LIKE 'reconcile-%'
              AND effective_date <= ?
              THEN allocated_penalty_paise ELSE 0 END), 0) as deltaPenalty
          FROM transactions WHERE loan_id = ?`,
@@ -671,8 +706,14 @@ export class SyncService {
            COALESCE(SUM(allocated_penalty_paise), 0) as currentPenalty,
            COALESCE(SUM(unallocated_surplus_paise), 0) as currentSurplus
          FROM transactions
-         WHERE operation_id = ? OR operation_id LIKE ?`,
-        [col.operation_id, `realloc-${col.operation_id}%`]
+         WHERE loan_id = ?
+           AND (
+             operation_id = ?
+             OR operation_id LIKE 'realloc-' || ? || '-%'
+             OR operation_id LIKE 'reconcile-' || ? || '-%'
+             OR operation_id = 'reconcile-' || ?
+           )`,
+        [loanId, col.operation_id, col.operation_id, col.operation_id, col.operation_id]
       );
 
       const currentPrincipal = currentColNet?.currentPrincipal ?? (col.allocated_principal_paise || 0);
@@ -737,10 +778,13 @@ export class SyncService {
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                OR transactions.operation_id = 'reconcile-' || so.operation_id
                )
            )
            AND operation_id NOT LIKE 'realloc-%'
+           AND operation_id NOT LIKE 'reconcile-%'
            THEN allocated_penalty_paise ELSE 0 END), 0) as reconPenalty
        FROM transactions WHERE loan_id = ?`,
       [loanId]
@@ -771,7 +815,9 @@ export class SyncService {
                AND (
                  transactions.operation_id = so.operation_id
                  OR transactions.operation_id = 'reversal-' || so.operation_id
-                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                OR transactions.operation_id = 'reconcile-' || so.operation_id
                )
            )`,
         [loanId]

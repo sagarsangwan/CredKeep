@@ -1637,6 +1637,131 @@ def test_sync_push_create_loan_rejects_excess_markup_precision(api_client, lende
     assert 'markup_factor cannot exceed 4 decimal places' in response.data['results'][0]['error']
 
 
+@pytest.mark.django_db
+def test_sync_push_malformed_uuid_returns_terminal_rejected(api_client, lender_setup):
+    """
+    Verifies that malformed UUID fields in sync payloads return terminal REJECTED
+    and record a REJECTED SyncLog instead of retrying indefinitely with FAILED.
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+    url = reverse('sync-push')
+
+    # 1. create_loan with malformed borrower_id
+    op_id_1 = str(uuid.uuid4())
+    res1 = api_client.post(url, {
+        'operations': [{
+            'operation_id': op_id_1,
+            'type': 'create_loan',
+            'payload': {
+                'borrower_id': 'not-a-valid-uuid',
+                'principal_paise': 100000,
+                'markup_factor': '0.1',
+                'term_months': 1,
+                'start_date': '2026-01-01',
+                'due_day': 1,
+                'product_type': 'instalment'
+            }
+        }]
+    }, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'REJECTED'
+    log1 = SyncLog.objects.filter(tenant=tenant, operation_id=op_id_1).first()
+    assert log1 is not None
+    assert log1.status == 'REJECTED'
+
+    # 2. create_borrower with malformed id
+    op_id_2 = str(uuid.uuid4())
+    res2 = api_client.post(url, {
+        'operations': [{
+            'operation_id': op_id_2,
+            'type': 'create_borrower',
+            'payload': {
+                'id': 'invalid-borrower-uuid',
+                'name': 'Bad UUID Borrower',
+                'phone': '9876543000'
+            }
+        }]
+    }, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'REJECTED'
+    log2 = SyncLog.objects.filter(tenant=tenant, operation_id=op_id_2).first()
+    assert log2 is not None
+    assert log2.status == 'REJECTED'
+
+    # 3. modify_schedule with malformed kist_id
+    borrower = Borrower.objects.create(tenant=tenant, name='Valid Borrower', phone='9876543001')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.1'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    op_id_3 = str(uuid.uuid4())
+    res3 = api_client.post(url, {
+        'operations': [{
+            'operation_id': op_id_3,
+            'type': 'modify_schedule',
+            'payload': {
+                'loan_id': str(loan.id),
+                'kist_id': 'malformed-kist-uuid',
+                'revised_effective_due_date': '2026-02-01'
+            }
+        }]
+    }, format='json')
+    assert res3.status_code == 200
+    assert res3.data['results'][0]['status'] == 'REJECTED'
+    log3 = SyncLog.objects.filter(tenant=tenant, operation_id=op_id_3).first()
+    assert log3 is not None
+    assert log3.status == 'REJECTED'
+
+
+@pytest.mark.django_db
+def test_zero_value_installment_does_not_accrue_penalties(lender_setup):
+    """
+    Verifies that an overdue installment with 0 total due (e.g. zero-markup bullet interim kist)
+    never accrues late penalties even when overdue and status is PENDING.
+    """
+    user, tenant, token = lender_setup
+    borrower = Borrower.objects.create(tenant=tenant, name='Zero Due Borrower', phone='9876543002')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.0'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='bullet',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=0,
+        markup_component_paise=0,
+        total_due_paise=0,
+        principal_paid_paise=0,
+        markup_paid_paise=0,
+        status='PENDING'
+    )
+
+    # Assess penalties 10 days later
+    new_pen = ledger_service.assess_penalties(loan, '2026-01-11')
+    assert new_pen == 0
+    pen_txs = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+    assert pen_txs.count() == 0
+
+
+
 
 
 

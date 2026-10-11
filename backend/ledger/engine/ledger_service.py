@@ -32,7 +32,7 @@ def extend_bullet_schedule_if_needed(loan: LoanAccount, current_date_str: str) -
         return
 
     last_kist = kists[-1]
-    last_due_date_str = last_kist.effective_due_date.strftime("%Y-%m-%d")
+    last_due_date_str = last_kist.effective_due_date.strftime("%Y-%m-%d") if hasattr(last_kist.effective_due_date, 'strftime') else str(last_kist.effective_due_date)
 
     if last_due_date_str < current_date_str:
         if isinstance(loan.markup_factor, float):
@@ -44,7 +44,7 @@ def extend_bullet_schedule_if_needed(loan: LoanAccount, current_date_str: str) -
 
         next_installment_number = last_kist.installment_number + 1
         months_to_add = next_installment_number
-        start_date_str = loan.start_date.strftime("%Y-%m-%d")
+        start_date_str = loan.start_date.strftime("%Y-%m-%d") if hasattr(loan.start_date, 'strftime') else str(loan.start_date)
         next_due_date = calculate_next_due_date(start_date_str, months_to_add, loan.due_day)
 
         while next_due_date <= current_date_str or next_installment_number == last_kist.installment_number + 1:
@@ -101,15 +101,15 @@ def assess_penalties(loan: LoanAccount, current_date_str: str) -> int:
         .filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
         .values_list('effective_date', flat=True)
     )
-    assessed_dates = {d.strftime("%Y-%m-%d") for d in existing_assessments}
+    assessed_dates = {(d.strftime("%Y-%m-%d") if hasattr(d, 'strftime') else str(d)) for d in existing_assessments}
 
     overdue_kists = [
         OverdueKist(
             kist_number=k.installment_number,
-            due_date=k.effective_due_date.strftime("%Y-%m-%d"),
+            due_date=(k.effective_due_date.strftime("%Y-%m-%d") if hasattr(k.effective_due_date, 'strftime') else str(k.effective_due_date)),
             amount_due=k.total_due_paise,
             amount_paid=k.principal_paid_paise + k.markup_paid_paise,
-            is_fully_paid=(k.status == 'PAID')
+            is_fully_paid=(k.status == 'PAID' or (k.total_due_paise <= k.principal_paid_paise + k.markup_paid_paise))
         )
         for k in kists
     ]

@@ -168,7 +168,7 @@ class SyncPushView(APIView):
                         res_item["error"] = err_msg
                     results.append(res_item)
 
-            except ValidationError as e:
+            except (ValidationError, ValueError) as e:
                 err_text = str(e)
                 existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
                 if existing_log:
@@ -225,7 +225,13 @@ class SyncPushView(APIView):
                 return 'REJECTED', 'Borrower name and phone are required.'
 
             borrower_id_raw = payload.get('id')
-            borrower_id = uuid.UUID(str(borrower_id_raw)) if borrower_id_raw else uuid.uuid4()
+            if borrower_id_raw:
+                try:
+                    borrower_id = uuid.UUID(str(borrower_id_raw))
+                except ValueError:
+                    return 'REJECTED', f'Invalid borrower id UUID format: {borrower_id_raw}'
+            else:
+                borrower_id = uuid.uuid4()
 
             borrower, created = Borrower.objects.get_or_create(
                 tenant=tenant,
@@ -260,7 +266,13 @@ class SyncPushView(APIView):
                 return 'REJECTED', f'Borrower {borrower_id_raw} not found for this tenant.'
 
             loan_id_raw = payload.get('id')
-            loan_id = uuid.UUID(str(loan_id_raw)) if loan_id_raw else uuid.uuid4()
+            if loan_id_raw:
+                try:
+                    loan_id = uuid.UUID(str(loan_id_raw))
+                except ValueError:
+                    return 'REJECTED', f'Invalid loan id UUID format: {loan_id_raw}'
+            else:
+                loan_id = uuid.uuid4()
 
             raw_principal = payload.get('principal_paise')
             if raw_principal is None or isinstance(raw_principal, bool) or not isinstance(raw_principal, int) or raw_principal <= 0:
@@ -467,9 +479,16 @@ class SyncPushView(APIView):
 
             kist = None
             if payload.get('kist_id'):
-                kist = Kist.objects.filter(tenant=tenant, loan=loan, id=uuid.UUID(str(payload['kist_id']))).first()
+                try:
+                    kist_uuid = uuid.UUID(str(payload['kist_id']))
+                    kist = Kist.objects.filter(tenant=tenant, loan=loan, id=kist_uuid).first()
+                except ValueError:
+                    return 'REJECTED', f'Invalid kist_id UUID format: {payload["kist_id"]}'
             elif payload.get('installment_number'):
-                kist = Kist.objects.filter(tenant=tenant, loan=loan, installment_number=int(payload['installment_number'])).first()
+                try:
+                    kist = Kist.objects.filter(tenant=tenant, loan=loan, installment_number=int(payload['installment_number'])).first()
+                except (ValueError, TypeError):
+                    return 'REJECTED', f'Invalid installment_number format: {payload.get("installment_number")}'
 
             if not kist:
                 return 'REJECTED', 'Target installment (kist) not found for this loan.'

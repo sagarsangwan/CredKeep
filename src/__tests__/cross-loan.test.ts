@@ -1378,4 +1378,147 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(nameDefault).toBe('credkeep.db');
     expect(nameA).not.toBe(nameB);
   });
+
+  it('correctly reconciles authoritative server confirmation following local reallocation without double-crediting', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-rec-confirm', 'Borrower Rec Confirm', '9876543219', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-rec-confirm', 'b-rec-confirm', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rec-1', 'loan-rec-confirm', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 100 paise penalty assessed
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-rec-pen', 'op-rec-pen', 'loan-rec-confirm', 'PENALTY_ASSESSMENT', 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // P1 (100 paise) originally allocated to penalty (100 paise)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-rec-p1', 'op-rec-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-rec-confirm', amount_paise: 100, effective_date: '2026-01-02' })}', 'PENDING', '2026-01-02T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-rec-p1', 'op-rec-p1', 'loan-rec-confirm', 'COLLECTION', 100, 0, 0, 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // P2 (100 paise) originally allocated to principal (100 paise)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-rec-p2', 'op-rec-p2', 'record_collection', '${JSON.stringify({ loan_id: 'loan-rec-confirm', amount_paise: 100, effective_date: '2026-01-03' })}', 'PENDING', '2026-01-03T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-rec-p2', 'op-rec-p2', 'loan-rec-confirm', 'COLLECTION', 100, 100, 0, 0, '2026-01-03', '2026-01-03')
+    `);
+
+    // Revert P1 locally: P2 reallocates locally to penalty (100 penalty, 0 principal) via append-only realloc delta
+    await SyncService.revertRejectedPayment(db, 'op-rec-p1', 'Payment 1 Rejected');
+
+    // Confirm that locally P2 has an append-only realloc delta (+100 penalty, -100 principal)
+    const reallocTx = await db.getFirstAsync<any>(`
+      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-rec-p2-%'
+    `);
+    expect(reallocTx).not.toBeNull();
+    expect(reallocTx?.allocated_penalty_paise).toBe(100);
+    expect(reallocTx?.allocated_principal_paise).toBe(-100);
+
+    // Now server sends authoritative confirmation for P2 where server allocated 100 to penalty and 0 to markup
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'tx-server-p2',
+        operation_id: 'op-rec-p2',
+        loan_id: 'loan-rec-confirm',
+        transaction_type: 'COLLECTION',
+        amount_paise: 100,
+        allocated_principal_paise: 0,
+        allocated_markup_paise: 0,
+        allocated_penalty_paise: 100,
+        unallocated_surplus_paise: 0,
+        forgiven_penalty_paise: 0,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02T10:05:00Z'
+      }
+    });
+
+    // Check complete net allocation for P2 across the ledger
+    const p2Net = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(amount_paise), 0) as netAmount,
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty
+      FROM transactions
+      WHERE loan_id = 'loan-rec-confirm'
+        AND (
+          operation_id = 'op-rec-p2'
+          OR operation_id LIKE 'realloc-op-rec-p2-%'
+          OR operation_id LIKE 'reconcile-op-rec-p2-%'
+        )
+    `);
+
+    expect(p2Net?.netAmount).toBe(100);
+    expect(p2Net?.netPrincipal).toBe(0);
+    expect(p2Net?.netMarkup).toBe(0);
+    expect(p2Net?.netPenalty).toBe(100);
+  });
+
+  it('strictly isolates cross-loan operations with prefix-colliding IDs op-1 and op-10', async () => {
+    const db = createRealSqliteDb();
+
+    // Loan A
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-iso-a', 'Borrower Iso A', '9876543220', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-iso-a', 'b-iso-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-iso-a1', 'loan-iso-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 500, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Loan B
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-iso-b', 'Borrower Iso B', '9876543221', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-iso-b', 'b-iso-b', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-iso-b1', 'loan-iso-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 1000, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Loan A has collection op-1
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-iso-1', 'op-1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-iso-a', amount_paise: 500, effective_date: '2026-01-02' })}', 'PENDING', '2026-01-02T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-iso-1', 'op-1', 'loan-iso-a', 'COLLECTION', 500, 0, 500, '2026-01-02', '2026-01-02')
+    `);
+
+    // Loan B has collection op-10 and a realloc row realloc-op-10-abc
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-iso-10', 'op-10', 'record_collection', '${JSON.stringify({ loan_id: 'loan-iso-b', amount_paise: 1000, effective_date: '2026-01-02' })}', 'PENDING', '2026-01-02T10:05:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-iso-10', 'op-10', 'loan-iso-b', 'COLLECTION', 1000, 0, 1000, '2026-01-02', '2026-01-02')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-iso-realloc-10', 'realloc-op-10-abc', 'loan-iso-b', 'REVERSAL', 0, 500, -500, '2026-01-02', '2026-01-02')
+    `);
+
+    // Now revert op-1 on Loan A
+    await SyncService.revertRejectedPayment(db, 'op-1', 'Rejected op-1');
+
+    // Loan A reversal should be exactly -500 markup (reversing op-1)
+    const revA = await db.getFirstAsync<any>(`
+      SELECT * FROM transactions WHERE operation_id = 'reversal-op-1'
+    `);
+    expect(revA).not.toBeNull();
+    expect(revA?.amount_paise).toBe(-500);
+    expect(revA?.allocated_markup_paise).toBe(-500);
+    expect(revA?.allocated_principal_paise).toBe(0);
+
+    // Loan B's op-10 transactions and reallocations must be 100% untouched!
+    const loanBTxs = await db.getAllAsync<any>(`
+      SELECT * FROM transactions WHERE loan_id = 'loan-iso-b' ORDER BY created_at ASC
+    `);
+    expect(loanBTxs.length).toBe(2);
+    expect(loanBTxs.some((t) => t.operation_id === 'reversal-op-1')).toBe(false);
+  });
 });

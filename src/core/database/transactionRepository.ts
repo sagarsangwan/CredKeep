@@ -68,7 +68,9 @@ export class TransactionRepository {
                  AND (
                    transactions.operation_id = so.operation_id
                    OR transactions.operation_id = 'reversal-' || so.operation_id
-                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                   OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                   OR transactions.operation_id = 'reconcile-' || so.operation_id
                  )
              )`,
           [loanId]
@@ -109,7 +111,9 @@ export class TransactionRepository {
                    AND (
                      transactions.operation_id = so.operation_id
                      OR transactions.operation_id = 'reversal-' || so.operation_id
-                     OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                     OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                     OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                     OR transactions.operation_id = 'reconcile-' || so.operation_id
                    )
                )`,
             [loanId]
@@ -221,7 +225,7 @@ export class TransactionRepository {
         dueDate: k.effective_due_date,
         amountDue: k.total_due_paise,
         amountPaid: k.principal_paid_paise + k.markup_paid_paise,
-        isFullyPaid: k.status === 'PAID'
+        isFullyPaid: k.status === 'PAID' || (k.total_due_paise <= (k.principal_paid_paise + k.markup_paid_paise))
       })),
       assessedDates
     };
@@ -257,7 +261,7 @@ export class TransactionRepository {
         dueDate: k.effective_due_date,
         amountDue: k.total_due_paise,
         amountPaid: k.principal_paid_paise + k.markup_paid_paise,
-        isFullyPaid: k.status === 'PAID'
+        isFullyPaid: k.status === 'PAID' || (k.total_due_paise <= (k.principal_paid_paise + k.markup_paid_paise))
       })),
       assessedDates
     };
