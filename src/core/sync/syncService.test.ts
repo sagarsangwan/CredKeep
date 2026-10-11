@@ -441,6 +441,47 @@ describe('SyncService & OutboxManager', () => {
       }
     });
 
+    it('reports conflict review required when outbox has NEEDS_REVIEW operations', async () => {
+      const pushSpy = jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 0 });
+      const pullSpy = jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 2 });
+      const reviewSpy = jest.spyOn(OutboxManager, 'getNeedsReview').mockResolvedValueOnce([
+        {
+          id: 'outbox-conflict-1',
+          operation_id: 'op-conflict-1',
+          operation_type: 'record_collection',
+          payload: '{}',
+          status: 'NEEDS_REVIEW',
+          error_message: 'Loan was settled on another device',
+          created_at: new Date().toISOString()
+        }
+      ]);
+
+      try {
+        const res = await SyncService.syncAll(mockDb);
+        expect(res.success).toBe(false);
+        expect(res.needsReviewCount).toBe(1);
+        expect(res.errors![0]).toContain('require review due to server conflicts');
+      } finally {
+        pushSpy.mockRestore();
+        pullSpy.mockRestore();
+        reviewSpy.mockRestore();
+      }
+    });
+
+    it('resolves NEEDS_REVIEW operations via OutboxManager.resolveNeedsReview', async () => {
+      await OutboxManager.resolveNeedsReview(mockDb, 'op-conflict-1', 'DISCARD');
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining("UPDATE sync_outbox SET status = 'REJECTED'"),
+        ['op-conflict-1']
+      );
+
+      await OutboxManager.resolveNeedsReview(mockDb, 'op-conflict-1', 'RETRY_PENDING');
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining("UPDATE sync_outbox SET status = 'PENDING'"),
+        ['op-conflict-1']
+      );
+    });
+
     it('pushes pending outbox queues exceeding 50 items in successive batches', async () => {
       // Create 65 outbox items
       for (let i = 0; i < 65; i++) {

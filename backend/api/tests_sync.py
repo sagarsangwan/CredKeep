@@ -2086,6 +2086,123 @@ def test_future_dated_postponement_does_not_assess_future_penalties(api_client, 
     assert future_penalties.count() == 0
 
 
+@pytest.mark.django_db
+def test_sync_push_record_collection_idempotency_conflict_different_loan(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Idemp', phone='9876543290')
+    loan1 = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    loan2 = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+
+    # 1. First push for loan1
+    payload1 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan1.id),
+                    'amount_paise': 5000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'CASH'
+                }
+            }
+        ]
+    }
+    res1 = api_client.post(url, payload1, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Conflicting reuse with same op_id but different loan (loan2)
+    payload2 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan2.id),
+                    'amount_paise': 5000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'CASH'
+                }
+            }
+        ]
+    }
+    res2 = api_client.post(url, payload2, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res2.data['results'][0]['error']
+    # Ensure no transaction recorded on loan2
+    assert LedgerTx.objects.filter(loan=loan2).count() == 0
+
+
+@pytest.mark.django_db
+def test_sync_push_record_collection_idempotency_conflict_different_amount(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Idemp Amt', phone='9876543291')
+    loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+
+    # 1. First push for 5000 paise
+    payload1 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 5000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'CASH'
+                }
+            }
+        ]
+    }
+    res1 = api_client.post(url, payload1, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Conflicting reuse with same op_id but different amount (10000 paise)
+    payload2 = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 10000,
+                    'effective_date': '2026-01-02',
+                    'payment_method': 'CASH'
+                }
+            }
+        ]
+    }
+    res2 = api_client.post(url, payload2, format='json')
+    assert res2.status_code == 200
+    assert res2.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res2.data['results'][0]['error']
+    # Ensure amount on recorded transaction remains 5000
+    tx = LedgerTx.objects.get(loan=loan, operation_id=op_id)
+    assert tx.amount_paise == 5000
+
+
+
 
 
 

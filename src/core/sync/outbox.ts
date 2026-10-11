@@ -86,6 +86,30 @@ export class OutboxManager {
     return row ? row.value : null;
   }
 
+  static async getNeedsReview(db: SQLiteDatabase): Promise<OutboxRecord[]> {
+    return await db.getAllAsync<OutboxRecord>(
+      `SELECT * FROM sync_outbox WHERE status = 'NEEDS_REVIEW' ORDER BY created_at ASC`
+    );
+  }
+
+  static async resolveNeedsReview(
+    db: SQLiteDatabase,
+    operationId: string,
+    action: 'DISCARD' | 'RETRY_PENDING'
+  ): Promise<void> {
+    if (action === 'DISCARD') {
+      await db.runAsync(
+        `UPDATE sync_outbox SET status = 'REJECTED', error_message = 'Resolved: discarded by user' WHERE operation_id = ?`,
+        [operationId]
+      );
+    } else if (action === 'RETRY_PENDING') {
+      await db.runAsync(
+        `UPDATE sync_outbox SET status = 'PENDING', error_message = NULL WHERE operation_id = ?`,
+        [operationId]
+      );
+    }
+  }
+
   static async setMeta(db: SQLiteDatabase, key: string, value: string): Promise<void> {
     await db.runAsync(
       `INSERT INTO sync_meta (key, value) VALUES (?, ?)

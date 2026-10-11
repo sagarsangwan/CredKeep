@@ -118,9 +118,39 @@ class SyncPushView(APIView):
                 })
                 continue
 
+            op_type = op.get('type')
+            payload = op.get('payload', {})
+            if not isinstance(payload, dict):
+                payload = {}
+
             # Idempotency check against SyncLog
             existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
             if existing_log:
+                # If an existing transaction exists, verify attribute idempotency against incoming payload
+                existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                if existing_tx:
+                    req_loan_id = str(payload.get('loan_id') or op.get('loan_id') or '')
+                    req_amount = payload.get('amount_paise') if 'amount_paise' in payload else op.get('amount_paise')
+                    req_date = str(payload.get('effective_date') or op.get('timestamp') or '')
+                    if 'T' in req_date:
+                        req_date = req_date.split('T')[0]
+
+                    has_conflict = False
+                    if req_loan_id and req_loan_id != str(existing_tx.loan.id):
+                        has_conflict = True
+                    if req_amount is not None and int(req_amount) != existing_tx.amount_paise:
+                        has_conflict = True
+                    if req_date and req_date != str(existing_tx.effective_date):
+                        has_conflict = True
+
+                    if has_conflict:
+                        results.append({
+                            "operation_id": str(operation_id),
+                            "status": "REJECTED",
+                            "error": f"Idempotency conflict: operation_id {operation_id} was already accepted with different payment attributes."
+                        })
+                        continue
+
                 res_item = {
                     "operation_id": str(operation_id),
                     "status": existing_log.status,
@@ -129,11 +159,6 @@ class SyncPushView(APIView):
                     res_item["error"] = existing_log.error_message
                 results.append(res_item)
                 continue
-
-            op_type = op.get('type')
-            payload = op.get('payload', {})
-            if not isinstance(payload, dict):
-                payload = {}
 
             try:
                 with transaction.atomic():
@@ -421,6 +446,17 @@ class SyncPushView(APIView):
 
             # Failure Matrix invariant: Money received on settled loan is recorded, marked as surplus, and loan remains settled.
             if loan.status in ('SETTLED', 'WRITTEN_OFF'):
+                existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                if existing_tx:
+                    if (
+                        str(existing_tx.loan.id) != str(loan.id) or
+                        existing_tx.amount_paise != amount_paise or
+                        str(existing_tx.effective_date) != str(effective_date) or
+                        existing_tx.transaction_type != 'COLLECTION'
+                    ):
+                        return 'REJECTED', f"Idempotency conflict: operation_id {operation_id} already exists with different payment attributes."
+                    return 'ACCEPTED', None
+
                 surplus_tx = LedgerTx.objects.create(
                     tenant=tenant,
                     operation_id=operation_id,
@@ -466,14 +502,17 @@ class SyncPushView(APIView):
             assess_date_str = server_date_str
             ledger_service.assess_penalties(loan, assess_date_str)
 
-            ledger_service.record_collection(
-                loan=loan,
-                payment_amount=amount_paise,
-                operation_id=operation_id,
-                effective_date_str=str(effective_date),
-                payment_method=payment_method,
-                is_cash=is_cash
-            )
+            try:
+                ledger_service.record_collection(
+                    loan=loan,
+                    payment_amount=amount_paise,
+                    operation_id=operation_id,
+                    effective_date_str=str(effective_date),
+                    payment_method=payment_method,
+                    is_cash=is_cash
+                )
+            except ValueError as val_err:
+                return 'REJECTED', str(val_err)
             return 'ACCEPTED', None
 
         elif op_type == 'modify_schedule':

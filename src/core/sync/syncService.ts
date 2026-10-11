@@ -9,6 +9,7 @@ import { Paise } from '../domain/money';
 export interface SyncResult {
   pushedCount: number;
   pulledCount: number;
+  needsReviewCount?: number;
   success: boolean;
   errors?: string[];
 }
@@ -995,9 +996,20 @@ export class SyncService {
         };
       }
       const pullRes = await this.pullChanges(db);
+      const needsReviewItems = await OutboxManager.getNeedsReview(db);
+      if (needsReviewItems.length > 0) {
+        return {
+          pushedCount: pushRes.pushed,
+          pulledCount: pullRes.pulled,
+          needsReviewCount: needsReviewItems.length,
+          success: false,
+          errors: [`${needsReviewItems.length} operation(s) require review due to server conflicts`],
+        };
+      }
       return {
         pushedCount: pushRes.pushed,
         pulledCount: pullRes.pulled,
+        needsReviewCount: 0,
         success: true,
       };
     } catch (err: any) {

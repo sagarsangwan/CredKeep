@@ -141,28 +141,66 @@ export class V1DataExtractor {
       const extracted = await this.extract(db);
       const operations = this.buildPushPayloads(extracted);
 
-      // Enqueue all extracted operations
-      for (const op of operations) {
-        await OutboxManager.enqueue(db, {
-          operationId: op.operation_id,
-          operationType: op.type,
-          payload: op.payload,
+      // Enqueue all extracted operations atomically
+      if (typeof (db as any).withExclusiveTransactionAsync === 'function') {
+        await (db as any).withExclusiveTransactionAsync(async (tx: any) => {
+          for (const op of operations) {
+            await OutboxManager.enqueue(tx, {
+              operationId: op.operation_id,
+              operationType: op.type,
+              payload: op.payload,
+            });
+          }
         });
+      } else if (typeof (db as any).runAsync === 'function') {
+        await db.runAsync('BEGIN TRANSACTION');
+        try {
+          for (const op of operations) {
+            await OutboxManager.enqueue(db, {
+              operationId: op.operation_id,
+              operationType: op.type,
+              payload: op.payload,
+            });
+          }
+          await db.runAsync('COMMIT');
+        } catch (e) {
+          await db.runAsync('ROLLBACK');
+          throw e;
+        }
+      } else {
+        for (const op of operations) {
+          await OutboxManager.enqueue(db, {
+            operationId: op.operation_id,
+            operationType: op.type,
+            payload: op.payload,
+          });
+        }
       }
 
       // Execute push
       const pushResult = await SyncService.pushPending(db);
 
-      // Record migration status
-      await OutboxManager.setMeta(db, 'v1_migration_completed', 'true');
-      await OutboxManager.setMeta(db, 'v1_migration_timestamp', new Date().toISOString());
+      const isSuccessful =
+        pushResult.failed === 0 &&
+        (operations.length === 0 || pushResult.pushed === operations.length);
+
+      // Record migration status ONLY when all required operations are successfully accepted
+      if (isSuccessful) {
+        await OutboxManager.setMeta(db, 'v1_migration_completed', 'true');
+        await OutboxManager.setMeta(db, 'v1_migration_timestamp', new Date().toISOString());
+      }
 
       return {
         borrowersCount: extracted.borrowers.length,
         loansCount: extracted.loans.length,
         transactionsCount: extracted.transactions.length,
         pushedCount: pushResult.pushed,
-        success: pushResult.failed === 0,
+        success: isSuccessful,
+        error: isSuccessful
+          ? undefined
+          : (pushResult.failed > 0
+              ? `${pushResult.failed} operations failed to push to cloud`
+              : 'Cloud push incomplete or authentication required'),
       };
     } catch (err: any) {
       return {

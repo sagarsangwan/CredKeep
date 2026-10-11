@@ -187,6 +187,15 @@ def record_collection(
         # Idempotency check
         existing = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
         if existing:
+            if (
+                str(existing.loan.id) != str(loan.id) or
+                existing.amount_paise != payment_amount or
+                str(existing.effective_date) != str(effective_date_str) or
+                existing.transaction_type != 'COLLECTION'
+            ):
+                raise ValueError(
+                    f"Idempotency conflict: operation_id {operation_id} already exists with different payment attributes."
+                )
             return {'status': 'ALREADY_EXISTS', 'transaction': existing}
 
         try:
@@ -197,6 +206,15 @@ def record_collection(
                 # Recheck idempotency under lock to prevent concurrent duplicates from double-processing
                 existing_locked = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
                 if existing_locked:
+                    if (
+                        str(existing_locked.loan.id) != str(loan.id) or
+                        existing_locked.amount_paise != payment_amount or
+                        str(existing_locked.effective_date) != str(effective_date_str) or
+                        existing_locked.transaction_type != 'COLLECTION'
+                    ):
+                        raise ValueError(
+                            f"Idempotency conflict: operation_id {operation_id} already exists with different payment attributes."
+                        )
                     return {'status': 'ALREADY_EXISTS', 'transaction': existing_locked}
 
                 # Extend schedule for bullet loans bounded by server clock

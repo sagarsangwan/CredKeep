@@ -144,6 +144,26 @@ describe('V1DataExtractor', () => {
     expect(OutboxManager.setMeta).toHaveBeenCalledWith(mockDb, 'v1_migration_completed', 'true');
   });
 
+  it('does not mark migration completed if cloud push reports failures', async () => {
+    (SyncService.pushPending as jest.Mock).mockResolvedValueOnce({ pushed: 1, failed: 2 });
+
+    const summary = await V1DataExtractor.migrateToCloud(mockDb);
+    expect(summary.success).toBe(false);
+    expect(summary.pushedCount).toBe(1);
+    expect(await V1DataExtractor.isMigrationCompleted(mockDb)).toBe(false);
+    expect(OutboxManager.setMeta).not.toHaveBeenCalledWith(mockDb, 'v1_migration_completed', 'true');
+  });
+
+  it('does not mark migration completed if push is skipped due to lack of authentication', async () => {
+    (SyncService.pushPending as jest.Mock).mockResolvedValueOnce({ pushed: 0, failed: 0 });
+
+    const summary = await V1DataExtractor.migrateToCloud(mockDb);
+    expect(summary.success).toBe(false);
+    expect(summary.pushedCount).toBe(0);
+    expect(await V1DataExtractor.isMigrationCompleted(mockDb)).toBe(false);
+    expect(OutboxManager.setMeta).not.toHaveBeenCalledWith(mockDb, 'v1_migration_completed', 'true');
+  });
+
   it('checks migration completion status', async () => {
     expect(await V1DataExtractor.isMigrationCompleted(mockDb)).toBe(false);
 
