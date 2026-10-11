@@ -166,9 +166,22 @@ class SyncPushView(APIView):
                         if req_loan_id and req_loan_id != str(existing_tx.loan.id):
                             has_conflict = True
                             conflict_reason = f"Idempotency conflict: loan_id {req_loan_id} does not match existing transaction loan_id {existing_tx.loan.id}."
-                        if req_date and req_date != str(existing_tx.effective_date):
-                            has_conflict = True
-                            conflict_reason = f"Idempotency conflict: effective_date {req_date} does not match existing transaction date {existing_tx.effective_date}."
+                        orig_req_date = None
+                        if existing_log and existing_log.request_payload and isinstance(existing_log.request_payload, dict):
+                            orig_req_date = str(existing_log.request_payload.get('effective_date') or existing_log.request_payload.get('timestamp') or '')
+                            if 'T' in orig_req_date:
+                                orig_req_date = orig_req_date.split('T')[0]
+
+                        if orig_req_date:
+                            if req_date != orig_req_date:
+                                has_conflict = True
+                                conflict_reason = f"Idempotency conflict: effective_date {req_date} does not match original requested date {orig_req_date}."
+                        elif req_date and req_date != str(existing_tx.effective_date):
+                            # Future-dated penalty waivers are clamped to server date on creation;
+                            # do not reject an identical retry with the original future date.
+                            if not (existing_tx.transaction_type == 'REVERSAL' and req_date > str(existing_tx.effective_date)):
+                                has_conflict = True
+                                conflict_reason = f"Idempotency conflict: effective_date {req_date} does not match existing transaction date {existing_tx.effective_date}."
 
                         if existing_tx.transaction_type == 'COLLECTION':
                             raw_method = payload.get('payment_method') or op.get('payment_method')
@@ -213,6 +226,7 @@ class SyncPushView(APIView):
                                     conflict_reason = f"Idempotency conflict: original requested waiver was {orig_req_amount} paise, retry requested {raw_req_amount} paise."
 
                     # 4. Non-transaction payload verification against persisted request_payload
+                    orig_p = None
                     if not has_conflict and existing_log.request_payload and isinstance(existing_log.request_payload, dict):
                         orig_p = existing_log.request_payload
                         if op_type == 'create_borrower':
@@ -267,12 +281,13 @@ class SyncPushView(APIView):
                             if payload.get('installment_number') is not None and int(payload.get('installment_number')) != existing_mod.kist.installment_number:
                                 has_conflict = True
                                 conflict_reason = "Idempotency conflict: modify_schedule installment_number changed."
-                            if payload.get('accrued_penalty_action') and payload.get('accrued_penalty_action') != existing_mod.accrued_penalty_action:
-                                has_conflict = True
-                                conflict_reason = "Idempotency conflict: modify_schedule accrued_penalty_action changed."
-                            if payload.get('waived_penalty_paise') is not None and payload.get('waived_penalty_paise') != existing_mod.waived_penalty_paise:
-                                has_conflict = True
-                                conflict_reason = "Idempotency conflict: modify_schedule waived_penalty_paise changed."
+                            if not orig_p:
+                                if payload.get('accrued_penalty_action') and payload.get('accrued_penalty_action') != existing_mod.accrued_penalty_action:
+                                    has_conflict = True
+                                    conflict_reason = "Idempotency conflict: modify_schedule accrued_penalty_action changed."
+                                if existing_mod.accrued_penalty_action != 'WAIVE' and payload.get('waived_penalty_paise') is not None and payload.get('waived_penalty_paise') != existing_mod.waived_penalty_paise:
+                                    has_conflict = True
+                                    conflict_reason = "Idempotency conflict: modify_schedule waived_penalty_paise changed."
 
                     if has_conflict:
                         results.append({

@@ -2688,6 +2688,234 @@ def test_sync_push_modify_schedule_retry_changed_attributes_rejected(api_client,
     assert 'Idempotency conflict' in res_changed_action.data['results'][0]['error']
 
 
+@pytest.mark.django_db
+def test_sync_push_waive_penalty_future_date_clamped_retry_accepted(api_client, lender_setup):
+    from datetime import timedelta
+    from django.utils import timezone
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Clamped Retry', phone='9876543297')
+    loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    Kist.objects.create(
+        tenant=tenant, loan=loan, installment_number=1,
+        original_due_date='2026-01-01', effective_due_date='2026-01-01',
+        principal_component_paise=100000, markup_component_paise=10000,
+        total_due_paise=110000, status='PENDING'
+    )
+    LedgerTx.objects.create(
+        tenant=tenant, loan=loan, operation_id=uuid.uuid4(),
+        transaction_type='PENALTY_ASSESSMENT', amount_paise=500,
+        effective_date='2026-01-02'
+    )
+
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    today = timezone.now().date()
+    future_date = today + timedelta(days=30)
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 500,
+                    'effective_date': str(future_date),
+                    'reason': 'Future date waiver'
+                }
+            }
+        ]
+    }
+
+    # 1. Initial waiver push: server accepts and clamps transaction effective_date to server today
+    res1 = api_client.post(url, payload, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    tx = LedgerTx.objects.get(tenant=tenant, operation_id=op_id)
+    assert str(tx.effective_date) == str(today)
+
+    # 2. Identical retry with original future date -> must return ACCEPTED (not falsely rejected due to clamping)
+    res_retry = api_client.post(url, payload, format='json')
+    assert res_retry.status_code == 200
+    assert res_retry.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 3. Retry with changed future date -> must return REJECTED
+    changed_future = today + timedelta(days=60)
+    res_changed = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 500,
+                    'effective_date': str(changed_future),
+                    'reason': 'Future date waiver'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_changed.status_code == 200
+    assert res_changed.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_changed.data['results'][0]['error']
+
+
+@pytest.mark.django_db
+def test_sync_push_modify_schedule_waiver_retry_capped_or_zero_accepted(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Mod Waive Retry', phone='9876543298')
+    loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=2, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    k1 = Kist.objects.create(
+        tenant=tenant, loan=loan, installment_number=1,
+        original_due_date='2026-01-01', effective_due_date='2026-01-01',
+        principal_component_paise=50000, markup_component_paise=5000,
+        total_due_paise=55000, status='PENDING'
+    )
+    Kist.objects.create(
+        tenant=tenant, loan=loan, installment_number=2,
+        original_due_date='2026-02-01', effective_due_date='2026-02-01',
+        principal_component_paise=50000, markup_component_paise=5000,
+        total_due_paise=55000, status='PENDING'
+    )
+    # 500 paise penalty assessed
+    LedgerTx.objects.create(
+        tenant=tenant, loan=loan, operation_id=uuid.uuid4(),
+        transaction_type='PENALTY_ASSESSMENT', amount_paise=500,
+        effective_date='2026-01-02'
+    )
+
+    url = reverse('sync-push')
+    mod_op_id = str(uuid.uuid4())
+    # Client requests WAIVE with waived_penalty_paise=0 (meaning waive full accrued penalty)
+    payload_waive_zero = {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-01-15',
+                    'accrued_penalty_action': 'WAIVE',
+                    'waived_penalty_paise': 0
+                }
+            }
+        ]
+    }
+
+    # 1. Initial push: succeeds, ScheduleModification records actual_waived=500
+    res1 = api_client.post(url, payload_waive_zero, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    mod = ScheduleModification.objects.get(tenant=tenant, operation_id=mod_op_id)
+    assert mod.waived_penalty_paise > 0
+
+    # 2. Identical retry with original requested waived_penalty_paise=0 -> must return ACCEPTED
+    res_retry = api_client.post(url, payload_waive_zero, format='json')
+    assert res_retry.status_code == 200
+    assert res_retry.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 3. Changed retry with waived_penalty_paise=200 -> must return REJECTED
+    res_changed = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': mod_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-01-15',
+                    'accrued_penalty_action': 'WAIVE',
+                    'waived_penalty_paise': 200
+                }
+            }
+        ]
+    }, format='json')
+    assert res_changed.status_code == 200
+    assert res_changed.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_changed.data['results'][0]['error']
+
+    # 4. Another loan with capped excess waiver (requested 50,000,000 paise exceeding total outstanding)
+    b2 = Borrower.objects.create(tenant=tenant, name='Borrower Capped Waive', phone='9876543299')
+    loan2 = LoanAccount.objects.create(
+        tenant=tenant, borrower=b2, product_type='instalment',
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    Kist.objects.create(
+        tenant=tenant, loan=loan2, installment_number=1,
+        original_due_date='2026-01-01', effective_due_date='2026-01-01',
+        principal_component_paise=100000, markup_component_paise=10000,
+        total_due_paise=110000, status='PENDING'
+    )
+    LedgerTx.objects.create(
+        tenant=tenant, loan=loan2, operation_id=uuid.uuid4(),
+        transaction_type='PENALTY_ASSESSMENT', amount_paise=500,
+        effective_date='2026-01-02'
+    )
+
+    capped_op_id = str(uuid.uuid4())
+    payload_capped = {
+        'operations': [
+            {
+                'operation_id': capped_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan2.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-01-20',
+                    'accrued_penalty_action': 'CAP',
+                    'waived_penalty_paise': 50000000
+                }
+            }
+        ]
+    }
+    res_cap1 = api_client.post(url, payload_capped, format='json')
+    assert res_cap1.status_code == 200
+    assert res_cap1.data['results'][0]['status'] == 'ACCEPTED'
+
+    mod2 = ScheduleModification.objects.get(tenant=tenant, operation_id=capped_op_id)
+    assert mod2.waived_penalty_paise < 50000000  # Capped to actual outstanding penalty
+    assert mod2.waived_penalty_paise > 0
+
+    # Identical retry with original requested 50,000,000 paise -> ACCEPTED
+    res_cap_retry = api_client.post(url, payload_capped, format='json')
+    assert res_cap_retry.status_code == 200
+    assert res_cap_retry.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Changed retry with 40,000,000 paise -> REJECTED
+    res_cap_changed = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': capped_op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan2.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-01-20',
+                    'accrued_penalty_action': 'CAP',
+                    'waived_penalty_paise': 40000000
+                }
+            }
+        ]
+    }, format='json')
+    assert res_cap_changed.status_code == 200
+    assert res_cap_changed.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_cap_changed.data['results'][0]['error']
+
+
+
 
 
 
