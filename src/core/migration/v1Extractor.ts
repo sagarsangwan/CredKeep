@@ -147,73 +147,79 @@ export class V1DataExtractor {
       const extracted = await this.extract(db);
       const operations = this.buildPushPayloads(extracted);
 
-      // Re-key local transaction rows to deterministic UUIDs so local DB matches server operation ID
-      for (const txRecord of extracted.transactions) {
-        const opId = txRecord.operation_id && isUuid(txRecord.operation_id)
-          ? txRecord.operation_id
-          : deterministicUuid(`mig-tx-${txRecord.id || txRecord.operation_id || `${txRecord.loan_id}-${txRecord.effective_date}-${txRecord.amount_paise}`}`);
+      // Re-key local transaction rows to deterministic UUIDs and enqueue into sync_outbox atomically
+      const atomicMigrationWork = async (tx: any) => {
+        const txsToRekey: { opId: string; legacyId: string; legacyOpId: string }[] = [];
+        for (const txRecord of extracted.transactions) {
+          const opId = txRecord.operation_id && isUuid(txRecord.operation_id)
+            ? txRecord.operation_id
+            : deterministicUuid(`mig-tx-${txRecord.id || txRecord.operation_id || `${txRecord.loan_id}-${txRecord.effective_date}-${txRecord.amount_paise}`}`);
 
-        if (txRecord.operation_id !== opId || txRecord.id !== opId) {
+          if (txRecord.operation_id !== opId || txRecord.id !== opId) {
+            txsToRekey.push({
+              opId,
+              legacyId: txRecord.id,
+              legacyOpId: txRecord.operation_id,
+            });
+          }
+        }
+
+        if (txsToRekey.length > 0) {
+          if (typeof tx.execAsync === 'function') {
+            await tx.execAsync('DROP TRIGGER IF EXISTS prevent_transactions_update;');
+          } else if (typeof tx.runAsync === 'function') {
+            await tx.runAsync('DROP TRIGGER IF EXISTS prevent_transactions_update;');
+          }
+
           try {
-            if (typeof (db as any).execAsync === 'function') {
-              await (db as any).execAsync('DROP TRIGGER IF EXISTS prevent_transactions_update;');
+            if (typeof tx.runAsync === 'function') {
+              for (const item of txsToRekey) {
+                await tx.runAsync(
+                  `UPDATE transactions SET id = ?, operation_id = ? WHERE (id = ? OR operation_id = ?)`,
+                  [item.opId, item.opId, item.legacyId, item.legacyOpId]
+                );
+              }
             }
-            if (typeof (db as any).runAsync === 'function') {
-              await (db as any).runAsync(
-                `UPDATE transactions SET id = ?, operation_id = ? WHERE (id = ? OR operation_id = ?)`,
-                [opId, opId, txRecord.id, txRecord.operation_id]
-              );
-            }
-          } catch {
-            // Ignore if table/trigger not present in test mock
           } finally {
-            if (typeof (db as any).execAsync === 'function') {
-              await (db as any).execAsync(`
-                CREATE TRIGGER IF NOT EXISTS prevent_transactions_update
-                BEFORE UPDATE ON transactions
-                BEGIN
-                  SELECT RAISE(ABORT, 'Transactions table is append-only: updates are prohibited');
-                END;
-              `);
+            // Restore append-only trigger within transaction
+            const restoreTriggerSql = `
+              CREATE TRIGGER IF NOT EXISTS prevent_transactions_update
+              BEFORE UPDATE ON transactions
+              BEGIN
+                SELECT RAISE(ABORT, 'Transactions table is append-only: updates are prohibited');
+              END;
+            `;
+            if (typeof tx.execAsync === 'function') {
+              await tx.execAsync(restoreTriggerSql);
+            } else if (typeof tx.runAsync === 'function') {
+              await tx.runAsync(restoreTriggerSql);
             }
           }
         }
-      }
 
-      // Enqueue all extracted operations atomically
+        // Atomically enqueue all extracted operations
+        for (const op of operations) {
+          await OutboxManager.enqueue(tx, {
+            operationId: op.operation_id,
+            operationType: op.type,
+            payload: op.payload,
+          });
+        }
+      };
+
       if (typeof (db as any).withExclusiveTransactionAsync === 'function') {
-        await (db as any).withExclusiveTransactionAsync(async (tx: any) => {
-          for (const op of operations) {
-            await OutboxManager.enqueue(tx, {
-              operationId: op.operation_id,
-              operationType: op.type,
-              payload: op.payload,
-            });
-          }
-        });
+        await (db as any).withExclusiveTransactionAsync(atomicMigrationWork);
       } else if (typeof (db as any).runAsync === 'function') {
-        await db.runAsync('BEGIN TRANSACTION');
+        await db.runAsync('BEGIN IMMEDIATE');
         try {
-          for (const op of operations) {
-            await OutboxManager.enqueue(db, {
-              operationId: op.operation_id,
-              operationType: op.type,
-              payload: op.payload,
-            });
-          }
+          await atomicMigrationWork(db);
           await db.runAsync('COMMIT');
         } catch (e) {
           await db.runAsync('ROLLBACK');
           throw e;
         }
       } else {
-        for (const op of operations) {
-          await OutboxManager.enqueue(db, {
-            operationId: op.operation_id,
-            operationType: op.type,
-            payload: op.payload,
-          });
-        }
+        await atomicMigrationWork(db);
       }
 
       // Execute push

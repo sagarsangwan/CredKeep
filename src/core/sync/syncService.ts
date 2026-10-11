@@ -345,6 +345,21 @@ export class SyncService {
           );
         } else if (existing.transaction_type === 'COLLECTION' && payload.transaction_type === 'COLLECTION') {
           // Reconcile authoritative server allocations via append-only adjustment transaction, respecting trigger
+          const matchingOpIds = Array.from(
+            new Set([payload.operation_id, existing.operation_id, existing.id].filter(Boolean))
+          );
+          const opConditions = matchingOpIds.map(() => `(
+            operation_id = ?
+            OR id = ?
+            OR instr(operation_id, 'realloc::' || ? || '::') = 1
+            OR instr(operation_id, 'reconcile::' || ? || '::') = 1
+          )`).join(' OR ');
+
+          const queryParams: any[] = [payload.loan_id];
+          for (const opId of matchingOpIds) {
+            queryParams.push(opId, opId, opId, opId);
+          }
+
           const netAllocRow = await tx.getFirstAsync<{
             netPrincipal: number;
             netMarkup: number;
@@ -358,14 +373,8 @@ export class SyncService {
                COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
              FROM transactions
              WHERE loan_id = ?
-               AND (
-                 operation_id = ?
-
-                 OR instr(operation_id, 'realloc::' || ? || '::') = 1
-
-                 OR instr(operation_id, 'reconcile::' || ? || '::') = 1
-               )`,
-            [payload.loan_id, payload.operation_id, payload.operation_id, payload.operation_id]
+               AND (${opConditions})`,
+            queryParams
           );
 
           const currentPrincipal = netAllocRow?.netPrincipal ?? (existing.allocated_principal_paise || 0);

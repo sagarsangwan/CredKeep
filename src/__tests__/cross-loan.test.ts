@@ -2549,4 +2549,142 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(childNet.principal).toBe(30000);
     expect(childNet.markup).toBe(0);
   });
+
+  it('direct reconciliation of an unrekeyed legacy receipt strictly conserves allocations without doubling', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-unrekeyed-1';
+    const loanId = 'loan-unrekeyed-1';
+    const legacyTxId = 'legacy-tx-id-1';
+    const legacyOpId = 'legacy-op-id-1';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Unrekeyed Borrower', '9876543119', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 5000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-unrekeyed-1', ?, 1, '2026-01-01', '2026-01-01', 5000, 0, 5000, 0, 0, 'PENDING')`, [loanId]);
+    // Insert unrekeyed legacy receipt
+    await db.runAsync(`INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at) VALUES (?, ?, ?, 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')`, [legacyTxId, legacyOpId, loanId]);
+
+    // Calculate deterministic UUID that server would use for this legacy transaction
+    const deterministicServerOpId = V1DataExtractor.buildPushPayloads({
+      borrowers: [],
+      loans: [],
+      transactions: [{
+        id: legacyTxId,
+        operation_id: legacyOpId,
+        loan_id: loanId,
+        transaction_type: 'COLLECTION',
+        amount_paise: 1000,
+        payment_method: 'CASH',
+        is_cash: 1,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02'
+      }]
+    })[0].operation_id;
+
+    // Server delta sends identical 1000 paise principal allocation with server deterministic UUID
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'server-tx-uuid-1',
+        operation_id: deterministicServerOpId,
+        loan_id: loanId,
+        transaction_type: 'COLLECTION',
+        amount_paise: 1000,
+        allocated_principal_paise: 1000,
+        allocated_markup_paise: 0,
+        allocated_penalty_paise: 0,
+        unallocated_surplus_paise: 0,
+        forgiven_penalty_paise: 0,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02T00:00:00Z',
+      }
+    });
+
+    // Invariant: Total receipts must be EXACTLY 1 (1000 paise) and principal MUST BE 1000 (NOT doubled to 2000!)
+    const check1 = await db.getFirstAsync<any>(
+      `SELECT COUNT(*) as count, SUM(amount_paise) as receipts, SUM(allocated_principal_paise) as principal FROM transactions WHERE loan_id = ?`,
+      [loanId]
+    );
+    expect(check1.count).toBe(1);
+    expect(check1.receipts).toBe(1000);
+    expect(check1.principal).toBe(1000);
+
+    // Now simulate authoritative server rebalancing: 700 principal, 300 markup
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'server-tx-uuid-1',
+        operation_id: deterministicServerOpId,
+        loan_id: loanId,
+        transaction_type: 'COLLECTION',
+        amount_paise: 1000,
+        allocated_principal_paise: 700,
+        allocated_markup_paise: 300,
+        allocated_penalty_paise: 0,
+        unallocated_surplus_paise: 0,
+        forgiven_penalty_paise: 0,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02T00:00:00Z',
+      }
+    });
+
+    // Invariant: Total receipt amount remains strictly 1000 paise, net principal is 700, net markup is 300
+    const check2 = await db.getFirstAsync<any>(
+      `SELECT COUNT(*) as count, SUM(amount_paise) as receipts, SUM(allocated_principal_paise) as principal, SUM(allocated_markup_paise) as markup FROM transactions WHERE loan_id = ?`,
+      [loanId]
+    );
+    expect(check2.count).toBe(2); // 1 legacy collection + 1 append-only reconciliation adjustment
+    expect(check2.receipts).toBe(1000);
+    expect(check2.principal).toBe(700);
+    expect(check2.markup).toBe(300);
+  });
+
+  it('failed-rekey rollback leaves database unchanged and preserves append-only trigger', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-rollback-1';
+    const loanId = 'loan-rollback-1';
+    const legacyTxId = 'legacy-fail-tx';
+    const legacyOpId = 'legacy-fail-op';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Rollback Borrower', '9876543120', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-rollback-1', ?, 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`, [loanId]);
+    await db.runAsync(`INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at) VALUES (?, ?, ?, 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')`, [legacyTxId, legacyOpId, loanId]);
+
+    // Install a trigger on sync_outbox that forces an abort during enqueueing inside the migration transaction
+    await db.execAsync(`
+      CREATE TRIGGER force_migration_failure
+      BEFORE INSERT ON sync_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'Simulated disk failure during outbox enqueueing');
+      END;
+    `);
+
+    // Run migration
+    const result = await V1DataExtractor.migrateToCloud(db);
+
+    // Invariant 1: migrateToCloud reports failure and does NOT succeed
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Simulated disk failure/);
+
+    // Invariant 2: Database rolled back atomically; transaction still has its original legacy ID & op ID
+    const txAfter = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE loan_id = ?`, [loanId]);
+    expect(txAfter.id).toBe(legacyTxId);
+    expect(txAfter.operation_id).toBe(legacyOpId);
+
+    // Invariant 3: Outbox has 0 rows (atomic rollback)
+    const outboxCount = await db.getFirstAsync<any>(`SELECT COUNT(*) as count FROM sync_outbox`);
+    expect(outboxCount.count).toBe(0);
+
+    // Clean up failure trigger
+    await db.execAsync(`DROP TRIGGER IF EXISTS force_migration_failure;`);
+
+    // Invariant 4: Append-only trigger remains active and prohibits updates on transactions table
+    await expect(
+      db.runAsync(`UPDATE transactions SET amount_paise = 9999 WHERE id = ?`, [legacyTxId])
+    ).rejects.toThrow(/Transactions table is append-only: updates are prohibited/);
+  });
 });
