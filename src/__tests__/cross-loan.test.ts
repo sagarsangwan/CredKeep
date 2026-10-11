@@ -185,6 +185,9 @@ describe('Cross-Loan Isolation', () => {
         if (query.includes('FROM loans WHERE id = ?')) {
           return state.loans.find(l => l.id === params[0]) || null;
         }
+        if (query.includes('FROM sync_outbox WHERE operation_id = ?') || query.includes('sync_outbox WHERE operation_id = ?')) {
+          return state.outbox.find(o => o.operation_id === params[0]) || null;
+        }
         if (query.includes('operation_id = ?')) {
           return state.transactions.find(t => t.operation_id === params[0]) || null;
         }
@@ -2172,5 +2175,95 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     // Verify loan status remains WRITTEN_OFF and was not reset to ACTIVE or SETTLED
     const loan = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-woff'`);
     expect(loan?.status).toBe('WRITTEN_OFF');
+  });
+
+  it('discarding a NEEDS_REVIEW collection atomically reverses the transaction and restores repayment schedules to zero', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-disc', 'Discard Borrower', '9876543115', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-disc', 'b-disc', 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-disc-1', 'loan-disc', 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`);
+
+    // Record a 500-paise cash payment
+    const repo = new TransactionRepository(db);
+    const opId = 'op-disc-500';
+    await repo.recordCashPayment('loan-disc', 500 as Paise, opId, '2026-01-02');
+
+    // Verify 500 paise is recorded in schedule and transaction
+    let kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-disc-1'`);
+    expect(kist.principal_paid_paise).toBe(500);
+
+    // Mark enqueued outbox item as NEEDS_REVIEW
+    await db.runAsync(
+      `UPDATE sync_outbox SET status = 'NEEDS_REVIEW' WHERE operation_id = ?`,
+      [opId]
+    );
+
+    // User or conflict handler chooses DISCARD
+    await OutboxManager.resolveNeedsReview(db, opId, 'DISCARD');
+
+    // 1. Verify outbox status is REJECTED
+    const ob = await db.getFirstAsync<any>(`SELECT * FROM sync_outbox WHERE operation_id = ?`, [opId]);
+    expect(ob.status).toBe('REJECTED');
+
+    // 2. Verify compensating REVERSAL transaction was created
+    const reversalTx = await db.getFirstAsync<any>(
+      `SELECT * FROM transactions WHERE operation_id = ?`,
+      [`reversal-${opId}`]
+    );
+    expect(reversalTx).not.toBeNull();
+    expect(reversalTx.transaction_type).toBe('REVERSAL');
+    expect(reversalTx.amount_paise).toBe(-500);
+
+    // 3. Verify net collection amount on loan is 0
+    const netTx = await db.getFirstAsync<any>(
+      `SELECT SUM(amount_paise) as totalAmount, SUM(allocated_principal_paise) as totalPrincipal FROM transactions WHERE loan_id = 'loan-disc' AND transaction_type IN ('COLLECTION', 'REVERSAL')`
+    );
+    expect(netTx.totalAmount).toBe(0);
+    expect(netTx.totalPrincipal).toBe(0);
+
+    // 4. Verify schedule paid amounts are restored to 0
+    kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-disc-1'`);
+    expect(kist.principal_paid_paise).toBe(0);
+    expect(kist.status).toBe('PENDING');
+  });
+
+  it('migration retry resumes without UNIQUE constraint failure on sync_outbox.operation_id', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-mig', 'Mig Borrower', '9876543116', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-mig', 'b-mig', 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-mig-1', 'loan-mig', 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`);
+    await db.runAsync(`INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at) VALUES ('tx-mig-1', 'op-mig-1', 'loan-mig', 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')`);
+
+    // First enqueue of the collection operation
+    const opId = 'op-mig-1';
+    const rec1 = await OutboxManager.enqueue(db, {
+      operationId: opId,
+      operationType: 'record_collection',
+      payload: { loan_id: 'loan-mig', amount_paise: 1000 }
+    });
+    expect(rec1.operation_id).toBe(opId);
+
+    // Retry / re-enqueue MUST NOT throw UNIQUE constraint error
+    let error: any = null;
+    let rec2: any = null;
+    try {
+      rec2 = await OutboxManager.enqueue(db, {
+        operationId: opId,
+        operationType: 'record_collection',
+        payload: { loan_id: 'loan-mig', amount_paise: 1000 }
+      });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeNull();
+    expect(rec2.operation_id).toBe(opId);
+
+    const outboxCount = await db.getFirstAsync<any>(
+      `SELECT COUNT(*) as cnt FROM sync_outbox WHERE operation_id = ?`,
+      [opId]
+    );
+    expect(outboxCount.cnt).toBe(1);
   });
 });

@@ -471,8 +471,8 @@ describe('SyncService & OutboxManager', () => {
     it('resolves NEEDS_REVIEW operations via OutboxManager.resolveNeedsReview', async () => {
       await OutboxManager.resolveNeedsReview(mockDb, 'op-conflict-1', 'DISCARD');
       expect(mockDb.runAsync).toHaveBeenCalledWith(
-        expect.stringContaining("UPDATE sync_outbox SET status = 'REJECTED'"),
-        ['op-conflict-1']
+        expect.stringContaining("UPDATE sync_outbox SET status = ?"),
+        ['REJECTED', 'Resolved: discarded by user', 'op-conflict-1']
       );
 
       await OutboxManager.resolveNeedsReview(mockDb, 'op-conflict-1', 'RETRY_PENDING');

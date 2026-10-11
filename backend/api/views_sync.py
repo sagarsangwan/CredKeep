@@ -127,25 +127,54 @@ class SyncPushView(APIView):
                 # Idempotency check against SyncLog
                 existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
                 if existing_log:
-                    # If an existing transaction exists, verify attribute idempotency against incoming payload
+                    has_conflict = False
+                    conflict_reason = None
+
+                    # 1. Operation type validation
+                    if existing_log.operation_type and op_type and existing_log.operation_type != op_type:
+                        has_conflict = True
+                        conflict_reason = f"Idempotency conflict: operation_id {operation_id} was already processed with operation_type '{existing_log.operation_type}', cannot replay as '{op_type}'."
+
+                    # 2. Transaction existence and classification validation
                     existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
-                    if existing_tx:
+                    if op_type == 'record_collection':
+                        if not existing_tx:
+                            has_conflict = True
+                            conflict_reason = f"Idempotency conflict: operation_id {operation_id} was already processed without creating a collection transaction."
+                        elif existing_tx.transaction_type != 'COLLECTION':
+                            has_conflict = True
+                            conflict_reason = f"Idempotency conflict: operation_id {operation_id} was already processed as a {existing_tx.transaction_type} transaction, cannot replay as record_collection."
+                    elif op_type == 'waive_penalty':
+                        if not existing_tx:
+                            has_conflict = True
+                            conflict_reason = f"Idempotency conflict: operation_id {operation_id} was already processed without creating a penalty waiver transaction."
+                        elif existing_tx.transaction_type != 'REVERSAL':
+                            has_conflict = True
+                            conflict_reason = f"Idempotency conflict: operation_id {operation_id} was already processed as a {existing_tx.transaction_type} transaction, cannot replay as waive_penalty."
+                    elif existing_tx and op_type in ('create_borrower', 'create_loan', 'postpone_due_date'):
+                        has_conflict = True
+                        conflict_reason = f"Idempotency conflict: operation_id {operation_id} was already processed as a transaction, cannot replay as '{op_type}'."
+
+                    # 3. Transaction attribute verification
+                    if existing_tx and not has_conflict:
                         req_loan_id = str(payload.get('loan_id') or op.get('loan_id') or '')
                         raw_req_amount = payload.get('amount_paise') if 'amount_paise' in payload else op.get('amount_paise')
                         req_date = str(payload.get('effective_date') or op.get('timestamp') or '')
                         if 'T' in req_date:
                             req_date = req_date.split('T')[0]
 
-                        has_conflict = False
                         if req_loan_id and req_loan_id != str(existing_tx.loan.id):
                             has_conflict = True
+                            conflict_reason = f"Idempotency conflict: loan_id {req_loan_id} does not match existing transaction loan_id {existing_tx.loan.id}."
                         if req_date and req_date != str(existing_tx.effective_date):
                             has_conflict = True
+                            conflict_reason = f"Idempotency conflict: effective_date {req_date} does not match existing transaction date {existing_tx.effective_date}."
 
                         if existing_tx.transaction_type == 'COLLECTION':
                             raw_method = payload.get('payment_method') or op.get('payment_method')
                             if raw_method is not None and not isinstance(raw_method, str):
                                 has_conflict = True
+                                conflict_reason = "Idempotency conflict: payment_method must be a string."
                             else:
                                 req_method = (raw_method or 'CASH').upper()
                                 req_is_cash = payload.get('is_cash', req_method == 'CASH')
@@ -153,34 +182,68 @@ class SyncPushView(APIView):
                                     req_is_cash = req_method == 'CASH'
                                 if req_method != existing_tx.payment_method or bool(req_is_cash) != bool(existing_tx.is_cash):
                                     has_conflict = True
+                                    conflict_reason = "Idempotency conflict: payment method or cash classification changed."
 
                             if raw_req_amount is not None:
                                 if isinstance(raw_req_amount, bool) or not isinstance(raw_req_amount, int):
                                     has_conflict = True
+                                    conflict_reason = "Idempotency conflict: amount_paise must be an integer."
                                 elif raw_req_amount != existing_tx.amount_paise:
                                     has_conflict = True
+                                    conflict_reason = f"Idempotency conflict: amount {raw_req_amount} does not match existing transaction amount {existing_tx.amount_paise}."
 
                         elif existing_tx.transaction_type == 'REVERSAL':
-                            # For penalty waivers
-                            outbox_rec = SyncOutbox.objects.filter(tenant=tenant, record_id=existing_tx.id).first()
-                            stored_req_amount = (
-                                outbox_rec.payload.get('requested_amount_paise', existing_tx.forgiven_penalty_paise)
-                                if outbox_rec and isinstance(outbox_rec.payload, dict)
-                                else existing_tx.forgiven_penalty_paise
-                            )
+                            # For penalty waivers: strictly require the original requested amount
+                            orig_req_amount = None
+                            if existing_log.request_payload and isinstance(existing_log.request_payload, dict):
+                                orig_req_amount = existing_log.request_payload.get('amount_paise')
+                            if orig_req_amount is None:
+                                outbox_rec = SyncOutbox.objects.filter(tenant=tenant, record_id=existing_tx.id).first()
+                                if outbox_rec and isinstance(outbox_rec.payload, dict) and 'requested_amount_paise' in outbox_rec.payload:
+                                    orig_req_amount = outbox_rec.payload.get('requested_amount_paise')
+                                else:
+                                    orig_req_amount = existing_tx.forgiven_penalty_paise
+
                             if raw_req_amount is not None:
                                 if isinstance(raw_req_amount, bool) or not isinstance(raw_req_amount, int):
                                     has_conflict = True
-                                elif raw_req_amount != stored_req_amount and raw_req_amount != existing_tx.forgiven_penalty_paise:
+                                    conflict_reason = "Idempotency conflict: amount_paise must be an integer."
+                                elif raw_req_amount != orig_req_amount:
                                     has_conflict = True
+                                    conflict_reason = f"Idempotency conflict: original requested waiver was {orig_req_amount} paise, retry requested {raw_req_amount} paise."
 
-                        if has_conflict:
-                            results.append({
-                                "operation_id": str(operation_id),
-                                "status": "REJECTED",
-                                "error": f"Idempotency conflict: operation_id {operation_id} was already processed with different attributes."
-                            })
-                            continue
+                    # 4. Non-transaction payload verification against persisted request_payload
+                    if not has_conflict and existing_log.request_payload and isinstance(existing_log.request_payload, dict):
+                        orig_p = existing_log.request_payload
+                        if op_type == 'create_borrower':
+                            if payload.get('phone') and str(payload.get('phone')) != str(orig_p.get('phone')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: borrower phone changed."
+                            if payload.get('name') and str(payload.get('name')) != str(orig_p.get('name')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: borrower name changed."
+                        elif op_type == 'create_loan':
+                            if payload.get('borrower_id') and str(payload.get('borrower_id')) != str(orig_p.get('borrower_id')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: loan borrower_id changed."
+                            if payload.get('principal_paise') and payload.get('principal_paise') != orig_p.get('principal_paise'):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: loan principal changed."
+                        elif op_type == 'postpone_due_date':
+                            if payload.get('loan_id') and str(payload.get('loan_id')) != str(orig_p.get('loan_id')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: postponement loan_id changed."
+                            if payload.get('revised_effective_due_date') and str(payload.get('revised_effective_due_date')) != str(orig_p.get('revised_effective_due_date')):
+                                has_conflict = True
+                                conflict_reason = "Idempotency conflict: revised_effective_due_date changed."
+
+                    if has_conflict:
+                        results.append({
+                            "operation_id": str(operation_id),
+                            "status": "REJECTED",
+                            "error": conflict_reason or f"Idempotency conflict: operation_id {operation_id} was already processed with different attributes."
+                        })
+                        continue
 
                     res_item = {
                         "operation_id": str(operation_id),
@@ -209,6 +272,8 @@ class SyncPushView(APIView):
                             tenant=tenant,
                             device=device,
                             operation_id=operation_id,
+                            operation_type=op_type or '',
+                            request_payload=payload if isinstance(payload, dict) else {},
                             status=res_status,
                             error_message=err_msg or ''
                         )
@@ -241,6 +306,8 @@ class SyncPushView(APIView):
                             tenant=tenant,
                             device=device,
                             operation_id=operation_id,
+                            operation_type=op_type or '',
+                            request_payload=payload if isinstance(payload, dict) else {},
                             status='REJECTED',
                             error_message=err_text
                         )

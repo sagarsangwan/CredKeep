@@ -296,6 +296,8 @@ class SyncLog(models.Model):
         related_name='sync_logs'
     )
     operation_id = models.UUIDField(db_index=True)
+    operation_type = models.CharField(max_length=64, blank=True, default='')
+    request_payload = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES)
     error_message = models.TextField(blank=True, default='')
     server_timestamp = models.DateTimeField(auto_now_add=True)

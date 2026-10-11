@@ -2375,6 +2375,173 @@ def test_sync_push_malformed_retry_returns_rejected_not_500(api_client, lender_s
     assert res2.data['results'][1]['status'] == 'ACCEPTED'
 
 
+@pytest.mark.django_db
+def test_sync_push_operation_id_reuse_across_incompatible_types_rejected(api_client, lender_setup):
+    user, test_tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    borrower = Borrower.objects.create(tenant=test_tenant, name="Borrower Type", phone="9988776611")
+    loan = LoanAccount.objects.create(
+        tenant=test_tenant, borrower=borrower,
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    url = reverse('sync-push')
+
+    # 1. Accepted create_borrower operation
+    borrower_op_id = str(uuid.uuid4())
+    res_b = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': borrower_op_id,
+                'type': 'create_borrower',
+                'payload': {
+                    'name': 'New Borrower',
+                    'phone': '9111222333'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_b.status_code == 200
+    assert res_b.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 2. Reusing borrower creation op_id for record_collection MUST be REJECTED
+    res_reuse = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': borrower_op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 5000,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_reuse.status_code == 200
+    assert res_reuse.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_reuse.data['results'][0]['error']
+
+    # 3. Assess penalty and waive penalty
+    LedgerTx.objects.create(
+        tenant=test_tenant, operation_id=uuid.uuid4(),
+        loan=loan, transaction_type='PENALTY_ASSESSMENT',
+        amount_paise=1000, effective_date='2026-01-01'
+    )
+    waiver_op_id = str(uuid.uuid4())
+    res_w = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': waiver_op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 500,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_w.status_code == 200
+    assert res_w.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 4. Reusing waiver op_id for record_collection MUST be REJECTED
+    res_reuse_w = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': waiver_op_id,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 500,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_reuse_w.status_code == 200
+    assert res_reuse_w.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_reuse_w.data['results'][0]['error']
+
+
+@pytest.mark.django_db
+def test_sync_push_waive_penalty_retry_changed_amount_rejected(api_client, lender_setup):
+    user, test_tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    borrower = Borrower.objects.create(tenant=test_tenant, name="Borrower Capped", phone="9988776622")
+    loan = LoanAccount.objects.create(
+        tenant=test_tenant, borrower=borrower,
+        principal_paise=100000, markup_factor=Decimal('0.10'),
+        term_months=1, due_day=1, status='ACTIVE', start_date='2026-01-01'
+    )
+    # Overdue penalty of 1000 paise
+    LedgerTx.objects.create(
+        tenant=test_tenant, operation_id=uuid.uuid4(),
+        loan=loan, transaction_type='PENALTY_ASSESSMENT',
+        amount_paise=1000, effective_date='2026-01-01'
+    )
+
+    url = reverse('sync-push')
+    waiver_op_id = str(uuid.uuid4())
+
+    # 1. Client requests 2000 paise waiver, but server caps it at 1000 paise
+    res1 = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': waiver_op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 2000,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }, format='json')
+    assert res1.status_code == 200
+    assert res1.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Check that forgiven_penalty_paise is 1000
+    tx = LedgerTx.objects.get(tenant=test_tenant, operation_id=waiver_op_id)
+    assert tx.forgiven_penalty_paise == 1000
+
+    # 2. Changed retry: Client now sends 1000 paise (instead of original 2000 paise requested)
+    res_changed = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': waiver_op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 1000,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_changed.status_code == 200
+    # Must be REJECTED as a conflict because requested amount changed
+    assert res_changed.data['results'][0]['status'] == 'REJECTED'
+    assert 'Idempotency conflict' in res_changed.data['results'][0]['error']
+
+    # 3. Identical retry: Client sends original 2000 paise -> ACCEPTED
+    res_identical = api_client.post(url, {
+        'operations': [
+            {
+                'operation_id': waiver_op_id,
+                'type': 'waive_penalty',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 2000,
+                    'effective_date': '2026-01-02'
+                }
+            }
+        ]
+    }, format='json')
+    assert res_identical.status_code == 200
+    assert res_identical.data['results'][0]['status'] == 'ACCEPTED'
+
+
 
 
 

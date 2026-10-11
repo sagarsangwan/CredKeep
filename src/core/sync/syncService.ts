@@ -2,7 +2,7 @@ import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { ApiClient } from '../api/client';
 import { AuthStore } from '../auth/authStore';
-import { OutboxManager } from './outbox';
+import { OutboxManager, registerOutboxRevertHandler } from './outbox';
 import { allocatePayment } from '../domain/allocation';
 import { Paise } from '../domain/money';
 
@@ -706,7 +706,7 @@ export class SyncService {
         ]
       );
 
-      await this.recalculateLoanSchedule(tx, origTx.loan_id);
+      await SyncService.recalculateLoanSchedule(tx, origTx.loan_id);
     });
   }
 
@@ -1022,3 +1022,5 @@ export class SyncService {
     }
   }
 }
+
+registerOutboxRevertHandler((db, opId, reason) => SyncService.revertRejectedPayment(db, opId, reason));

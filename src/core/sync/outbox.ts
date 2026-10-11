@@ -23,19 +23,38 @@ export type DatabaseHandle = {
   runAsync: (sql: string, ...params: any[]) => Promise<any>;
 };
 
+export type OutboxRevertHandler = (db: SQLiteDatabase, operationId: string, errorReason?: string) => Promise<void>;
+let _revertHandler: OutboxRevertHandler | null = null;
+
+export function registerOutboxRevertHandler(handler: OutboxRevertHandler): void {
+  _revertHandler = handler;
+}
+
 export class OutboxManager {
   static async enqueue(
     db: SQLiteDatabase | DatabaseHandle,
     params: EnqueueParams
   ): Promise<OutboxRecord> {
-    const id = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('outbox-' + Date.now() + '-' + Math.random().toString(36).substring(2));
     const operationId = params.operationId || (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('op-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+
+    const existing = typeof (db as any).getFirstAsync === 'function'
+      ? await (db as any).getFirstAsync(
+          `SELECT * FROM sync_outbox WHERE operation_id = ?`,
+          [operationId]
+        )
+      : null;
+    if (existing) {
+      return existing;
+    }
+
+    const id = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('outbox-' + Date.now() + '-' + Math.random().toString(36).substring(2));
     const createdAt = new Date().toISOString();
     const payloadStr = JSON.stringify(params.payload);
 
     await db.runAsync(
       `INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, error_message, created_at)
-       VALUES (?, ?, ?, ?, 'PENDING', NULL, ?)`,
+       VALUES (?, ?, ?, ?, 'PENDING', NULL, ?)
+       ON CONFLICT(operation_id) DO NOTHING`,
       [id, operationId, params.operationType, payloadStr, createdAt]
     );
 
@@ -98,10 +117,11 @@ export class OutboxManager {
     action: 'DISCARD' | 'RETRY_PENDING'
   ): Promise<void> {
     if (action === 'DISCARD') {
-      await db.runAsync(
-        `UPDATE sync_outbox SET status = 'REJECTED', error_message = 'Resolved: discarded by user' WHERE operation_id = ?`,
-        [operationId]
-      );
+      if (_revertHandler) {
+        await _revertHandler(db, operationId, 'Resolved: discarded by user');
+      } else {
+        await OutboxManager.markStatus(db, operationId, 'REJECTED', 'Resolved: discarded by user');
+      }
     } else if (action === 'RETRY_PENDING') {
       await db.runAsync(
         `UPDATE sync_outbox SET status = 'PENDING', error_message = NULL WHERE operation_id = ?`,
