@@ -1831,24 +1831,63 @@ def test_sync_push_invalid_payment_method_returns_terminal_rejected(api_client, 
     log2 = SyncLog.objects.filter(tenant=tenant, operation_id=op_id_bad).first()
     assert log2 is not None and log2.status == 'REJECTED'
 
-    # 3. None / null payment_method falls back gracefully to CASH
+    # 3. Disallowed CHEQUE and SYSTEM methods permanently rejected
+    for rejected_method in ('CHEQUE', 'SYSTEM'):
+        op_id_rej = str(uuid.uuid4())
+        res_rej = api_client.post(url, {
+            'operations': [{
+                'operation_id': op_id_rej,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 50000,
+                    'payment_method': rejected_method
+                }
+            }]
+        }, format='json')
+        assert res_rej.status_code == 200
+        assert res_rej.data['results'][0]['status'] == 'REJECTED'
+        log_rej = SyncLog.objects.filter(tenant=tenant, operation_id=op_id_rej).first()
+        assert log_rej is not None and log_rej.status == 'REJECTED'
+
+    # 4. Allowed methods: CASH, UPI, BANK_TRANSFER are accepted and persisted
+    for allowed_method in ('CASH', 'UPI', 'BANK_TRANSFER'):
+        op_id_ok = str(uuid.uuid4())
+        res_ok = api_client.post(url, {
+            'operations': [{
+                'operation_id': op_id_ok,
+                'type': 'record_collection',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'amount_paise': 1000,
+                    'payment_method': allowed_method
+                }
+            }]
+        }, format='json')
+        assert res_ok.status_code == 200
+        assert res_ok.data['results'][0]['status'] == 'ACCEPTED'
+        tx_ok = LedgerTx.objects.filter(loan=loan, operation_id=op_id_ok).first()
+        assert tx_ok is not None
+        assert tx_ok.payment_method == allowed_method
+
+    # 5. None / null payment_method falls back gracefully to CASH
     op_id_null = str(uuid.uuid4())
-    res3 = api_client.post(url, {
+    res_null = api_client.post(url, {
         'operations': [{
             'operation_id': op_id_null,
             'type': 'record_collection',
             'payload': {
                 'loan_id': str(loan.id),
-                'amount_paise': 50000,
+                'amount_paise': 1000,
                 'payment_method': None
             }
         }]
     }, format='json')
-    assert res3.status_code == 200
-    assert res3.data['results'][0]['status'] == 'ACCEPTED'
-    tx = LedgerTx.objects.filter(loan=loan, operation_id=op_id_null).first()
-    assert tx is not None
-    assert tx.payment_method == 'CASH'
+    assert res_null.status_code == 200
+    assert res_null.data['results'][0]['status'] == 'ACCEPTED'
+    tx_null = LedgerTx.objects.filter(loan=loan, operation_id=op_id_null).first()
+    assert tx_null is not None
+    assert tx_null.payment_method == 'CASH'
 
 
 

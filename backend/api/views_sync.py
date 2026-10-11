@@ -409,7 +409,8 @@ class SyncPushView(APIView):
             if raw_method is not None and not isinstance(raw_method, str):
                 return 'REJECTED', f'payment_method must be a string: {raw_method}'
             payment_method = (raw_method or 'CASH').upper()
-            if payment_method not in ('CASH', 'UPI', 'BANK_TRANSFER', 'CHEQUE', 'SYSTEM'):
+            allowed_methods = {choice[0] for choice in LedgerTx.PAYMENT_METHODS}
+            if payment_method not in allowed_methods:
                 return 'REJECTED', f"Unsupported payment_method: '{payment_method}'"
             is_cash = payload.get('is_cash', payment_method == 'CASH')
             if not isinstance(is_cash, bool):

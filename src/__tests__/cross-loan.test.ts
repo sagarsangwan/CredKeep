@@ -1619,6 +1619,181 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(netLedger?.netMarkup).toBe(schedule?.markup_paid_paise);
     expect(netLedger?.netPrincipal).toBe(0);
     expect(netLedger?.netMarkup).toBe(1000);
+
+    // Repeated replays MUST produce zero additional adjustments and keep schedules unchanged
+    await SyncService.reapplyPendingCollections(db, 'loan-replay-agree');
+    await SyncService.reapplyPendingCollections(db, 'loan-replay-agree');
+
+    const totalAdjCount = await db.getFirstAsync<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-agree-p1-%'
+    `);
+    expect(totalAdjCount?.count).toBe(1);
+  });
+
+  it('repeated pending replay with overdue penalties preserves invariant ledger totals, schedules, settlement status, and adjustment count', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-pen-repeat', 'Borrower Pen Repeat', '9876543111', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-pen-repeat', 'b-pen-repeat', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    // Due on 2026-01-01
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pen-1', 'loan-pen-repeat', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 200 paise of overdue penalties assessed on the loan
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-pen-assess-1', 'op-pen-assess-1', 'loan-pen-repeat', 'PENALTY_ASSESSMENT', 200, 0, 0, 0, '2026-01-02', '2026-01-02')
+    `);
+
+    // Offline pending payment P1 (1000 paise) made on 2026-01-05
+    // Initially allocated before penalty assessment was known locally: 900 principal, 100 markup, 0 penalty
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-pen-p1', 'op-pen-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-pen-repeat', amount_paise: 1000, effective_date: '2026-01-05' })}', 'PENDING', '2026-01-05T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-pen-p1', 'op-pen-p1', 'loan-pen-repeat', 'COLLECTION', 1000, 900, 100, 0, '2026-01-05', '2026-01-05')
+    `);
+
+    // 1st Replay: shifts funds into penalty (due kist principal/markup paid, plus 200 penalty)
+    await SyncService.reapplyPendingCollections(db, 'loan-pen-repeat');
+
+    // Snapshot state after 1st replay
+    const adjCount1 = await db.getFirstAsync<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-pen-p1-%'
+    `);
+    expect(adjCount1?.count).toBe(1);
+
+    const ledgerTotals1 = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty
+      FROM transactions WHERE loan_id = 'loan-pen-repeat'
+        AND transaction_type IN ('COLLECTION', 'REVERSAL')
+    `);
+    const schedule1 = await db.getFirstAsync<any>(`
+      SELECT principal_paid_paise, markup_paid_paise, status FROM repayment_schedules WHERE id = 'kist-pen-1'
+    `);
+    const loan1 = await db.getFirstAsync<any>(`
+      SELECT status FROM loans WHERE id = 'loan-pen-repeat'
+    `);
+
+    // 2nd Replay: MUST NOT change allocations or create duplicate realloc adjustments!
+    await SyncService.reapplyPendingCollections(db, 'loan-pen-repeat');
+
+    // 3rd Replay: MUST NOT change allocations or create duplicate realloc adjustments!
+    await SyncService.reapplyPendingCollections(db, 'loan-pen-repeat');
+
+    const adjCountAfter = await db.getFirstAsync<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-pen-p1-%'
+    `);
+    const ledgerTotalsAfter = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty
+      FROM transactions WHERE loan_id = 'loan-pen-repeat'
+        AND transaction_type IN ('COLLECTION', 'REVERSAL')
+    `);
+    const scheduleAfter = await db.getFirstAsync<any>(`
+      SELECT principal_paid_paise, markup_paid_paise, status FROM repayment_schedules WHERE id = 'kist-pen-1'
+    `);
+    const loanAfter = await db.getFirstAsync<any>(`
+      SELECT status FROM loans WHERE id = 'loan-pen-repeat'
+    `);
+
+    // Strict invariant checks after repeated replays:
+    expect(adjCountAfter?.count).toBe(adjCount1?.count);
+    expect(adjCountAfter?.count).toBe(1);
+    expect(ledgerTotalsAfter?.netPrincipal).toBe(ledgerTotals1?.netPrincipal);
+    expect(ledgerTotalsAfter?.netMarkup).toBe(ledgerTotals1?.netMarkup);
+    expect(ledgerTotalsAfter?.netPenalty).toBe(ledgerTotals1?.netPenalty);
+    expect(scheduleAfter?.principal_paid_paise).toBe(schedule1?.principal_paid_paise);
+    expect(scheduleAfter?.markup_paid_paise).toBe(schedule1?.markup_paid_paise);
+    expect(scheduleAfter?.status).toBe(schedule1?.status);
+    expect(loanAfter?.status).toBe(loan1?.status);
+  });
+
+  it('repeated pending replay for bullet loans preserves invariant ledger totals, schedules, settlement status, and adjustment count', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-bullet-repeat', 'Borrower Bullet Repeat', '9876543000', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-bullet-repeat', 'b-bullet-repeat', 500000, 0.1, 1, '2026-01-01', 1, 'bullet', 'ACTIVE', '2026-01-01')`);
+    // Bullet loan: 1 kist for markup only (50000 paise)
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-bullet-1', 'loan-bullet-repeat', 1, '2026-01-01', '2026-01-01', 0, 50000, 50000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Offline payment P1 (550000 paise): pays full markup (50000) + full principal (500000)
+    // Initially recorded with mismatched allocations (e.g. 550000 surplus, 0 principal) before schedule replay
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-bullet-p1', 'op-bullet-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-bullet-repeat', amount_paise: 550000, effective_date: '2026-01-01' })}', 'PENDING', '2026-01-01T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
+      VALUES ('tx-bullet-p1', 'op-bullet-p1', 'loan-bullet-repeat', 'COLLECTION', 550000, 0, 50000, 0, 500000, '2026-01-01', '2026-01-01')
+    `);
+
+    // 1st Replay: shifts 500000 from surplus to bullet principal, settles loan!
+    await SyncService.reapplyPendingCollections(db, 'loan-bullet-repeat');
+
+    // Snapshot state after 1st replay
+    const adjCount1 = await db.getFirstAsync<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-bullet-p1-%'
+    `);
+    expect(adjCount1?.count).toBe(1);
+
+    const ledgerTotals1 = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
+      FROM transactions WHERE loan_id = 'loan-bullet-repeat'
+        AND transaction_type IN ('COLLECTION', 'REVERSAL')
+    `);
+    const schedule1 = await db.getFirstAsync<any>(`
+      SELECT principal_paid_paise, markup_paid_paise, status FROM repayment_schedules WHERE id = 'kist-bullet-1'
+    `);
+    const loan1 = await db.getFirstAsync<any>(`
+      SELECT status FROM loans WHERE id = 'loan-bullet-repeat'
+    `);
+    expect(loan1?.status).toBe('SETTLED');
+    expect(schedule1?.status).toBe('PAID');
+    expect(ledgerTotals1?.netPrincipal).toBe(500000);
+    expect(ledgerTotals1?.netMarkup).toBe(50000);
+    expect(ledgerTotals1?.netSurplus).toBe(0);
+
+    // 2nd Replay: MUST NOT change allocations or create duplicate realloc adjustments!
+    await SyncService.reapplyPendingCollections(db, 'loan-bullet-repeat');
+
+    // 3rd Replay: MUST NOT change allocations or create duplicate realloc adjustments!
+    await SyncService.reapplyPendingCollections(db, 'loan-bullet-repeat');
+
+    const adjCountAfter = await db.getFirstAsync<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transactions WHERE operation_id LIKE 'realloc-op-bullet-p1-%'
+    `);
+    const ledgerTotalsAfter = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+        COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
+      FROM transactions WHERE loan_id = 'loan-bullet-repeat'
+        AND transaction_type IN ('COLLECTION', 'REVERSAL')
+    `);
+    const scheduleAfter = await db.getFirstAsync<any>(`
+      SELECT principal_paid_paise, markup_paid_paise, status FROM repayment_schedules WHERE id = 'kist-bullet-1'
+    `);
+    const loanAfter = await db.getFirstAsync<any>(`
+      SELECT status FROM loans WHERE id = 'loan-bullet-repeat'
+    `);
+
+    // Strict invariant checks after repeated replays:
+    expect(adjCountAfter?.count).toBe(1);
+    expect(ledgerTotalsAfter?.netPrincipal).toBe(500000);
+    expect(ledgerTotalsAfter?.netMarkup).toBe(50000);
+    expect(ledgerTotalsAfter?.netSurplus).toBe(0);
+    expect(scheduleAfter?.status).toBe('PAID');
+    expect(loanAfter?.status).toBe('SETTLED');
   });
 
   it('switches database filenames and isolates storage across tenant auth changes', async () => {
