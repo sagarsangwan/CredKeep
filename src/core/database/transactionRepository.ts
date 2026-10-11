@@ -21,6 +21,14 @@ export class TransactionRepository {
         // Idempotency check
         const existing = await tx.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
         if (existing) {
+          if (
+            existing.loan_id !== loanId ||
+            existing.amount_paise !== paymentAmount ||
+            existing.effective_date !== effectiveDate ||
+            existing.transaction_type !== 'COLLECTION'
+          ) {
+            throw new Error(`Idempotency conflict: operation_id ${operationId} already exists with different payment attributes.`);
+          }
           returnResult = { success: true, transactionId: existing.id, transaction: existing };
           return;
         }

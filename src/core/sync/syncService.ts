@@ -137,7 +137,13 @@ export class SyncService {
     const { record_type, operation_type, payload } = change;
     if (!payload) return;
 
-    if (record_type === 'KIST' && payload.loan_id && modifiedLoanIds) {
+    if (
+      (record_type === 'KIST' ||
+        (record_type === 'TRANSACTION' &&
+          (payload.transaction_type === 'WAIVER' || payload.transaction_type === 'PENALTY_ASSESSMENT'))) &&
+      payload.loan_id &&
+      modifiedLoanIds
+    ) {
       modifiedLoanIds.add(payload.loan_id);
     }
 

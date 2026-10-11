@@ -331,12 +331,28 @@ describe('Cross-Loan Isolation', () => {
     expect(allocatedPrincipal).toBe(toPaise(600)); // 1500 total - 500 kist1 markup - 300 extended kist2 markup - 100 penalty = 600 principal
   });
 
-  it('Payment idempotency: skips execution if operation_id exists', async () => {
+  it('Payment idempotency: skips execution if operation_id exists and matches attributes, rejects conflicting parameters', async () => {
     await txRepo.recordCashPayment('loan-b', toPaise(2600), 'existing-op', '2026-01-02');
     const txCount = dbState.transactions.length;
     
-    // Repeat same operation ID
-    await txRepo.recordCashPayment('loan-b', toPaise(2600), 'existing-op', '2026-01-02');
+    // 1. Identical repeat succeeds idempotently
+    const retryRes = await txRepo.recordCashPayment('loan-b', toPaise(2600), 'existing-op', '2026-01-02');
+    expect(retryRes.success).toBe(true);
+    expect(dbState.transactions.length).toBe(txCount);
+
+    // 2. Conflicting loan ID rejected
+    await expect(txRepo.recordCashPayment('loan-a', toPaise(2600), 'existing-op', '2026-01-02'))
+      .rejects.toThrow(/Idempotency conflict/);
+
+    // 3. Conflicting payment amount rejected
+    await expect(txRepo.recordCashPayment('loan-b', toPaise(3000), 'existing-op', '2026-01-02'))
+      .rejects.toThrow(/Idempotency conflict/);
+
+    // 4. Conflicting effective date rejected
+    await expect(txRepo.recordCashPayment('loan-b', toPaise(2600), 'existing-op', '2026-01-05'))
+      .rejects.toThrow(/Idempotency conflict/);
+
+    // No phantom transactions inserted on rejected conflicts
     expect(dbState.transactions.length).toBe(txCount);
   });
   
@@ -1794,6 +1810,85 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(ledgerTotalsAfter?.netSurplus).toBe(0);
     expect(scheduleAfter?.status).toBe('PAID');
     expect(loanAfter?.status).toBe('SETTLED');
+  });
+
+  it('real SQLite idempotency conflict rejects reused operation_id for different loan or payment amount', async () => {
+    const db = createRealSqliteDb();
+    const repo = new TransactionRepository(db);
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-idem-real', 'Idem Borrower', '9876543888', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-idem-a', 'b-idem-real', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-idem-b', 'b-idem-real', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-idem-a', 'loan-idem-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-idem-b', 'loan-idem-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 1. Record payment on Loan A
+    const resA = await repo.recordCashPayment('loan-idem-a', toPaise(5000), 'op-idem-real-1', '2026-01-01');
+    expect(resA.success).toBe(true);
+
+    // 2. Identical retry on Loan A succeeds idempotently
+    const retryA = await repo.recordCashPayment('loan-idem-a', toPaise(5000), 'op-idem-real-1', '2026-01-01');
+    expect(retryA.success).toBe(true);
+
+    // 3. Reusing op-idem-real-1 for Loan B MUST throw and reject
+    await expect(repo.recordCashPayment('loan-idem-b', toPaise(5000), 'op-idem-real-1', '2026-01-01'))
+      .rejects.toThrow(/Idempotency conflict/);
+
+    // Loan B has zero transactions recorded
+    const txB = await db.getAllAsync(`SELECT * FROM transactions WHERE loan_id = 'loan-idem-b'`);
+    expect(txB.length).toBe(0);
+
+    // 4. Reusing op-idem-real-1 with different amount on Loan A MUST throw and reject
+    await expect(repo.recordCashPayment('loan-idem-a', toPaise(6000), 'op-idem-real-1', '2026-01-01'))
+      .rejects.toThrow(/Idempotency conflict/);
+  });
+
+  it('pulling a server TRANSACTION delta triggers pending collection replay and delta reconciliation', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-pull-tx', 'Pull TX Borrower', '9876543777', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-pull-tx', 'b-pull-tx', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pull-tx-1', 'loan-pull-tx', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Offline pending payment P1 (1000 paise) made locally on 2026-01-05 (before due date: allocated to future principal)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-ptx-1', 'op-ptx-1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-pull-tx', amount_paise: 1000, effective_date: '2026-01-05' })}', 'PENDING', '2026-01-05T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-ptx-1', 'op-ptx-1', 'loan-pull-tx', 'COLLECTION', 1000, 1000, 0, 0, '2026-01-05', '2026-01-05')
+    `);
+
+    // Server sends a PENALTY_ASSESSMENT TRANSACTION change (200 paise assessed on 2026-01-02)
+    const modifiedLoans = new Set<string>();
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'tx-serv-pen-1',
+        operation_id: 'op-serv-pen-1',
+        loan_id: 'loan-pull-tx',
+        transaction_type: 'PENALTY_ASSESSMENT',
+        amount_paise: 200,
+        effective_date: '2026-01-02'
+      }
+    }, modifiedLoans);
+
+    // Verify modifiedLoans set recorded the loan ID from the TRANSACTION change
+    expect(modifiedLoans.has('loan-pull-tx')).toBe(true);
+
+    // Reapply pending collections for modified loan
+    for (const loanId of modifiedLoans) {
+      await SyncService.reapplyPendingCollections(db, loanId);
+    }
+
+    // Pending collection must have reallocated funds to satisfy the 200 penalty
+    const reallocTx = await db.getFirstAsync<any>(`
+      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-ptx-1-%'
+    `);
+    expect(reallocTx).not.toBeNull();
+    expect(reallocTx?.allocated_penalty_paise).toBe(200);
   });
 
   it('switches database filenames and isolates storage across tenant auth changes', async () => {

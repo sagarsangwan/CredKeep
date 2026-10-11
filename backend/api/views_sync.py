@@ -146,6 +146,9 @@ class SyncPushView(APIView):
                         payload=payload
                     )
 
+                    if res_status == 'REJECTED':
+                        raise ValidationError(err_msg or 'Operation rejected.')
+
                     try:
                         SyncLog.objects.create(
                             tenant=tenant,

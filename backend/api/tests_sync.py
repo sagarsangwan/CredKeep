@@ -1890,6 +1890,72 @@ def test_sync_push_invalid_payment_method_returns_terminal_rejected(api_client, 
     assert tx_null.payment_method == 'CASH'
 
 
+@pytest.mark.django_db
+def test_rejected_penalty_waiver_rolls_back_schedule_and_outbox_mutations(api_client, lender_setup):
+    """
+    Validates that a rejected waive_penalty operation completely rolls back
+    any schedule extensions, penalty assessments, or outbox rows created during evaluation.
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Rollback Borrower', phone='9876543999')
+    # ACTIVE zero-markup bullet loan with a past due date
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0'),
+        term_months=1,
+        start_date='2025-01-01',
+        due_day=1,
+        product_type='bullet',
+        status='ACTIVE'
+    )
+    # 1 initial kist for the bullet loan with zero markup
+    Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2025-02-01',
+        effective_due_date='2025-02-01',
+        principal_component_paise=0,
+        markup_component_paise=0,
+        total_due_paise=0,
+        status='PENDING'
+    )
+
+    initial_kist_count = Kist.objects.filter(loan=loan).count()
+    initial_outbox_count = SyncOutbox.objects.filter(tenant=tenant).count()
+    initial_tx_count = LedgerTx.objects.filter(loan=loan).count()
+
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    res = api_client.post(url, {
+        'operations': [{
+            'operation_id': op_id,
+            'type': 'waive_penalty',
+            'payload': {
+                'loan_id': str(loan.id),
+                'amount_paise': 50000,
+                'effective_date': '2025-02-15'
+            }
+        }]
+    }, format='json')
+
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'REJECTED'
+
+    # Verify all mutations are rolled back
+    assert Kist.objects.filter(loan=loan).count() == initial_kist_count
+    assert SyncOutbox.objects.filter(tenant=tenant).count() == initial_outbox_count
+    assert LedgerTx.objects.filter(loan=loan).count() == initial_tx_count
+
+    # Loan status remains ACTIVE
+    loan.refresh_from_db()
+    assert loan.status == 'ACTIVE'
+
+
 
 
 
