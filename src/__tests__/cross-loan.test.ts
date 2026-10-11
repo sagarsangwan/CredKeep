@@ -2687,4 +2687,102 @@ describe('Real SQLite Engine Integration Guarantees', () => {
       db.runAsync(`UPDATE transactions SET amount_paise = 9999 WHERE id = ?`, [legacyTxId])
     ).rejects.toThrow(/Transactions table is append-only: updates are prohibited/);
   });
+
+  it('migrating a legacy receipt with existing reconciliation adjustments preserves allocation linkage across repeated pulls', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-adj-linkage';
+    const loanId = 'loan-adj-linkage';
+    const legacyTxId = 'legacy-tx-adj';
+    const legacyOpId = 'legacy-op-adj';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Adj Borrower', '9876543121', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-adj-1', ?, 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`, [loanId]);
+
+    // Receipt: 1000 paise received (1000 principal initially)
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
+      VALUES (?, ?, ?, 'COLLECTION', 1000, 1000, 0, 0, 0, '2026-01-02', '2026-01-02')
+    `, [legacyTxId, legacyOpId, loanId]);
+
+    // Existing reconciliation adjustment: reallocated -300 principal to +300 markup (net: 700 principal, 300 markup)
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at)
+      VALUES ('recon-adj-legacy-1', 'reconcile::' || ? || '::adj-1', ?, 'REVERSAL', 0, -300, 300, 0, 0, '2026-01-02', '2026-01-02')
+    `, [legacyOpId, loanId]);
+
+    // Verify baseline before migration: 700 principal, 300 markup, 1000 receipts
+    const baseline = await db.getFirstAsync<any>(`
+      SELECT COUNT(*) as count, SUM(amount_paise) as receipts, SUM(allocated_principal_paise) as principal, SUM(allocated_markup_paise) as markup
+      FROM transactions WHERE loan_id = ?
+    `, [loanId]);
+    expect(baseline.principal).toBe(700);
+    expect(baseline.markup).toBe(300);
+    expect(baseline.receipts).toBe(1000);
+
+    // Extract V1 push operations to know the server deterministic UUID
+    const extracted = await V1DataExtractor.extract(db);
+    const ops = V1DataExtractor.buildPushPayloads(extracted);
+    const txOp = ops.find(o => o.type === 'record_collection')!;
+    const serverDeterministicOpId = txOp.operation_id;
+
+    // Run migration with simulated cloud push acknowledgment
+    jest.spyOn(SyncService, 'pushPending').mockImplementationOnce(async () => {
+      await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED'`);
+      return { pushed: ops.length, failed: 0 };
+    });
+    const migrationResult = await V1DataExtractor.migrateToCloud(db);
+    expect(migrationResult.success).toBe(true);
+
+    // Verify atomic rekeying: both receipt and its adjustment now reference the server deterministic UUID!
+    const rekeyedTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE id = ?`, [serverDeterministicOpId]);
+    expect(rekeyedTx).not.toBeNull();
+    const rekeyedAdj = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE id = 'recon-adj-legacy-1'`);
+    expect(rekeyedAdj.operation_id).toBe(`reconcile::${serverDeterministicOpId}::adj-1`);
+
+    // Server delta with authoritative 700 principal / 300 markup
+    const serverDelta = {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: serverDeterministicOpId,
+        operation_id: serverDeterministicOpId,
+        loan_id: loanId,
+        transaction_type: 'COLLECTION',
+        amount_paise: 1000,
+        allocated_principal_paise: 700,
+        allocated_markup_paise: 300,
+        allocated_penalty_paise: 0,
+        unallocated_surplus_paise: 0,
+        forgiven_penalty_paise: 0,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02T00:00:00Z',
+      }
+    };
+
+    // First pull: allocations must remain EXACTLY 700 principal and 300 markup (NOT 400/600!)
+    await SyncService.applyServerChange(db, serverDelta);
+
+    const pull1 = await db.getFirstAsync<any>(`
+      SELECT COUNT(*) as count, SUM(amount_paise) as receipts, SUM(allocated_principal_paise) as principal, SUM(allocated_markup_paise) as markup
+      FROM transactions WHERE loan_id = ?
+    `, [loanId]);
+    expect(pull1.count).toBe(2); // 1 collection + 1 rekeyed adjustment, NO duplicated adjustment
+    expect(pull1.receipts).toBe(1000);
+    expect(pull1.principal).toBe(700);
+    expect(pull1.markup).toBe(300);
+
+    // Second pull (idempotency check): allocations must STILL remain EXACTLY 700 principal and 300 markup
+    await SyncService.applyServerChange(db, serverDelta);
+
+    const pull2 = await db.getFirstAsync<any>(`
+      SELECT COUNT(*) as count, SUM(amount_paise) as receipts, SUM(allocated_principal_paise) as principal, SUM(allocated_markup_paise) as markup
+      FROM transactions WHERE loan_id = ?
+    `, [loanId]);
+    expect(pull2.count).toBe(2);
+    expect(pull2.receipts).toBe(1000);
+    expect(pull2.principal).toBe(700);
+    expect(pull2.markup).toBe(300);
+  });
 });

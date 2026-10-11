@@ -391,6 +391,8 @@ class SyncPushView(APIView):
                     return True, "Idempotency conflict: loan borrower_id changed."
                 if payload.get('principal_paise') and payload.get('principal_paise') != orig_p.get('principal_paise'):
                     return True, "Idempotency conflict: loan principal changed."
+                if payload.get('status') and orig_p.get('status') and payload.get('status') != orig_p.get('status'):
+                    return True, "Idempotency conflict: loan status changed."
             elif op_type in ('modify_schedule', 'postpone_due_date'):
                 req_loan = str(payload.get('loan_id') or op.get('loan_id') or '')
                 if req_loan and orig_p.get('loan_id') and req_loan != str(orig_p.get('loan_id')):
@@ -527,6 +529,9 @@ class SyncPushView(APIView):
             if product_type not in ('instalment', 'bullet'):
                 return 'REJECTED', f"Unsupported product_type '{product_type}'. Must be 'instalment' or 'bullet'."
 
+            raw_status = payload.get('status', 'ACTIVE')
+            status = raw_status if raw_status in ('ACTIVE', 'SETTLED', 'WRITTEN_OFF') else 'ACTIVE'
+
             loan = LoanAccount.objects.create(
                 id=loan_id,
                 tenant=tenant,
@@ -537,7 +542,7 @@ class SyncPushView(APIView):
                 start_date=start_date,
                 due_day=due_day,
                 product_type=product_type,
-                status='ACTIVE'
+                status=status
             )
 
             # Emit LOAN outbox record FIRST so replica devices process parent loan before child kists
