@@ -168,7 +168,7 @@ class SyncPushView(APIView):
                         res_item["error"] = err_msg
                     results.append(res_item)
 
-            except (ValidationError, ValueError) as e:
+            except (ValidationError, ValueError, TypeError, AttributeError) as e:
                 err_text = str(e)
                 existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
                 if existing_log:
@@ -405,8 +405,15 @@ class SyncPushView(APIView):
             if isinstance(effective_date, str) and 'T' in effective_date:
                 effective_date = effective_date.split('T')[0]
 
-            payment_method = payload.get('payment_method', 'CASH').upper()
+            raw_method = payload.get('payment_method')
+            if raw_method is not None and not isinstance(raw_method, str):
+                return 'REJECTED', f'payment_method must be a string: {raw_method}'
+            payment_method = (raw_method or 'CASH').upper()
+            if payment_method not in ('CASH', 'UPI', 'BANK_TRANSFER', 'CHEQUE', 'SYSTEM'):
+                return 'REJECTED', f"Unsupported payment_method: '{payment_method}'"
             is_cash = payload.get('is_cash', payment_method == 'CASH')
+            if not isinstance(is_cash, bool):
+                is_cash = payment_method == 'CASH'
 
             # Failure Matrix invariant: Money received on settled loan is recorded, marked as surplus, and loan remains settled.
             if loan.status in ('SETTLED', 'WRITTEN_OFF'):

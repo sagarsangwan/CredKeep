@@ -43,7 +43,13 @@ export class SyncService {
         });
 
         let batchFailed = 0;
-        for (const res of response.results || []) {
+        const results = response?.results || [];
+        const acknowledgedOpIds = new Set<string>();
+
+        for (const res of results) {
+          if (!res?.operation_id) continue;
+          acknowledgedOpIds.add(res.operation_id);
+
           if (res.status === 'ACCEPTED') {
             await OutboxManager.markSynced(db, [res.operation_id]);
             totalPushed++;
@@ -55,6 +61,14 @@ export class SyncService {
             batchFailed++;
           } else {
             await OutboxManager.markStatus(db, res.operation_id, res.status, res.error);
+            batchFailed++;
+          }
+        }
+
+        // Validate that every submitted operation received an acknowledgment result
+        for (const op of operations) {
+          if (!acknowledgedOpIds.has(op.operation_id)) {
+            await OutboxManager.markStatus(db, op.operation_id, 'PENDING', 'Missing server result in push response');
             batchFailed++;
           }
         }
@@ -428,48 +442,152 @@ export class SyncService {
     let outstandingPenalty = Math.max(0, (penaltyRow?.assessed || 0) - (penaltyRow?.paid || 0) - (penaltyRow?.forgiven || 0)) as Paise;
 
     if (relevant.length > 0) {
-      for (const item of relevant) {
-      const p = JSON.parse(item.payload);
-      const paymentAmount = (p.amount_paise || 0) as Paise;
-      const effectiveDate = p.effective_date || new Date().toISOString().split('T')[0];
-
-      const kists = await tx.getAllAsync<any>(
-        `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
-        [loanId]
-      );
-      if (!kists || kists.length === 0) continue;
-
-      const allocInput = {
-        paymentAmount,
-        kists: kists.map((k) => ({
-          kistNumber: k.installment_number,
-          amountDue: k.total_due_paise as Paise,
-          principalDue: k.principal_component_paise as Paise,
-          markupDue: k.markup_component_paise as Paise,
-          amountPaid: (k.principal_paid_paise + k.markup_paid_paise) as Paise,
-          principalPaid: k.principal_paid_paise as Paise,
-          markupPaid: k.markup_paid_paise as Paise,
-          isDue: k.effective_due_date <= effectiveDate,
-          status: k.status,
-        })),
-        outstandingPenalty,
-      };
-
-      const result = allocatePayment(allocInput);
-      outstandingPenalty = result.remainingPenalty;
-
-      for (const uk of result.updatedKists) {
-        await tx.runAsync(
-          `UPDATE repayment_schedules SET
-             principal_paid_paise = ?,
-             markup_paid_paise = ?,
-             status = ?
-           WHERE loan_id = ? AND installment_number = ?`,
-          [uk.principalPaid, uk.markupPaid, uk.status || 'PENDING', loanId, uk.kistNumber]
+      const loan = await tx.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+      let replayedBulletPrincipalPaid = 0;
+      if (loan?.product_type === 'bullet') {
+        const bulletPrincipalRow = await tx.getFirstAsync<{ total: number }>(
+          `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
+           WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+             AND operation_id NOT IN (
+               SELECT operation_id FROM sync_outbox WHERE status = 'PENDING'
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM sync_outbox so
+               WHERE so.status = 'REJECTED'
+                 AND (
+                   transactions.operation_id = so.operation_id
+                   OR transactions.operation_id = 'reversal-' || so.operation_id
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '-%'
+                   OR transactions.operation_id LIKE 'reconcile-' || so.operation_id || '-%'
+                   OR transactions.operation_id = 'reconcile-' || so.operation_id
+                 )
+             )`,
+          [loanId]
         );
+        replayedBulletPrincipalPaid = bulletPrincipalRow?.total || 0;
+      }
+
+      for (const item of relevant) {
+        const p = JSON.parse(item.payload);
+        const paymentAmount = (p.amount_paise || 0) as Paise;
+        const effectiveDate = p.effective_date || new Date().toISOString().split('T')[0];
+
+        const kists = await tx.getAllAsync<any>(
+          `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
+          [loanId]
+        );
+        if (!kists || kists.length === 0) continue;
+
+        const allocInput = {
+          paymentAmount,
+          kists: kists.map((k) => ({
+            kistNumber: k.installment_number,
+            amountDue: k.total_due_paise as Paise,
+            principalDue: k.principal_component_paise as Paise,
+            markupDue: k.markup_component_paise as Paise,
+            amountPaid: (k.principal_paid_paise + k.markup_paid_paise) as Paise,
+            principalPaid: k.principal_paid_paise as Paise,
+            markupPaid: k.markup_paid_paise as Paise,
+            isDue: k.effective_due_date <= effectiveDate,
+            status: k.status,
+          })),
+          outstandingPenalty,
+        };
+
+        const result = allocatePayment(allocInput);
+        outstandingPenalty = result.remainingPenalty;
+
+        let newAllocPrincipal = 0;
+        let newAllocMarkup = 0;
+        let newAllocPenalty = 0;
+        for (const a of result.allocations) {
+          newAllocPrincipal += a.allocatedToPrincipal;
+          newAllocMarkup += a.allocatedToMarkup;
+          newAllocPenalty += a.allocatedToPenalty;
+        }
+
+        let newAllocSurplus = result.unallocatedFunds || 0;
+        if (loan?.product_type === 'bullet' && newAllocSurplus > 0) {
+          const remainingPrincipal = Math.max(0, loan.principal_paise - replayedBulletPrincipalPaid);
+          const payPrincipal = Math.min(newAllocSurplus, remainingPrincipal);
+          newAllocPrincipal += payPrincipal;
+          newAllocSurplus -= payPrincipal;
+          replayedBulletPrincipalPaid += payPrincipal;
+        }
+
+        // Reconcile pending collection ledger entry with replayed allocations
+        const currentColNet = await tx.getFirstAsync<{
+          currentPrincipal: number;
+          currentMarkup: number;
+          currentPenalty: number;
+          currentSurplus: number;
+        }>(
+          `SELECT
+             COALESCE(SUM(allocated_principal_paise), 0) as currentPrincipal,
+             COALESCE(SUM(allocated_markup_paise), 0) as currentMarkup,
+             COALESCE(SUM(allocated_penalty_paise), 0) as currentPenalty,
+             COALESCE(SUM(unallocated_surplus_paise), 0) as currentSurplus
+           FROM transactions
+           WHERE loan_id = ?
+             AND (
+               operation_id = ?
+               OR operation_id LIKE 'realloc-' || ? || '-%'
+               OR operation_id LIKE 'reconcile-' || ? || '-%'
+               OR operation_id = 'reconcile-' || ?
+             )`,
+          [loanId, item.operation_id, item.operation_id, item.operation_id, item.operation_id]
+        );
+
+        const currentPrincipal = currentColNet?.currentPrincipal ?? 0;
+        const currentMarkup = currentColNet?.currentMarkup ?? 0;
+        const currentPenalty = currentColNet?.currentPenalty ?? 0;
+        const currentSurplus = currentColNet?.currentSurplus ?? 0;
+
+        const deltaPrincipal = newAllocPrincipal - currentPrincipal;
+        const deltaMarkup = newAllocMarkup - currentMarkup;
+        const deltaPenalty = newAllocPenalty - currentPenalty;
+        const deltaSurplus = newAllocSurplus - currentSurplus;
+
+        if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
+          const reallocId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('realloc-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+          const reallocOpId = `realloc-${item.operation_id}-${reallocId.substring(0, 8)}`;
+          await tx.runAsync(
+            `INSERT INTO transactions (
+               id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+               amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
+               unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              reallocId,
+              reallocOpId,
+              loanId,
+              'REVERSAL',
+              0,
+              'SYSTEM',
+              0,
+              deltaPrincipal,
+              deltaMarkup,
+              deltaPenalty,
+              deltaSurplus,
+              0,
+              effectiveDate,
+              new Date().toISOString(),
+            ]
+          );
+        }
+
+        for (const uk of result.updatedKists) {
+          await tx.runAsync(
+            `UPDATE repayment_schedules SET
+               principal_paid_paise = ?,
+               markup_paid_paise = ?,
+               status = ?
+             WHERE loan_id = ? AND installment_number = ?`,
+            [uk.principalPaid, uk.markupPaid, uk.status || 'PENDING', loanId, uk.kistNumber]
+          );
+        }
       }
     }
-  }
 
     // Reconcile loan status with authoritative server state and outstanding penalties
     const finalKists = await tx.getAllAsync<any>(

@@ -59,7 +59,9 @@ describe('SyncService & OutboxManager', () => {
 
       getAllAsync: jest.fn(async (sql: string, params: any[]) => {
         if (sql.includes('FROM sync_outbox')) {
-          return outboxRows.filter((r) => r.status === 'PENDING' || r.status === 'FAILED');
+          const limit = params && typeof params[0] === 'number' ? params[0] : undefined;
+          const filtered = outboxRows.filter((r) => r.status === 'PENDING' || r.status === 'FAILED');
+          return limit !== undefined ? filtered.slice(0, limit) : filtered;
         }
         return [];
       }),
@@ -577,6 +579,15 @@ describe('SyncService & OutboxManager', () => {
         }
         if (sql.includes('SELECT * FROM loans WHERE id = ?')) {
           return { id: 'loan-1', principal_paise: 100000, product_type: 'instalment', status: 'SETTLED' };
+        }
+        if (sql.includes('SUM(amount_paise)')) {
+          return {
+            netAmount: 110000,
+            netPrincipal: 100000,
+            netMarkup: 10000,
+            netPenalty: 0,
+            netSurplus: 0,
+          };
         }
         return null;
       });

@@ -69,12 +69,21 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'credkeep_backend.wsgi.application'
 
+import sys
+
 # Database
-DATABASES = {
-    'default': env.db('DATABASE_URL', default=f'sqlite:///{BASE_DIR}/db.sqlite3')
-}
+is_testing = 'pytest' in sys.modules or any('pytest' in arg for arg in sys.argv) or 'test' in sys.argv
+if is_testing:
+    DATABASES = {
+        'default': env.db('TEST_DATABASE_URL', default='sqlite:///:memory:')
+    }
+else:
+    DATABASES = {
+        'default': env.db('DATABASE_URL', default=f'sqlite:///{BASE_DIR}/db.sqlite3')
+    }
 DATABASES['default']['ATOMIC_REQUESTS'] = True
-DATABASES['default']['OPTIONS'] = {'timeout': 30}
+if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
+    DATABASES['default']['OPTIONS'] = {'timeout': 30}
 
 from django.db.backends.signals import connection_created
 def configure_sqlite_pragmas(sender, connection, **kwargs):

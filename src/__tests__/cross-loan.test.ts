@@ -5,8 +5,22 @@ import { OutboxManager } from '../core/sync/outbox';
 import { SyncService } from '../core/sync/syncService';
 import { runMigrations } from '../core/database/schema';
 import { getDatabaseName } from '../core/database/dbName';
+import { AuthStore } from '../core/auth/authStore';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
+
+jest.mock('expo-secure-store', () => {
+  const store: Record<string, string> = {};
+  return {
+    getItemAsync: jest.fn(async (key: string) => store[key] || null),
+    setItemAsync: jest.fn(async (key: string, val: string) => {
+      store[key] = val;
+    }),
+    deleteItemAsync: jest.fn(async (key: string) => {
+      delete store[key];
+    }),
+  };
+});
 
 interface LoanRow {
   id: string;
@@ -1520,5 +1534,121 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     `);
     expect(loanBTxs.length).toBe(2);
     expect(loanBTxs.some((t) => t.operation_id === 'reversal-op-1')).toBe(false);
+
+    // Verify Loan B's net allocations remain strictly untouched
+    const loanBNet = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(amount_paise), 0) as amount,
+        COALESCE(SUM(allocated_principal_paise), 0) as principal,
+        COALESCE(SUM(allocated_markup_paise), 0) as markup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as penalty
+      FROM transactions
+      WHERE loan_id = 'loan-iso-b'
+    `);
+    expect(loanBNet?.amount).toBe(1000);
+    expect(loanBNet?.principal).toBe(500);
+    expect(loanBNet?.markup).toBe(500);
+    expect(loanBNet?.penalty).toBe(0);
+
+    // Verify Loan B's repayment schedule is untouched
+    const loanBKist = await db.getFirstAsync<any>(`
+      SELECT * FROM repayment_schedules WHERE id = 'kist-iso-b1'
+    `);
+    expect(loanBKist?.markup_paid_paise).toBe(1000);
+    expect(loanBKist?.principal_paid_paise).toBe(0);
+
+    // Verify Loan B's status is untouched
+    const loanB = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-iso-b'`);
+    expect(loanB?.status).toBe('ACTIVE');
+  });
+
+  it('appends compensating allocation deltas during pending replay to guarantee strict ledger and schedule agreement', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-replay-agree', 'Borrower Replay Agree', '9876543222', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-replay-agree', 'b-replay-agree', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    // Initially kist is future due on 2026-02-01
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-agree-1', 'loan-replay-agree', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Offline payment P1 (1000 paise) made on 2026-01-15: because kist was not due, it originally allocated to principal (1000) and markup (0)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-agree-p1', 'op-agree-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-replay-agree', amount_paise: 1000, effective_date: '2026-01-15' })}', 'PENDING', '2026-01-15T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-agree-p1', 'op-agree-p1', 'loan-replay-agree', 'COLLECTION', 1000, 1000, 0, 0, '2026-01-15', '2026-01-15')
+    `);
+
+    // Now authoritative server update modifies schedule: kist effective_due_date is revised to 2026-01-10 (due now!)
+    await db.runAsync(`
+      UPDATE repayment_schedules SET
+        effective_due_date = '2026-01-10',
+        server_principal_paid_paise = 0,
+        server_markup_paid_paise = 0,
+        server_status = 'PENDING'
+      WHERE id = 'kist-agree-1'
+    `);
+
+    // Reapply pending collections against the new server schedule
+    await SyncService.reapplyPendingCollections(db, 'loan-replay-agree');
+
+    // Compensating realloc delta MUST be appended in transactions ledger
+    const reallocTx = await db.getFirstAsync<any>(`
+      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-agree-p1-%'
+    `);
+    expect(reallocTx).not.toBeNull();
+    // Reallocation shifted 1000 paise from principal to markup!
+    expect(reallocTx?.allocated_principal_paise).toBe(-1000);
+    expect(reallocTx?.allocated_markup_paise).toBe(1000);
+
+    // Verify net ledger totals match repayment schedule paid amounts exactly!
+    const netLedger = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+        COALESCE(SUM(allocated_markup_paise), 0) as netMarkup
+      FROM transactions
+      WHERE loan_id = 'loan-replay-agree'
+        AND (operation_id = 'op-agree-p1' OR operation_id LIKE 'realloc-op-agree-p1-%')
+    `);
+    const schedule = await db.getFirstAsync<any>(`
+      SELECT principal_paid_paise, markup_paid_paise FROM repayment_schedules WHERE id = 'kist-agree-1'
+    `);
+
+    expect(netLedger?.netPrincipal).toBe(schedule?.principal_paid_paise);
+    expect(netLedger?.netMarkup).toBe(schedule?.markup_paid_paise);
+    expect(netLedger?.netPrincipal).toBe(0);
+    expect(netLedger?.netMarkup).toBe(1000);
+  });
+
+  it('switches database filenames and isolates storage across tenant auth changes', async () => {
+    // 1. Initial tenant
+    await AuthStore.setAuth({
+      token: 'tok-1',
+      user: { id: 1, username: 'user1' },
+      tenant: { id: 'tenant_alpha', name: 'Alpha Workspace' }
+    });
+    expect(await getDatabaseName()).toBe('credkeep_tenant_alpha.db');
+
+    // 2. Switch tenant on new login
+    let notifiedTenant: string | null = null;
+    const unsub = AuthStore.onAuthChange((tId: string | null) => {
+      notifiedTenant = tId;
+    });
+
+    await AuthStore.setAuth({
+      token: 'tok-2',
+      user: { id: 2, username: 'user2' },
+      tenant: { id: 'tenant_beta', name: 'Beta Workspace' }
+    });
+    expect(notifiedTenant).toBe('tenant_beta');
+    expect(await getDatabaseName()).toBe('credkeep_tenant_beta.db');
+
+    // 3. Clear auth on logout
+    await AuthStore.clearAuth();
+    expect(notifiedTenant).toBeNull();
+    expect(await getDatabaseName()).toBe('credkeep.db');
+
+    unsub();
   });
 });
