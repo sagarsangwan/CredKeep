@@ -3144,6 +3144,78 @@ def test_portfolio_summary_view_and_tenant_isolation(api_client, lender_setup):
     assert data2['total_principal_paise'] == 0
 
 
+@pytest.mark.django_db
+def test_portfolio_summary_includes_bullet_principal_and_reconciles_penalties(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('portfolio-summary')
+
+    b = Borrower.objects.create(tenant=tenant, name='Borrower Bullet', phone='9888877777')
+
+    # 1. Active Bullet loan with 0 markup, 100,000 paise principal
+    bullet_loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, principal_paise=100000, markup_factor=Decimal('0.0000'),
+        term_months=1, start_date='2026-01-01', due_day=1, product_type='bullet', status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant, loan=bullet_loan, installment_number=1,
+        original_due_date='2026-02-01', effective_due_date='2026-02-01',
+        principal_component_paise=0, markup_component_paise=0, total_due_paise=0, status='PENDING'
+    )
+
+    # 2. Active Instalment loan with 200,000 paise principal, 20,000 markup
+    inst_loan = LoanAccount.objects.create(
+        tenant=tenant, borrower=b, principal_paise=200000, markup_factor=Decimal('0.1000'),
+        term_months=1, start_date='2026-01-01', due_day=1, product_type='instalment', status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant, loan=inst_loan, installment_number=1,
+        original_due_date='2026-02-01', effective_due_date='2026-02-01',
+        principal_component_paise=200000, markup_component_paise=20000, total_due_paise=220000, status='PENDING'
+    )
+
+    # Penalty on instalment loan: 5,000 paise
+    LedgerTx.objects.create(
+        tenant=tenant, operation_id=str(uuid.uuid4()), loan=inst_loan, transaction_type='PENALTY_ASSESSMENT',
+        amount_paise=5000, effective_date='2026-02-05'
+    )
+
+    resp = api_client.get(url)
+    assert resp.status_code == 200
+    data = resp.data
+
+    assert data['active_loans_count'] == 2
+    assert data['total_principal_paise'] == 300000
+
+    bullet_detail = next(item for item in data['loans'] if item['id'] == str(bullet_loan.id))
+    inst_detail = next(item for item in data['loans'] if item['id'] == str(inst_loan.id))
+
+    # Bullet loan reports remaining principal (100,000)
+    assert bullet_detail['outstanding_balance_paise'] == 100000
+
+    # Instalment loan reports schedule balance (220,000) + penalty (5,000) = 225,000
+    assert inst_detail['outstanding_balance_paise'] == 225000
+
+    # Total matches exactly sum of active loan details
+    assert data['total_outstanding_balance_paise'] == 100000 + 225000
+
+    # Record partial bullet collection: 40,000 paise
+    LedgerTx.objects.create(
+        tenant=tenant, operation_id=str(uuid.uuid4()), loan=bullet_loan, transaction_type='COLLECTION',
+        amount_paise=40000, allocated_principal_paise=40000, allocated_markup_paise=0,
+        allocated_penalty_paise=0, unallocated_surplus_paise=0, effective_date='2026-02-10'
+    )
+
+    resp_after = api_client.get(url)
+    assert resp_after.status_code == 200
+    data_after = resp_after.data
+
+    bullet_detail_after = next(item for item in data_after['loans'] if item['id'] == str(bullet_loan.id))
+    assert bullet_detail_after['outstanding_balance_paise'] == 60000
+    assert data_after['total_outstanding_balance_paise'] == 60000 + 225000
+
+
+
 
 
 

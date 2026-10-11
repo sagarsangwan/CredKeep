@@ -1,7 +1,7 @@
 import uuid
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -106,6 +106,12 @@ class DeviceRegisterView(APIView):
         if device_id_str:
             try:
                 device_id = uuid.UUID(str(device_id_str))
+                existing = Device.objects.filter(id=device_id).first()
+                if existing and existing.tenant_id != request.tenant.id:
+                    return Response(
+                        {"error": "Device ID is registered to another tenant."},
+                        status=status.HTTP_409_CONFLICT
+                    )
                 device, created = Device.objects.get_or_create(
                     id=device_id,
                     tenant=request.tenant,
@@ -119,6 +125,11 @@ class DeviceRegisterView(APIView):
                 return Response(
                     {"error": "Invalid device_id format."},
                     status=status.HTTP_400_BAD_REQUEST
+                )
+            except IntegrityError:
+                return Response(
+                    {"error": "Device ID is registered to another tenant."},
+                    status=status.HTTP_409_CONFLICT
                 )
         else:
             device = Device.objects.create(

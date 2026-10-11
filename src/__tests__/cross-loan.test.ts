@@ -1,5 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import { TransactionRepository } from '../core/database/transactionRepository';
+import { LoanRepository } from '../core/database/loanRepository';
+import { ScheduleOptions } from '../core/domain/schedule';
 import { Paise, toPaise } from '../core/domain/money';
 import { OutboxManager } from '../core/sync/outbox';
 import { SyncService } from '../core/sync/syncService';
@@ -3027,6 +3029,122 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(errorResult.success).toBe(false);
     expect(errorResult.error).toMatch(/Portfolio reconciliation verification error.*Connection refused/);
     expect(await V1DataExtractor.isMigrationCompleted(db)).toBe(false);
+  });
+
+  it('enforces loan creation idempotency and prevents duplicate local loan creation on retry with clientOpId', async () => {
+    const db = createRealSqliteDb();
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-idemp', 'Borrower Idemp', '9988776655', '2026-01-01')`);
+
+    const loanRepo = new LoanRepository(db);
+    const options: ScheduleOptions = {
+      principal: toPaise(10000),
+      markupFactor: 0.1,
+      termMonths: 2,
+      startDate: '2026-01-01',
+      dueDay: 1,
+      productType: 'instalment',
+    };
+
+    // First creation
+    const loan1 = await loanRepo.createLoanWithSchedule('b-idemp', options, 'client-op-loan-101');
+    expect(loan1).toBeDefined();
+    expect(loan1.principal_paise).toBe(toPaise(10000));
+
+    const loansCount1 = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) as count FROM loans`);
+    const schedulesCount1 = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) as count FROM repayment_schedules`);
+    const outboxCount1 = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) as count FROM sync_outbox WHERE operation_id = 'client-op-loan-101'`);
+
+    expect(loansCount1?.count).toBe(1);
+    expect(schedulesCount1?.count).toBe(2);
+    expect(outboxCount1?.count).toBe(1);
+
+    // Retry with exact same clientOpId
+    const loan2 = await loanRepo.createLoanWithSchedule('b-idemp', options, 'client-op-loan-101');
+    expect(loan2.id).toBe(loan1.id);
+
+    const loansCount2 = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) as count FROM loans`);
+    const schedulesCount2 = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) as count FROM repayment_schedules`);
+    const outboxCount2 = await db.getFirstAsync<{ count: number }>(`SELECT COUNT(*) as count FROM sync_outbox WHERE operation_id = 'client-op-loan-101'`);
+
+    expect(loansCount2?.count).toBe(1);
+    expect(schedulesCount2?.count).toBe(2);
+    expect(outboxCount2?.count).toBe(1);
+
+    // Retry with same clientOpId but conflicting principal
+    await expect(
+      loanRepo.createLoanWithSchedule('b-idemp', { ...options, principal: toPaise(20000) }, 'client-op-loan-101')
+    ).rejects.toThrow(/Idempotency conflict/);
+  });
+
+  it('bounds penalty balance by payment effective date during pending collection replay', async () => {
+    const db = createRealSqliteDb();
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-pen', 'Penalty Test', '9112233445', '2026-01-01')`);
+
+    const loanRepo = new LoanRepository(db);
+    const loan = await loanRepo.createLoanWithSchedule('b-pen', {
+      principal: toPaise(5000),
+      markupFactor: 0.1,
+      termMonths: 1,
+      startDate: '2026-01-01',
+      dueDay: 1,
+      productType: 'instalment',
+    }, 'loan-op-pen');
+
+    // Create a pending collection in outbox dated 2026-02-05 for ₹1000
+    const collectionOpId = 'col-op-early-pay';
+    await db.runAsync(
+      `INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+       VALUES (?, ?, 'record_collection', ?, 'PENDING', ?)`,
+      [
+        'outbox-1',
+        collectionOpId,
+        JSON.stringify({
+          loan_id: loan.id,
+          amount_paise: toPaise(1000),
+          effective_date: '2026-02-05',
+          payment_method: 'CASH',
+          is_cash: true,
+        }),
+        '2026-02-05T10:00:00.000Z',
+      ]
+    );
+
+    // Initial collection transaction row in SQLite
+    await db.runAsync(
+      `INSERT INTO transactions (
+        id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+        amount_paise, allocated_principal_paise, allocated_markup_paise,
+        allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at
+      ) VALUES (?, ?, ?, 'COLLECTION', 1, 'CASH', ?, ?, ?, 0, 0, '2026-02-05', '2026-02-05T10:00:00.000Z')`,
+      ['tx-early', collectionOpId, loan.id, toPaise(1000), toPaise(900), toPaise(100)]
+    );
+
+    // Later penalty assessed on 2026-03-01 (1 month later than the payment)
+    await db.runAsync(
+      `INSERT INTO transactions (
+        id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+        amount_paise, allocated_principal_paise, allocated_markup_paise,
+        allocated_penalty_paise, unallocated_surplus_paise, effective_date, created_at
+      ) VALUES (?, ?, ?, 'PENALTY_ASSESSMENT', 0, 'CASH', ?, 0, 0, 0, 0, '2026-03-01', '2026-03-01T00:00:00.000Z')`,
+      ['tx-pen-later', 'pen-op-later', loan.id, toPaise(500)]
+    );
+
+    // Replay pending collections
+    await SyncService.reapplyPendingCollections(db, loan.id);
+
+    // Verify net penalty allocated to tx-early is STILL 0 (did NOT divert into future 2026-03-01 penalty)
+    const netTx = await db.getFirstAsync<{ net_penalty: number; net_principal: number; net_markup: number }>(
+      `SELECT
+         COALESCE(SUM(allocated_penalty_paise), 0) as net_penalty,
+         COALESCE(SUM(allocated_principal_paise), 0) as net_principal,
+         COALESCE(SUM(allocated_markup_paise), 0) as net_markup
+       FROM transactions
+       WHERE loan_id = ? AND (operation_id = ? OR instr(operation_id, 'realloc::' || ? || '::') = 1)`,
+      [loan.id, collectionOpId, collectionOpId]
+    );
+
+    expect(netTx?.net_penalty).toBe(0);
+    expect((netTx?.net_principal || 0) + (netTx?.net_markup || 0)).toBe(toPaise(1000));
   });
 });
 
