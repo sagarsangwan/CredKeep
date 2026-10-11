@@ -5,7 +5,8 @@ import { AuthStore } from '../auth/authStore';
 import { OutboxManager, registerOutboxRevertHandler } from './outbox';
 import { allocatePayment } from '../domain/allocation';
 import { Paise } from '../domain/money';
-import { isUuid, deterministicUuid } from '../migration/uuidUtils';
+import { getMigratedTransactionOpId } from '../migration/uuidUtils';
+
 
 export interface SyncResult {
   pushedCount: number;
@@ -306,17 +307,16 @@ export class SyncService {
           );
           if (!existing) {
             const allLocalTx = await tx.getAllAsync<any>(
-              `SELECT id, operation_id, loan_id, effective_date, amount_paise, transaction_type, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise FROM transactions WHERE transaction_type = 'COLLECTION'`
+              `SELECT id, operation_id, loan_id, effective_date, amount_paise, transaction_type, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise FROM transactions WHERE transaction_type IN ('COLLECTION', 'WAIVER', 'REVERSAL')`
             );
             for (const ltx of allLocalTx || []) {
-              const expectedMigOpId = ltx.operation_id && isUuid(ltx.operation_id)
-                ? ltx.operation_id
-                : deterministicUuid(`mig-tx-${ltx.id || ltx.operation_id || `${ltx.loan_id}-${ltx.effective_date}-${ltx.amount_paise}`}`);
+              const expectedMigOpId = getMigratedTransactionOpId(ltx);
               if (expectedMigOpId === payload.operation_id || ltx.id === payload.id || ltx.operation_id === payload.operation_id) {
                 existing = ltx;
                 break;
               }
             }
+
           }
         }
         if (!existing) {

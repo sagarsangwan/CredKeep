@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import HealthCheckView, ReadinessCheckView
 from .views_auth import RegisterView, LoginView, DeviceRegisterView
-from .views_sync import SyncPushView, SyncPullView
+from .views_sync import SyncPushView, SyncPullView, PortfolioSummaryView
 from tenants.views import DeviceListView
 
 urlpatterns = [
@@ -17,7 +17,10 @@ urlpatterns = [
     # Sync endpoints
     path('sync/push/', SyncPushView.as_view(), name='sync-push'),
     path('sync/pull/', SyncPullView.as_view(), name='sync-pull'),
+    path('sync/portfolio/', PortfolioSummaryView.as_view(), name='portfolio-summary'),
+    path('portfolio/summary/', PortfolioSummaryView.as_view(), name='portfolio-summary-alt'),
 
     # Tenancy / legacy devices
     path('devices/', DeviceListView.as_view(), name='device-list'),
 ]
+

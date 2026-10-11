@@ -1,7 +1,8 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import { OutboxManager } from '../sync/outbox';
 import { SyncService } from '../sync/syncService';
-import { isUuid, deterministicUuid } from './uuidUtils';
+import { ApiClient } from '../api/client';
+import { isUuid, deterministicUuid, getMigratedTransactionOpId } from './uuidUtils';
 
 export interface V1BorrowerRecord {
   id: string;
@@ -134,7 +135,7 @@ export class V1DataExtractor {
           start_date: l.start_date,
           due_day: l.due_day,
           product_type: l.product_type,
-          status: l.status || 'ACTIVE',
+          status: l.status === 'WRITTEN_OFF' ? 'WRITTEN_OFF' : 'ACTIVE',
         },
       });
     }
@@ -155,11 +156,8 @@ export class V1DataExtractor {
 
     // 4. Historical collections and waivers
     for (const tx of extracted.transactions) {
+      const opId = getMigratedTransactionOpId(tx);
       if (tx.transaction_type === 'COLLECTION') {
-        const opId = tx.operation_id && isUuid(tx.operation_id)
-          ? tx.operation_id
-          : deterministicUuid(`mig-tx-${tx.id || tx.operation_id || `${tx.loan_id}-${tx.effective_date}-${tx.amount_paise}`}`);
-
         operations.push({
           operation_id: opId,
           type: 'record_collection',
@@ -172,10 +170,6 @@ export class V1DataExtractor {
           },
         });
       } else if (tx.transaction_type === 'WAIVER') {
-        const opId = tx.operation_id && isUuid(tx.operation_id)
-          ? tx.operation_id
-          : deterministicUuid(`mig-waiver-${tx.id || tx.operation_id || `${tx.loan_id}-${tx.effective_date}-${tx.amount_paise}`}`);
-
         operations.push({
           operation_id: opId,
           type: 'waive_penalty',
@@ -203,9 +197,7 @@ export class V1DataExtractor {
       const atomicMigrationWork = async (tx: any) => {
         const txsToRekey: { opId: string; legacyId: string; legacyOpId: string }[] = [];
         for (const txRecord of extracted.transactions) {
-          const opId = txRecord.operation_id && isUuid(txRecord.operation_id)
-            ? txRecord.operation_id
-            : deterministicUuid(`mig-tx-${txRecord.id || txRecord.operation_id || `${txRecord.loan_id}-${txRecord.effective_date}-${txRecord.amount_paise}`}`);
+          const opId = getMigratedTransactionOpId(txRecord);
 
           if (txRecord.operation_id !== opId || txRecord.id !== opId) {
             txsToRekey.push({
@@ -332,34 +324,66 @@ export class V1DataExtractor {
       const expectedCollectionsCount = extracted.transactions.filter(t => t.transaction_type === 'COLLECTION').length;
       const expectedTotalCollections = extracted.transactions.filter(t => t.transaction_type === 'COLLECTION').reduce((sum, t) => sum + (t.amount_paise || 0), 0);
 
-      if (typeof (db as any).getAllAsync === 'function') {
+      if (pushResult.failed === 0 && allSynced) {
         try {
-          const localLoans = await (db as any).getAllAsync(`SELECT status, principal_paise FROM loans`);
-          if (localLoans && localLoans.length > 0) {
-            const currentActive = localLoans.filter((l: any) => (l.status || 'ACTIVE') === 'ACTIVE').length;
-            const currentWrittenOff = localLoans.filter((l: any) => l.status === 'WRITTEN_OFF').length;
-            const currentSettled = localLoans.filter((l: any) => l.status === 'SETTLED').length;
-            const currentPrincipal = localLoans.reduce((sum: number, l: any) => sum + (l.principal_paise || 0), 0);
+          // A. Pull authoritative server delta state into local replica
+          await SyncService.pullChanges(db);
 
-            if (currentActive !== expectedActiveLoans || currentWrittenOff !== expectedWrittenOffLoans || currentSettled !== expectedSettledLoans || currentPrincipal !== expectedTotalPrincipal) {
-              reconciliationMatches = false;
-              reconciliationError = `Portfolio reconciliation mismatch: loan status counts or principal balance do not match V1 baseline.`;
-            }
+          // B. Query authoritative server portfolio summary
+          const serverPortfolio = await ApiClient.get('/sync/portfolio/');
+          if (!serverPortfolio) {
+            throw new Error('Authoritative server portfolio summary is unavailable');
           }
 
-          if (typeof (db as any).getFirstAsync === 'function') {
-            const localTxTotals = await (db as any).getFirstAsync(
-              `SELECT COUNT(*) as count, COALESCE(SUM(amount_paise), 0) as total FROM transactions WHERE transaction_type = 'COLLECTION'`
-            );
-            if (localTxTotals) {
-              if (localTxTotals.count !== expectedCollectionsCount || localTxTotals.total !== expectedTotalCollections) {
+          if (
+            serverPortfolio.active_loans_count !== expectedActiveLoans ||
+            serverPortfolio.settled_loans_count !== expectedSettledLoans ||
+            serverPortfolio.written_off_loans_count !== expectedWrittenOffLoans ||
+            serverPortfolio.total_principal_paise !== expectedTotalPrincipal ||
+            serverPortfolio.total_collections_count !== expectedCollectionsCount ||
+            serverPortfolio.total_collections_paise !== expectedTotalCollections
+          ) {
+            reconciliationMatches = false;
+            reconciliationError = `Server portfolio reconciliation mismatch: server balances or counts do not match V1 baseline.`;
+          }
+
+          // C. Verify local replica state
+          if (typeof (db as any).getAllAsync === 'function') {
+            const localLoans = await (db as any).getAllAsync(`SELECT status, principal_paise FROM loans`);
+            if (localLoans && localLoans.length > 0) {
+              const currentActive = localLoans.filter((l: any) => (l.status || 'ACTIVE') === 'ACTIVE').length;
+              const currentWrittenOff = localLoans.filter((l: any) => l.status === 'WRITTEN_OFF').length;
+              const currentSettled = localLoans.filter((l: any) => l.status === 'SETTLED').length;
+              const currentPrincipal = localLoans.reduce((sum: number, l: any) => sum + (l.principal_paise || 0), 0);
+
+              if (currentActive !== expectedActiveLoans || currentWrittenOff !== expectedWrittenOffLoans || currentSettled !== expectedSettledLoans || currentPrincipal !== expectedTotalPrincipal) {
                 reconciliationMatches = false;
-                reconciliationError = `Portfolio reconciliation mismatch: collection count or receipts total do not match V1 baseline.`;
+                reconciliationError = `Local replica reconciliation mismatch: local loan status counts or principal balance do not match V1 baseline.`;
+              }
+            }
+
+            if (typeof (db as any).getFirstAsync === 'function') {
+              const localTxTotals = await (db as any).getFirstAsync(
+                `SELECT COUNT(*) as count, COALESCE(SUM(amount_paise), 0) as total FROM transactions WHERE transaction_type = 'COLLECTION'`
+              );
+              if (localTxTotals) {
+                if (localTxTotals.count !== expectedCollectionsCount || localTxTotals.total !== expectedTotalCollections) {
+                  reconciliationMatches = false;
+                  reconciliationError = `Local replica reconciliation mismatch: collection count or receipts total do not match V1 baseline.`;
+                }
               }
             }
           }
-        } catch {
-          // If query fails in test mock without these tables/methods, ignore
+        } catch (err: any) {
+          reconciliationMatches = false;
+          reconciliationError = `Portfolio reconciliation verification error: ${err?.message || String(err)}`;
+        }
+      } else {
+        reconciliationMatches = false;
+        if (pushResult.failed > 0) {
+          reconciliationError = `${pushResult.failed} operations failed to push to cloud`;
+        } else if (!allSynced) {
+          reconciliationError = 'Cloud push incomplete: pending operations remain unacknowledged';
         }
       }
 

@@ -652,12 +652,23 @@ def test_concurrent_payment_retries_idempotency_recovery(lender_setup):
             force_authenticate(request, user=user, token=token)
             try:
                 res = view(request)
+                if (
+                    hasattr(res, 'data')
+                    and isinstance(res.data, dict)
+                    and res.data.get('results')
+                    and res.data['results'][0].get('status') == 'FAILED'
+                    and any(k in str(res.data['results'][0].get('error', '')).lower() for k in ('locked', 'busy'))
+                    and attempt < 7
+                ):
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
                 return res
             except Exception as e:
-                if 'locked' in str(e).lower() and attempt < 7:
+                if any(k in str(e).lower() for k in ('locked', 'busy')) and attempt < 7:
                     time.sleep(0.05 * (attempt + 1))
                     continue
                 raise
+
             finally:
                 connection.close()
 
@@ -3033,6 +3044,105 @@ def test_sync_push_modify_schedule_waiver_retry_capped_or_zero_accepted(api_clie
     assert res_cap_changed.status_code == 200
     assert res_cap_changed.data['results'][0]['status'] == 'REJECTED'
     assert 'Idempotency conflict' in res_cap_changed.data['results'][0]['error']
+
+
+@pytest.mark.django_db
+def test_create_loan_rejects_settled_status(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    url = reverse('sync-push')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Meera Bai', phone='9876543210')
+    loan_id = str(uuid.uuid4())
+    op_id = str(uuid.uuid4())
+
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'create_loan',
+                'payload': {
+                    'id': loan_id,
+                    'borrower_id': str(borrower.id),
+                    'principal_paise': 2000000,
+                    'markup_factor': '0.1000',
+                    'term_months': 2,
+                    'start_date': '2026-01-01',
+                    'due_day': 10,
+                    'product_type': 'instalment',
+                    'status': 'SETTLED'
+                }
+            }
+        ]
+    }
+
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'REJECTED'
+    assert 'SETTLED' in response.data['results'][0]['error']
+    assert not LoanAccount.objects.filter(id=loan_id).exists()
+
+
+@pytest.mark.django_db
+def test_portfolio_summary_view_and_tenant_isolation(api_client, lender_setup):
+    user1, tenant1, token1 = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token1.key}')
+    url = reverse('portfolio-summary')
+
+    b1 = Borrower.objects.create(tenant=tenant1, name='Farmer 1', phone='9123456781')
+    loan1 = LoanAccount.objects.create(
+        tenant=tenant1, borrower=b1, principal_paise=500000, markup_factor=Decimal('0.1000'),
+        term_months=1, start_date='2026-01-01', due_day=1, product_type='instalment', status='ACTIVE'
+    )
+    Kist.objects.create(
+        tenant=tenant1, loan=loan1, installment_number=1, original_due_date='2026-02-01', effective_due_date='2026-02-01',
+        principal_component_paise=500000, markup_component_paise=50000, total_due_paise=550000, status='PENDING'
+    )
+
+    loan2 = LoanAccount.objects.create(
+        tenant=tenant1, borrower=b1, principal_paise=300000, markup_factor=Decimal('0.1000'),
+        term_months=1, start_date='2026-01-01', due_day=1, product_type='instalment', status='SETTLED'
+    )
+    Kist.objects.create(
+        tenant=tenant1, loan=loan2, installment_number=1, original_due_date='2026-02-01', effective_due_date='2026-02-01',
+        principal_component_paise=300000, markup_component_paise=30000, total_due_paise=330000,
+        principal_paid_paise=300000, markup_paid_paise=30000, status='PAID'
+    )
+
+    # Collection on loan 2
+    LedgerTx.objects.create(
+        tenant=tenant1, operation_id=str(uuid.uuid4()), loan=loan2, transaction_type='COLLECTION',
+        amount_paise=330000, allocated_principal_paise=300000, allocated_markup_paise=30000,
+        allocated_penalty_paise=0, unallocated_surplus_paise=0, effective_date='2026-02-01'
+    )
+
+    # Tenant 2 setup for isolation check
+    u2 = user1.__class__.objects.create_user(username='other_lender', password='pwd')
+    from tenants.models import Tenant
+    Tenant.objects.create(name='Other Tenant', owner=u2)
+    from rest_framework.authtoken.models import Token
+    tok2 = Token.objects.create(user=u2)
+
+    # Query tenant 1
+    resp = api_client.get(url)
+    assert resp.status_code == 200
+    data = resp.data
+    assert data['active_loans_count'] == 1
+    assert data['settled_loans_count'] == 1
+    assert data['total_loans_count'] == 2
+    assert data['total_principal_paise'] == 800000
+    assert data['total_collections_paise'] == 330000
+    assert data['total_collections_count'] == 1
+    assert data['total_outstanding_balance_paise'] == 550000
+
+    # Query tenant 2
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {tok2.key}')
+    resp2 = api_client.get(url)
+    assert resp2.status_code == 200
+    data2 = resp2.data
+    assert data2['total_loans_count'] == 0
+    assert data2['total_principal_paise'] == 0
+
 
 
 

@@ -7,6 +7,7 @@ import { V1DataExtractor } from '../core/migration/v1Extractor';
 import { runMigrations } from '../core/database/schema';
 import { getDatabaseName } from '../core/database/dbName';
 import { AuthStore } from '../core/auth/authStore';
+import { ApiClient } from '../core/api/client';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 
@@ -2727,13 +2728,32 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const txOp = ops.find(o => o.type === 'record_collection')!;
     const serverDeterministicOpId = txOp.operation_id;
 
-    // Run migration with simulated cloud push acknowledgment
+    // Run migration with simulated cloud push acknowledgment and portfolio reconciliation
     jest.spyOn(SyncService, 'pushPending').mockImplementationOnce(async () => {
       await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED'`);
       return { pushed: ops.length, failed: 0 };
     });
+    jest.spyOn(SyncService, 'pullChanges').mockImplementationOnce(async () => ({ pulled: 0 }));
+    jest.spyOn(ApiClient, 'get').mockImplementationOnce(async (url: string) => {
+      if (url === '/sync/portfolio/') {
+        return {
+          active_loans_count: 1,
+          settled_loans_count: 0,
+          written_off_loans_count: 0,
+          total_loans_count: 1,
+          total_principal_paise: 1000,
+          total_collections_paise: 1000,
+          total_collections_count: 1,
+          total_waivers_paise: 0,
+          total_outstanding_balance_paise: 0,
+          loans: [],
+        };
+      }
+      return {};
+    });
     const migrationResult = await V1DataExtractor.migrateToCloud(db);
     expect(migrationResult.success).toBe(true);
+
 
     // Verify atomic rekeying: both receipt and its adjustment now reference the server deterministic UUID!
     const rekeyedTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE id = ?`, [serverDeterministicOpId]);
@@ -2785,4 +2805,228 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(pull2.principal).toBe(700);
     expect(pull2.markup).toBe(300);
   });
+
+  it('migrated legacy waiver rekeys with shared identity and prevents duplicated forgiveness across repeated pulls', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-waiver-shared';
+    const loanId = 'loan-waiver-shared';
+    const legacyWaiverId = 'legacy-tx-waiver-1';
+    const legacyOpId = 'legacy-op-waiver-1';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Waiver Borrower', '9876543199', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-w-1', ?, 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`, [loanId]);
+
+    // Local V1 waiver transaction: 500 paise penalty waived
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at)
+      VALUES (?, ?, ?, 'WAIVER', 500, 0, 0, 0, 0, 500, '2026-01-02', '2026-01-02')
+    `, [legacyWaiverId, legacyOpId, loanId]);
+
+    // Extract V1 records and build push operations
+    const extracted = await V1DataExtractor.extract(db);
+    const ops = V1DataExtractor.buildPushPayloads(extracted);
+    const waiverOp = ops.find(o => o.type === 'waive_penalty')!;
+    expect(waiverOp).toBeDefined();
+    expect(waiverOp.operation_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+    // Mock cloud push acknowledgment and portfolio reconciliation endpoint
+    jest.spyOn(SyncService, 'pushPending').mockImplementationOnce(async () => {
+      await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED'`);
+      return { pushed: ops.length, failed: 0 };
+    });
+    jest.spyOn(SyncService, 'pullChanges').mockImplementationOnce(async () => ({ pulled: 0 }));
+    jest.spyOn(ApiClient, 'get').mockImplementationOnce(async (url: string) => {
+      if (url === '/sync/portfolio/') {
+        return {
+          active_loans_count: 1,
+          settled_loans_count: 0,
+          written_off_loans_count: 0,
+          total_loans_count: 1,
+          total_principal_paise: 1000,
+          total_collections_paise: 0,
+          total_collections_count: 0,
+          total_waivers_paise: 500,
+          total_outstanding_balance_paise: 1000,
+          loans: [],
+        };
+      }
+      return {};
+    });
+
+    const result = await V1DataExtractor.migrateToCloud(db);
+    expect(result.success).toBe(true);
+
+    // Verify atomic rekeying: local SQLite waiver row has been rekeyed to the exact deterministic UUID used for upload
+    const rekeyedWaiver = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE loan_id = ?`, [loanId]);
+    expect(rekeyedWaiver.operation_id).toBe(waiverOp.operation_id);
+
+    // Server delta sync returning authoritative server REVERSAL with the same operation_id
+    const serverDelta = {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: waiverOp.operation_id,
+        operation_id: waiverOp.operation_id,
+        loan_id: loanId,
+        transaction_type: 'REVERSAL',
+        amount_paise: 0,
+        allocated_principal_paise: 0,
+        allocated_markup_paise: 0,
+        allocated_penalty_paise: 0,
+        unallocated_surplus_paise: 0,
+        forgiven_penalty_paise: 500,
+        effective_date: '2026-01-02',
+        created_at: '2026-01-02T00:00:00Z',
+      }
+    };
+
+    // First pull: must recognize existing transaction and NOT duplicate forgiveness
+    await SyncService.applyServerChange(db, serverDelta);
+
+    const txs1 = await db.getAllAsync<any>(`SELECT * FROM transactions WHERE loan_id = ?`, [loanId]);
+    expect(txs1.length).toBe(1);
+    expect(txs1[0].forgiven_penalty_paise).toBe(500);
+
+    // Second pull (idempotency check): must still have exactly 1 transaction
+    await SyncService.applyServerChange(db, serverDelta);
+
+    const txs2 = await db.getAllAsync<any>(`SELECT * FROM transactions WHERE loan_id = ?`, [loanId]);
+    expect(txs2.length).toBe(1);
+    expect(txs2[0].forgiven_penalty_paise).toBe(500);
+  });
+
+  it('migrated settled loan with collections reconstructs schedule paid allocations and achieves settled status', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-settled-recon';
+    const loanId = 'loan-settled-recon';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Settled Borrower', '9876543188', '2026-01-01')`, [borrowerId]);
+    // In V1, loan has status 'SETTLED'
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 2000, 0.1, 2, '2026-01-01', 1, 'instalment', 'SETTLED', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-s-1', ?, 1, '2026-02-01', '2026-02-01', 1000, 100, 1100, 1000, 100, 'PAID')`, [loanId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-s-2', ?, 2, '2026-03-01', '2026-03-01', 1000, 100, 1100, 1000, 100, 'PAID')`, [loanId]);
+
+    // Two historical payments paying off both installments
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, sequence_number, created_at)
+      VALUES ('tx-s-1', 'op-s-1', ?, 'COLLECTION', 1100, 1000, 100, 0, 0, '2026-02-01', 1, '2026-02-01')
+    `, [loanId]);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, unallocated_surplus_paise, effective_date, sequence_number, created_at)
+      VALUES ('tx-s-2', 'op-s-2', ?, 'COLLECTION', 1100, 1000, 100, 0, 0, '2026-03-01', 2, '2026-03-01')
+    `, [loanId]);
+
+    // Extract V1 records
+    const extracted = await V1DataExtractor.extract(db);
+    const ops = V1DataExtractor.buildPushPayloads(extracted);
+
+    // Verify create_loan operation is pushed with status 'ACTIVE' so schedules accept payments
+    const loanOp = ops.find(o => o.type === 'create_loan')!;
+    expect(loanOp.payload.status).toBe('ACTIVE');
+
+    // Verify collections follow create_loan
+    const colOps = ops.filter(o => o.type === 'record_collection');
+    expect(colOps.length).toBe(2);
+
+    // Mock push acknowledgment and server reconciliation
+    jest.spyOn(SyncService, 'pushPending').mockImplementationOnce(async () => {
+      await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED'`);
+      return { pushed: ops.length, failed: 0 };
+    });
+    jest.spyOn(SyncService, 'pullChanges').mockImplementationOnce(async () => ({ pulled: 0 }));
+    jest.spyOn(ApiClient, 'get').mockImplementationOnce(async (url: string) => {
+      if (url === '/sync/portfolio/') {
+        return {
+          active_loans_count: 0,
+          settled_loans_count: 1,
+          written_off_loans_count: 0,
+          total_loans_count: 1,
+          total_principal_paise: 2000,
+          total_collections_paise: 2200,
+          total_collections_count: 2,
+          total_waivers_paise: 0,
+          total_outstanding_balance_paise: 0,
+          loans: [{ id: loanId, status: 'SETTLED', principal_paise: 2000, outstanding_balance_paise: 0 }],
+        };
+      }
+      return {};
+    });
+
+    const result = await V1DataExtractor.migrateToCloud(db);
+    expect(result.success).toBe(true);
+
+    // Verify that local database achieves settled state with kists 100% paid
+    const localLoan = await db.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+    expect(localLoan.status).toBe('SETTLED');
+
+    const kists = await db.getAllAsync<any>(`SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number`, [loanId]);
+    expect(kists[0].status).toBe('PAID');
+    expect(kists[0].principal_paid_paise).toBe(1000);
+    expect(kists[0].markup_paid_paise).toBe(100);
+    expect(kists[1].status).toBe('PAID');
+    expect(kists[1].principal_paid_paise).toBe(1000);
+    expect(kists[1].markup_paid_paise).toBe(100);
+  });
+
+  it('migration verification queries authoritative server portfolio and fails when totals mismatch or query throws', async () => {
+    const db = createRealSqliteDb();
+
+    const borrowerId = 'b-mismatch';
+    const loanId = 'loan-mismatch';
+
+    await db.runAsync(`INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, 'Mismatch Borrower', '9876543177', '2026-01-01')`, [borrowerId]);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES (?, ?, 5000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`, [loanId, borrowerId]);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-m-1', ?, 1, '2026-01-01', '2026-01-01', 5000, 0, 5000, 0, 0, 'PENDING')`, [loanId]);
+
+    const extracted = await V1DataExtractor.extract(db);
+    const ops = V1DataExtractor.buildPushPayloads(extracted);
+
+    // Case 1: Server portfolio totals mismatch extracted baseline (e.g. server reports principal as 999999 instead of 5000)
+    jest.spyOn(SyncService, 'pushPending').mockImplementationOnce(async () => {
+      await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED'`);
+      return { pushed: ops.length, failed: 0 };
+    });
+    jest.spyOn(SyncService, 'pullChanges').mockImplementationOnce(async () => ({ pulled: 0 }));
+    jest.spyOn(ApiClient, 'get').mockImplementationOnce(async (url: string) => {
+      if (url === '/sync/portfolio/') {
+        return {
+          active_loans_count: 1,
+          settled_loans_count: 0,
+          written_off_loans_count: 0,
+          total_loans_count: 1,
+          total_principal_paise: 999999, // Mismatch!
+          total_collections_paise: 0,
+          total_collections_count: 0,
+          total_waivers_paise: 0,
+          total_outstanding_balance_paise: 999999,
+          loans: [],
+        };
+      }
+      return {};
+    });
+
+    const mismatchResult = await V1DataExtractor.migrateToCloud(db);
+    expect(mismatchResult.success).toBe(false);
+    expect(mismatchResult.error).toMatch(/Server portfolio reconciliation mismatch/);
+    expect(await V1DataExtractor.isMigrationCompleted(db)).toBe(false);
+
+    // Case 2: Server query throws (network or 500 error) -> exception is NOT swallowed and migration fails
+    jest.spyOn(SyncService, 'pushPending').mockImplementationOnce(async () => {
+      await db.runAsync(`UPDATE sync_outbox SET status = 'SYNCED'`);
+      return { pushed: ops.length, failed: 0 };
+    });
+    jest.spyOn(SyncService, 'pullChanges').mockImplementationOnce(async () => ({ pulled: 0 }));
+    jest.spyOn(ApiClient, 'get').mockImplementationOnce(async () => {
+      throw new Error('Connection refused to /sync/portfolio/');
+    });
+
+    const errorResult = await V1DataExtractor.migrateToCloud(db);
+    expect(errorResult.success).toBe(false);
+    expect(errorResult.error).toMatch(/Portfolio reconciliation verification error.*Connection refused/);
+    expect(await V1DataExtractor.isMigrationCompleted(db)).toBe(false);
+  });
 });
+

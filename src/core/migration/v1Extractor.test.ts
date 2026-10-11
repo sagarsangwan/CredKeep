@@ -2,14 +2,31 @@ import { V1DataExtractor } from './v1Extractor';
 import { SyncService } from '../sync/syncService';
 import { OutboxManager } from '../sync/outbox';
 
-jest.mock('../sync/syncService', () => ({
-  SyncService: {
-    pushPending: jest.fn(async () => ({ pushed: 3, failed: 0 })),
-  },
-}));
-
 const mockMeta: Record<string, string> = {};
 const mockOutbox = new Map<string, string>();
+
+jest.mock('../api/client', () => ({
+  ApiClient: {
+    get: jest.fn(async (url: string) => {
+      if (url === '/sync/portfolio/') {
+        return {
+          active_loans_count: 1,
+          settled_loans_count: 0,
+          written_off_loans_count: 0,
+          total_loans_count: 1,
+          total_principal_paise: 2400000,
+          total_collections_paise: 260000,
+          total_collections_count: 1,
+          total_waivers_paise: 0,
+          total_outstanding_balance_paise: 2860000,
+          loans: [],
+        };
+      }
+      return {};
+    }),
+    post: jest.fn(),
+  },
+}));
 
 jest.mock('../sync/syncService', () => ({
   SyncService: {
@@ -23,8 +40,10 @@ jest.mock('../sync/syncService', () => ({
       }
       return { pushed: count, failed: 0 };
     }),
+    pullChanges: jest.fn(async () => ({ pulled: 0 })),
   },
 }));
+
 
 jest.mock('../sync/outbox', () => {
   return {
@@ -100,8 +119,15 @@ describe('V1DataExtractor', () => {
         }
         return [];
       }),
+      getFirstAsync: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM transactions')) {
+          return { count: 1, total: 260000 };
+        }
+        return null;
+      }),
     };
   });
+
 
   it('extracts records from all three portfolio tables', async () => {
     const data = await V1DataExtractor.extract(mockDb);

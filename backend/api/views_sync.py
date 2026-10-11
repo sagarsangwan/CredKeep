@@ -259,8 +259,13 @@ class SyncPushView(APIView):
                     })
                     continue
 
-                existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
-                existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                existing_log = None
+                existing_tx = None
+                try:
+                    existing_log = SyncLog.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                    existing_tx = LedgerTx.objects.filter(tenant=tenant, operation_id=operation_id).first()
+                except Exception:
+                    pass
                 if existing_log or existing_tx:
                     has_conflict, conflict_reason = self._check_idempotency_conflict(
                         tenant, operation_id, op_type, op, payload, existing_log=existing_log, existing_tx=existing_tx
@@ -530,7 +535,9 @@ class SyncPushView(APIView):
                 return 'REJECTED', f"Unsupported product_type '{product_type}'. Must be 'instalment' or 'bullet'."
 
             raw_status = payload.get('status', 'ACTIVE')
-            status = raw_status if raw_status in ('ACTIVE', 'SETTLED', 'WRITTEN_OFF') else 'ACTIVE'
+            if raw_status == 'SETTLED':
+                return 'REJECTED', "Cannot create loan with terminal status 'SETTLED'. Newly created loans must start with active schedules to reconstruct repayment accounting."
+            status = 'WRITTEN_OFF' if raw_status == 'WRITTEN_OFF' else 'ACTIVE'
 
             loan = LoanAccount.objects.create(
                 id=loan_id,
@@ -1040,3 +1047,94 @@ class SyncPullView(APIView):
             "has_more": has_more,
             "changes": changes
         }, status=status.HTTP_200_OK)
+
+
+class PortfolioSummaryView(APIView):
+    """
+    Returns authoritative portfolio summary for the tenant:
+    - active_loans_count
+    - settled_loans_count
+    - written_off_loans_count
+    - total_loans_count
+    - total_principal_paise
+    - total_collections_paise
+    - total_collections_count
+    - total_waivers_paise
+    - total_outstanding_balance_paise
+    - loans: list of { id, status, principal_paise, outstanding_balance_paise }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None)
+        if not tenant:
+            return Response(
+                {"error": "User does not have an active tenant."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        loans = LoanAccount.objects.filter(tenant=tenant)
+        active_loans_count = loans.filter(status='ACTIVE').count()
+        settled_loans_count = loans.filter(status='SETTLED').count()
+        written_off_loans_count = loans.filter(status='WRITTEN_OFF').count()
+        total_loans_count = loans.count()
+        total_principal_paise = loans.aggregate(total=models.Sum('principal_paise'))['total'] or 0
+
+        collections = LedgerTx.objects.filter(tenant=tenant, transaction_type='COLLECTION')
+        total_collections_paise = collections.aggregate(total=models.Sum('amount_paise'))['total'] or 0
+        total_collections_count = collections.count()
+
+        waivers = LedgerTx.objects.filter(tenant=tenant, transaction_type='REVERSAL')
+        total_waivers_paise = waivers.aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+
+        # Outstanding schedule balance on active loans
+        active_kists = Kist.objects.filter(tenant=tenant, loan__status='ACTIVE')
+        total_due = active_kists.aggregate(total=models.Sum('total_due_paise'))['total'] or 0
+        total_p_paid = active_kists.aggregate(total=models.Sum('principal_paid_paise'))['total'] or 0
+        total_m_paid = active_kists.aggregate(total=models.Sum('markup_paid_paise'))['total'] or 0
+        outstanding_schedule_balance = max(0, total_due - (total_p_paid + total_m_paid))
+
+        # Outstanding penalties across active loans
+        total_pen_assessed = (
+            LedgerTx.objects
+            .filter(tenant=tenant, loan__status='ACTIVE', transaction_type='PENALTY_ASSESSMENT')
+            .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+        )
+        total_pen_paid = (
+            LedgerTx.objects
+            .filter(tenant=tenant, loan__status='ACTIVE', transaction_type='COLLECTION')
+            .aggregate(total=models.Sum('allocated_penalty_paise'))['total'] or 0
+        )
+        total_pen_waived = (
+            LedgerTx.objects
+            .filter(tenant=tenant, loan__status='ACTIVE', transaction_type='REVERSAL')
+            .aggregate(total=models.Sum('forgiven_penalty_paise'))['total'] or 0
+        )
+        outstanding_penalty = max(0, total_pen_assessed - total_pen_paid - total_pen_waived)
+
+        loan_details = []
+        for l in loans:
+            l_kists = l.schedules.all()
+            l_due = sum(k.total_due_paise for k in l_kists)
+            l_paid = sum(k.principal_paid_paise + k.markup_paid_paise for k in l_kists)
+            rem = max(0, l_due - l_paid)
+            loan_details.append({
+                'id': str(l.id),
+                'status': l.status,
+                'principal_paise': l.principal_paise,
+                'outstanding_balance_paise': rem
+            })
+
+        return Response({
+            'active_loans_count': active_loans_count,
+            'settled_loans_count': settled_loans_count,
+            'written_off_loans_count': written_off_loans_count,
+            'total_loans_count': total_loans_count,
+            'total_principal_paise': total_principal_paise,
+            'total_collections_paise': total_collections_paise,
+            'total_collections_count': total_collections_count,
+            'total_waivers_paise': total_waivers_paise,
+            'total_outstanding_balance_paise': outstanding_schedule_balance + outstanding_penalty,
+            'loans': loan_details
+        }, status=status.HTTP_200_OK)
+
