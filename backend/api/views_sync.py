@@ -271,6 +271,9 @@ class SyncPushView(APIView):
                 markup_factor = Decimal(str(payload.get('markup_factor', '0')))
                 if markup_factor.is_nan() or markup_factor.is_infinite() or markup_factor < 0:
                     return 'REJECTED', 'markup_factor must be a finite non-negative number.'
+                if markup_factor.as_tuple().exponent < -4:
+                    return 'REJECTED', 'markup_factor cannot exceed 4 decimal places.'
+                markup_factor = markup_factor.quantize(Decimal('0.0001'))
             except Exception:
                 return 'REJECTED', 'Invalid markup_factor.'
 
@@ -484,7 +487,10 @@ class SyncPushView(APIView):
             if accrued_penalty_action not in ('NONE', 'WAIVE', 'CAP'):
                 return 'REJECTED', f"Unsupported accrued_penalty_action '{accrued_penalty_action}'."
 
-            # Unconditionally assess penalties through effective modification date before changing schedule due date
+            # Unconditionally assess penalties through effective modification date before changing schedule due date.
+            # Clock skew rule (docs/v2/10-sync-failure-matrix.md):
+            # Authoritative server clock governs penalty assessments to prevent devices
+            # from evading accrued late fees by backdating offline postponement timestamps.
             eff_today = payload.get('effective_date')
             if not eff_today and op.get('timestamp'):
                 eff_today = str(op['timestamp'])
@@ -493,7 +499,9 @@ class SyncPushView(APIView):
             eff_today = str(eff_today)
             if 'T' in eff_today:
                 eff_today = eff_today.split('T')[0]
-            ledger_service.assess_penalties(loan, eff_today)
+            server_date_str = str(timezone.now().date())
+            assess_date_str = max(eff_today, server_date_str)
+            ledger_service.assess_penalties(loan, assess_date_str)
 
             actual_waived = 0
             outstanding_pen = 0

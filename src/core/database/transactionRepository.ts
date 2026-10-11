@@ -62,8 +62,15 @@ export class TransactionRepository {
         const penaltyPaid = await tx.getFirstAsync<any>(
           `SELECT SUM(allocated_penalty_paise) as total FROM transactions
            WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
-             AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
-             AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
+             AND NOT EXISTS (
+               SELECT 1 FROM sync_outbox so
+               WHERE so.status = 'REJECTED'
+                 AND (
+                   transactions.operation_id = so.operation_id
+                   OR transactions.operation_id = 'reversal-' || so.operation_id
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                 )
+             )`,
           [loanId]
         );
         const penaltyForgiven = await tx.getFirstAsync<any>(
@@ -96,8 +103,15 @@ export class TransactionRepository {
           const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
             `SELECT SUM(allocated_principal_paise) as total FROM transactions
              WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
-               AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
-               AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_outbox so
+                 WHERE so.status = 'REJECTED'
+                   AND (
+                     transactions.operation_id = so.operation_id
+                     OR transactions.operation_id = 'reversal-' || so.operation_id
+                     OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                   )
+               )`,
             [loanId]
           );
           pastPrincipalPaid = pastPrincipalPaidRes?.total || 0;

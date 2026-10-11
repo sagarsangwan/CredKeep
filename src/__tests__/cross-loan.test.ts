@@ -1055,7 +1055,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(kist?.markup_paid_paise).toBe(0);
 
     // Compensating REVERSAL transaction was recorded in ledger
-    const reallocTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'realloc-op-p2'`);
+    const reallocTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-p2%'`);
     expect(reallocTx).not.toBeNull();
     expect(reallocTx?.allocated_penalty_paise).toBe(100);
     expect(reallocTx?.allocated_principal_paise).toBe(-100);
@@ -1067,8 +1067,15 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         SUM(allocated_penalty_paise) as penalty
       FROM transactions
       WHERE transaction_type IN ('COLLECTION', 'REVERSAL')
-        AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
-        AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+        AND NOT EXISTS (
+          SELECT 1 FROM sync_outbox so
+          WHERE so.status = 'REJECTED'
+            AND (
+              transactions.operation_id = so.operation_id
+              OR transactions.operation_id = 'reversal-' || so.operation_id
+              OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+            )
+        )
     `);
     expect(journal?.principal).toBe(0);
     expect(journal?.penalty).toBe(100);
@@ -1080,6 +1087,201 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const p3Tx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-p3'`);
     expect(p3Tx?.allocated_penalty_paise).toBe(0);
     expect(p3Tx?.allocated_markup_paise).toBe(100);
+  });
+
+  it('handles sequential rejection with two payments without phantom allocations', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-seq-2', 'Borrower Seq2', '9876543211', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-seq-2', 'b-seq-2', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-seq2-1', 'loan-seq-2', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 100 paise penalty assessed
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-pen-seq2', 'pen-op-seq2', 'loan-seq-2', 'PENALTY_ASSESSMENT', 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // Payment 1 (100 paise) pays penalty
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-seq2-p1', 'op-seq2-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-seq-2', amount_paise: 100, effective_date: '2026-01-02' })}', 'PENDING', '2026-01-02T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-seq2-p1', 'op-seq2-p1', 'loan-seq-2', 'COLLECTION', 100, 0, 0, 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // Payment 2 (100 paise) pays principal
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-seq2-p2', 'op-seq2-p2', 'record_collection', '${JSON.stringify({ loan_id: 'loan-seq-2', amount_paise: 100, effective_date: '2026-01-03' })}', 'PENDING', '2026-01-03T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-seq2-p2', 'op-seq2-p2', 'loan-seq-2', 'COLLECTION', 100, 100, 0, 0, '2026-01-03', '2026-01-03')
+    `);
+
+    // 1. First rejection: server rejects Payment 1
+    await SyncService.revertRejectedPayment(db, 'op-seq2-p1', 'Server rejected payment 1');
+    const p2Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-seq2-p2%'`);
+    expect(p2Realloc?.allocated_penalty_paise).toBe(100);
+    expect(p2Realloc?.allocated_principal_paise).toBe(-100);
+
+    // 2. Second rejection: server ALSO rejects Payment 2 (sequential rejection)
+    await SyncService.revertRejectedPayment(db, 'op-seq2-p2', 'Server rejected payment 2');
+
+    // Both outbox records are marked REJECTED
+    const ob1 = await db.getFirstAsync<any>(`SELECT status FROM sync_outbox WHERE operation_id = 'op-seq2-p1'`);
+    const ob2 = await db.getFirstAsync<any>(`SELECT status FROM sync_outbox WHERE operation_id = 'op-seq2-p2'`);
+    expect(ob1?.status).toBe('REJECTED');
+    expect(ob2?.status).toBe('REJECTED');
+
+    // Schedule has 0 paid
+    const kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-seq2-1'`);
+    expect(kist?.principal_paid_paise).toBe(0);
+    expect(kist?.markup_paid_paise).toBe(0);
+
+    // Ledger sum across all non-rejected collections is 0
+    const nonRejJournal = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as principal,
+        COALESCE(SUM(allocated_penalty_paise), 0) as penalty
+      FROM transactions
+      WHERE transaction_type IN ('COLLECTION', 'REVERSAL')
+        AND NOT EXISTS (
+          SELECT 1 FROM sync_outbox so
+          WHERE so.status = 'REJECTED'
+            AND (
+              transactions.operation_id = so.operation_id
+              OR transactions.operation_id = 'reversal-' || so.operation_id
+              OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+            )
+        )
+    `);
+    expect(nonRejJournal?.principal).toBe(0);
+    expect(nonRejJournal?.penalty).toBe(0);
+
+    // Raw ledger sum for Payment 2 (original + realloc + reversal) is EXACTLY 0 (NO phantom allocations!)
+    const p2Total = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as principal,
+        COALESCE(SUM(allocated_penalty_paise), 0) as penalty
+      FROM transactions
+      WHERE operation_id = 'op-seq2-p2'
+         OR operation_id = 'reversal-op-seq2-p2'
+         OR operation_id LIKE 'realloc-op-seq2-p2%'
+    `);
+    expect(p2Total?.principal).toBe(0);
+    expect(p2Total?.penalty).toBe(0);
+
+    // Subsequent payment P3 pays the 100 paise penalty because no phantom penalty credit survived!
+    const txRepo = new TransactionRepository(db);
+    const resP3 = await txRepo.recordCashPayment('loan-seq-2', 100 as Paise, 'op-seq2-p3', '2026-01-15');
+    expect(resP3.success).toBe(true);
+    const p3Tx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-seq2-p3'`);
+    expect(p3Tx?.allocated_penalty_paise).toBe(100);
+    expect(p3Tx?.allocated_principal_paise).toBe(0);
+  });
+
+  it('handles sequential rejection with three payments reallocating remaining payments cleanly', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-seq-3', 'Borrower Seq3', '9876543212', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-seq-3', 'b-seq-3', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    // Total due 100,100 (100 markup, 100000 principal)
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-seq3-1', 'loan-seq-3', 1, '2026-02-01', '2026-02-01', 100000, 100, 100100, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 100 paise penalty assessed
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-pen-seq3', 'pen-op-seq3', 'loan-seq-3', 'PENALTY_ASSESSMENT', 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // P1 (100 paise) pays penalty
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('ob-seq3-p1', 'op-seq3-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-seq-3', amount_paise: 100, effective_date: '2026-01-02' })}', 'PENDING', '2026-01-02T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-seq3-p1', 'op-seq3-p1', 'loan-seq-3', 'COLLECTION', 100, 0, 0, 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // P2 (100 paise) pays markup
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('ob-seq3-p2', 'op-seq3-p2', 'record_collection', '${JSON.stringify({ loan_id: 'loan-seq-3', amount_paise: 100, effective_date: '2026-01-03' })}', 'PENDING', '2026-01-03T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-seq3-p2', 'op-seq3-p2', 'loan-seq-3', 'COLLECTION', 100, 0, 100, 0, '2026-01-03', '2026-01-03')
+    `);
+
+    // P3 (100 paise) pays principal
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('ob-seq3-p3', 'op-seq3-p3', 'record_collection', '${JSON.stringify({ loan_id: 'loan-seq-3', amount_paise: 100, effective_date: '2026-01-04' })}', 'PENDING', '2026-01-04T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-seq3-p3', 'op-seq3-p3', 'loan-seq-3', 'COLLECTION', 100, 100, 0, 0, '2026-01-04', '2026-01-04')
+    `);
+
+    // Reject P1: P2 now reallocates to penalty (100 paise), P3 reallocates to markup (100 paise)
+    await SyncService.revertRejectedPayment(db, 'op-seq3-p1', 'Reject 1');
+    const p2Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-seq3-p2%' ORDER BY sequence_number DESC LIMIT 1`);
+    expect(p2Realloc?.allocated_penalty_paise).toBe(100);
+    expect(p2Realloc?.allocated_markup_paise).toBe(-100);
+
+    // Reject P2: P3 now reallocates to penalty (100 paise)!
+    await SyncService.revertRejectedPayment(db, 'op-seq3-p2', 'Reject 2');
+    const p3Realloc = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-seq3-p3%' ORDER BY sequence_number DESC LIMIT 1`);
+    expect(p3Realloc?.allocated_penalty_paise).toBe(100);
+    expect(p3Realloc?.allocated_markup_paise).toBe(-100);
+
+    // P3 net in ledger before Reject 3 is exactly 100 penalty
+    const p3NetBeforeRej3 = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as principal,
+        COALESCE(SUM(allocated_markup_paise), 0) as markup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as penalty
+      FROM transactions
+      WHERE operation_id = 'op-seq3-p3' OR operation_id LIKE 'realloc-op-seq3-p3%'
+    `);
+    expect(p3NetBeforeRej3?.penalty).toBe(100);
+    expect(p3NetBeforeRej3?.markup).toBe(0);
+    expect(p3NetBeforeRej3?.principal).toBe(0);
+
+    // P2 has 0 net in ledger
+    const p2Net = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_markup_paise), 0) as markup,
+        COALESCE(SUM(allocated_penalty_paise), 0) as penalty
+      FROM transactions
+      WHERE operation_id = 'op-seq3-p2' OR operation_id = 'reversal-op-seq3-p2' OR operation_id LIKE 'realloc-op-seq3-p2%'
+    `);
+    expect(p2Net?.markup).toBe(0);
+    expect(p2Net?.penalty).toBe(0);
+
+    // Reject P3: All 3 payments are now rejected
+    await SyncService.revertRejectedPayment(db, 'op-seq3-p3', 'Reject 3');
+
+    // P3 has 0 net in ledger
+    const p3Net = await db.getFirstAsync<any>(`
+      SELECT
+        COALESCE(SUM(allocated_principal_paise), 0) as principal,
+        COALESCE(SUM(allocated_penalty_paise), 0) as penalty
+      FROM transactions
+      WHERE operation_id = 'op-seq3-p3' OR operation_id = 'reversal-op-seq3-p3' OR operation_id LIKE 'realloc-op-seq3-p3%'
+    `);
+    expect(p3Net?.principal).toBe(0);
+    expect(p3Net?.penalty).toBe(0);
+
+    // Schedule has 0 paid
+    const kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-seq3-1'`);
+    expect(kist?.principal_paid_paise).toBe(0);
+    expect(kist?.markup_paid_paise).toBe(0);
   });
 
   it('correctly recovers and preserves settlement status for bullet loans and respects penalties', async () => {

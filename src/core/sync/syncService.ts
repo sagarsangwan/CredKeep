@@ -387,11 +387,14 @@ export class SyncService {
            AND operation_id NOT IN (
              SELECT operation_id FROM sync_outbox WHERE status = 'PENDING'
            )
-           AND operation_id NOT IN (
-             SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED'
-           )
-           AND operation_id NOT IN (
-             SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED'
+           AND NOT EXISTS (
+             SELECT 1 FROM sync_outbox so
+             WHERE so.status = 'REJECTED'
+               AND (
+                 transactions.operation_id = so.operation_id
+                 OR transactions.operation_id = 'reversal-' || so.operation_id
+                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+               )
            )
            THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
          COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
@@ -460,8 +463,15 @@ export class SyncService {
         const bulletPrincipalRow = await tx.getFirstAsync<{ total: number }>(
           `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
            WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
-             AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
-             AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
+             AND NOT EXISTS (
+               SELECT 1 FROM sync_outbox so
+               WHERE so.status = 'REJECTED'
+                 AND (
+                   transactions.operation_id = so.operation_id
+                   OR transactions.operation_id = 'reversal-' || so.operation_id
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                 )
+             )`,
           [loanId]
         );
         const bulletPrincipalPaid = bulletPrincipalRow?.total || 0;
@@ -493,6 +503,25 @@ export class SyncService {
       );
       if (existingReversal) return;
 
+      // Query current net allocations across the original collection and any realloc adjustments
+      const netAllocRow = await tx.getFirstAsync<{
+        netAmount: number;
+        netPrincipal: number;
+        netMarkup: number;
+        netPenalty: number;
+        netSurplus: number;
+      }>(
+        `SELECT
+           COALESCE(SUM(amount_paise), 0) as netAmount,
+           COALESCE(SUM(allocated_principal_paise), 0) as netPrincipal,
+           COALESCE(SUM(allocated_markup_paise), 0) as netMarkup,
+           COALESCE(SUM(allocated_penalty_paise), 0) as netPenalty,
+           COALESCE(SUM(unallocated_surplus_paise), 0) as netSurplus
+         FROM transactions
+         WHERE operation_id = ? OR operation_id LIKE ?`,
+        [operationId, `realloc-${operationId}%`]
+      );
+
       const revId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('rev-' + Date.now() + '-' + Math.random().toString(36).substring(2));
       await tx.runAsync(
         `INSERT INTO transactions (
@@ -507,11 +536,11 @@ export class SyncService {
           'REVERSAL',
           0,
           'SYSTEM',
-          -origTx.amount_paise,
-          -origTx.allocated_principal_paise,
-          -origTx.allocated_markup_paise,
-          -origTx.allocated_penalty_paise,
-          -origTx.unallocated_surplus_paise,
+          -(netAllocRow?.netAmount ?? origTx.amount_paise),
+          -(netAllocRow?.netPrincipal ?? origTx.allocated_principal_paise),
+          -(netAllocRow?.netMarkup ?? origTx.allocated_markup_paise),
+          -(netAllocRow?.netPenalty ?? origTx.allocated_penalty_paise),
+          -(netAllocRow?.netSurplus ?? origTx.unallocated_surplus_paise),
           0,
           origTx.effective_date || new Date().toISOString().split('T')[0],
           new Date().toISOString(),
@@ -566,7 +595,15 @@ export class SyncService {
       const reconRow = await tx.getFirstAsync<{ deltaPenalty: number }>(
         `SELECT
            COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
-             AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+             AND NOT EXISTS (
+               SELECT 1 FROM sync_outbox so
+               WHERE so.status = 'REJECTED'
+                 AND (
+                   transactions.operation_id = so.operation_id
+                   OR transactions.operation_id = 'reversal-' || so.operation_id
+                   OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+                 )
+             )
              AND operation_id NOT LIKE 'realloc-%'
              AND effective_date <= ?
              THEN allocated_penalty_paise ELSE 0 END), 0) as deltaPenalty
@@ -622,58 +659,58 @@ export class SyncService {
         replayedBulletPrincipalPaid += payPrincipal;
       }
 
-      const origPrincipal = col.allocated_principal_paise || 0;
-      const origMarkup = col.allocated_markup_paise || 0;
-      const origPenalty = col.allocated_penalty_paise || 0;
-      const origSurplus = col.unallocated_surplus_paise || 0;
+      const currentColNet = await tx.getFirstAsync<{
+        currentPrincipal: number;
+        currentMarkup: number;
+        currentPenalty: number;
+        currentSurplus: number;
+      }>(
+        `SELECT
+           COALESCE(SUM(allocated_principal_paise), 0) as currentPrincipal,
+           COALESCE(SUM(allocated_markup_paise), 0) as currentMarkup,
+           COALESCE(SUM(allocated_penalty_paise), 0) as currentPenalty,
+           COALESCE(SUM(unallocated_surplus_paise), 0) as currentSurplus
+         FROM transactions
+         WHERE operation_id = ? OR operation_id LIKE ?`,
+        [col.operation_id, `realloc-${col.operation_id}%`]
+      );
 
-      const deltaPrincipal = newAllocPrincipal - origPrincipal;
-      const deltaMarkup = newAllocMarkup - origMarkup;
-      const deltaPenalty = newAllocPenalty - origPenalty;
-      const deltaSurplus = newAllocSurplus - origSurplus;
+      const currentPrincipal = currentColNet?.currentPrincipal ?? (col.allocated_principal_paise || 0);
+      const currentMarkup = currentColNet?.currentMarkup ?? (col.allocated_markup_paise || 0);
+      const currentPenalty = currentColNet?.currentPenalty ?? (col.allocated_penalty_paise || 0);
+      const currentSurplus = currentColNet?.currentSurplus ?? (col.unallocated_surplus_paise || 0);
+
+      const deltaPrincipal = newAllocPrincipal - currentPrincipal;
+      const deltaMarkup = newAllocMarkup - currentMarkup;
+      const deltaPenalty = newAllocPenalty - currentPenalty;
+      const deltaSurplus = newAllocSurplus - currentSurplus;
 
       if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
-        const reallocOpId = `realloc-${col.operation_id}`;
-        const existingRealloc = await tx.getFirstAsync<any>(
-          `SELECT id FROM transactions WHERE operation_id = ?`,
-          [reallocOpId]
+        const reallocId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('realloc-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+        const reallocOpId = `realloc-${col.operation_id}-${reallocId.substring(0, 8)}`;
+        await tx.runAsync(
+          `INSERT INTO transactions (
+             id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+             amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
+             unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            reallocId,
+            reallocOpId,
+            col.loan_id,
+            'REVERSAL',
+            0,
+            'SYSTEM',
+            0,
+            deltaPrincipal,
+            deltaMarkup,
+            deltaPenalty,
+            deltaSurplus,
+            0,
+            col.effective_date || new Date().toISOString().split('T')[0],
+            new Date().toISOString(),
+          ]
         );
-        if (!existingRealloc) {
-          const reallocId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('realloc-' + Date.now() + '-' + Math.random().toString(36).substring(2));
-          await tx.runAsync(
-            `INSERT INTO transactions (
-               id, operation_id, loan_id, transaction_type, is_cash, payment_method,
-               amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
-               unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              reallocId,
-              reallocOpId,
-              col.loan_id,
-              'REVERSAL',
-              0,
-              'SYSTEM',
-              0,
-              deltaPrincipal,
-              deltaMarkup,
-              deltaPenalty,
-              deltaSurplus,
-              0,
-              col.effective_date || new Date().toISOString().split('T')[0],
-              new Date().toISOString(),
-            ]
-          );
-        } else {
-          await tx.runAsync(
-            `UPDATE transactions SET
-               allocated_principal_paise = ?,
-               allocated_markup_paise = ?,
-               allocated_penalty_paise = ?,
-               unallocated_surplus_paise = ?
-             WHERE operation_id = ?`,
-            [deltaPrincipal, deltaMarkup, deltaPenalty, deltaSurplus, reallocOpId]
-          );
-        }
       }
 
       for (const uk of result.updatedKists) {
@@ -694,7 +731,15 @@ export class SyncService {
          COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' THEN amount_paise ELSE 0 END), 0) as assessed,
          COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven,
          COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
-           AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+           AND NOT EXISTS (
+             SELECT 1 FROM sync_outbox so
+             WHERE so.status = 'REJECTED'
+               AND (
+                 transactions.operation_id = so.operation_id
+                 OR transactions.operation_id = 'reversal-' || so.operation_id
+                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+               )
+           )
            AND operation_id NOT LIKE 'realloc-%'
            THEN allocated_penalty_paise ELSE 0 END), 0) as reconPenalty
        FROM transactions WHERE loan_id = ?`,
@@ -720,8 +765,15 @@ export class SyncService {
       const bulletPrincipalRow = await tx.getFirstAsync<{ total: number }>(
         `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
          WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
-           AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
-           AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
+           AND NOT EXISTS (
+             SELECT 1 FROM sync_outbox so
+             WHERE so.status = 'REJECTED'
+               AND (
+                 transactions.operation_id = so.operation_id
+                 OR transactions.operation_id = 'reversal-' || so.operation_id
+                 OR transactions.operation_id LIKE 'realloc-' || so.operation_id || '%'
+               )
+           )`,
         [loanId]
       );
       const bulletPrincipalPaid = bulletPrincipalRow?.total || 0;

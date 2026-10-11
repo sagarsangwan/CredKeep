@@ -1,5 +1,6 @@
 import uuid
 from decimal import Decimal
+from datetime import timedelta
 import pytest
 from django.utils import timezone
 from django.db import models
@@ -1218,6 +1219,10 @@ def test_negative_and_nan_markup_factor_rejected(api_client, lender_setup):
 def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_client, lender_setup):
     user, tenant, token = lender_setup
     api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+    today = timezone.now().date()
+    due_date = today - timedelta(days=2)
+    revised_date = today + timedelta(days=12)
+
     borrower = Borrower.objects.create(tenant=tenant, name='Borrower Waiver', phone='9876543202')
     loan = LoanAccount.objects.create(
         tenant=tenant,
@@ -1225,16 +1230,16 @@ def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_cl
         principal_paise=200000,
         markup_factor=Decimal('0.1'),
         term_months=1,
-        start_date='2026-01-01',
-        due_day=1,
+        start_date=str(due_date),
+        due_day=due_date.day,
         product_type='instalment'
     )
     kist = Kist.objects.create(
         tenant=tenant,
         loan=loan,
         installment_number=1,
-        original_due_date='2026-01-01',
-        effective_due_date='2026-01-01',
+        original_due_date=str(due_date),
+        effective_due_date=str(due_date),
         principal_component_paise=200000,
         markup_component_paise=20000,
         total_due_paise=220000,
@@ -1242,7 +1247,7 @@ def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_cl
     )
 
     # Assess penalty of 20,000 paise (2 days late: Jan 2, Jan 3)
-    ledger_service.assess_penalties(loan, '2026-01-03')
+    ledger_service.assess_penalties(loan, str(today))
     assert LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT').count() == 2
 
     # Modify schedule with penalty waiver
@@ -1251,12 +1256,12 @@ def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_cl
         'operations': [{
             'operation_id': str(uuid.uuid4()),
             'type': 'modify_schedule',
-            'timestamp': '2026-01-03T00:00:00Z',
+            'timestamp': f'{today}T00:00:00Z',
             'payload': {
                 'loan_id': str(loan.id),
                 'installment_number': 1,
-                'revised_effective_due_date': '2026-01-15',
-                'effective_date': '2026-01-03',
+                'revised_effective_due_date': str(revised_date),
+                'effective_date': str(today),
                 'accrued_penalty_action': 'WAIVE',
                 'waived_penalty_paise': 20000
             }
@@ -1272,7 +1277,7 @@ def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_cl
 
     # Subsequent collection does not charge waived penalty
     loan.refresh_from_db()
-    res_coll = ledger_service.record_collection(loan, 220000, uuid.uuid4(), '2026-01-10')
+    res_coll = ledger_service.record_collection(loan, 220000, uuid.uuid4(), str(today))
     assert res_coll['status'] == 'SUCCESS'
     loan.refresh_from_db()
     coll_tx = loan.transactions.filter(transaction_type='COLLECTION').first()
@@ -1379,6 +1384,10 @@ def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(ap
     user, tenant, token = lender_setup
     api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
 
+    today = timezone.now().date()
+    due_date = today - timedelta(days=4)
+    revised_date = today + timedelta(days=20)
+
     borrower = Borrower.objects.create(tenant=tenant, name='Borrower Overdue', phone='9876543999')
     loan = LoanAccount.objects.create(
         tenant=tenant,
@@ -1386,8 +1395,8 @@ def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(ap
         principal_paise=100000,
         markup_factor=Decimal('0.10'),
         term_months=1,
-        start_date='2026-01-01',
-        due_day=1,
+        start_date=str(due_date),
+        due_day=due_date.day,
         product_type='instalment',
         status='ACTIVE'
     )
@@ -1395,15 +1404,15 @@ def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(ap
         tenant=tenant,
         loan=loan,
         installment_number=1,
-        original_due_date='2026-01-01',
-        effective_due_date='2026-01-01',
+        original_due_date=str(due_date),
+        effective_due_date=str(due_date),
         principal_component_paise=100000,
         markup_component_paise=10000,
         total_due_paise=110000,
         status='PENDING'
     )
 
-    # Postpone overdue kist to 2026-02-01 on effective_date 2026-01-05 (4 overdue days: Jan 2, 3, 4, 5) with action NONE
+    # Postpone overdue kist to revised_date on effective_date today (4 overdue days) with action NONE
     url = reverse('sync-push')
     op_id = str(uuid.uuid4())
     payload = {
@@ -1414,8 +1423,8 @@ def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(ap
                 'payload': {
                     'loan_id': str(loan.id),
                     'installment_number': 1,
-                    'revised_effective_due_date': '2026-02-01',
-                    'effective_date': '2026-01-05',
+                    'revised_effective_due_date': str(revised_date),
+                    'effective_date': str(today),
                     'accrued_penalty_action': 'NONE',
                     'reason': 'Borrower requested extension'
                 }
@@ -1434,7 +1443,7 @@ def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(ap
 
     # Schedule is updated to new date
     kist.refresh_from_db()
-    assert str(kist.effective_due_date) == '2026-02-01'
+    assert str(kist.effective_due_date) == str(revised_date)
 
     # Loan balance still includes the accrued penalties
     outstanding_pen = (
@@ -1454,6 +1463,10 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
     user, tenant, token = lender_setup
     api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
 
+    today = timezone.now().date()
+    due_date = today - timedelta(days=4)
+    revised_date = today + timedelta(days=20)
+
     borrower = Borrower.objects.create(tenant=tenant, name='Borrower Omitted Date', phone='9876543998')
     loan = LoanAccount.objects.create(
         tenant=tenant,
@@ -1461,8 +1474,8 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
         principal_paise=100000,
         markup_factor=Decimal('0.10'),
         term_months=1,
-        start_date='2026-01-01',
-        due_day=1,
+        start_date=str(due_date),
+        due_day=due_date.day,
         product_type='instalment',
         status='ACTIVE'
     )
@@ -1470,15 +1483,15 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
         tenant=tenant,
         loan=loan,
         installment_number=1,
-        original_due_date='2026-01-01',
-        effective_due_date='2026-01-01',
+        original_due_date=str(due_date),
+        effective_due_date=str(due_date),
         principal_component_paise=100000,
         markup_component_paise=10000,
         total_due_paise=110000,
         status='PENDING'
     )
 
-    # Postpone overdue kist to 2026-02-01 on Jan 5 without payload.effective_date, using operation timestamp
+    # Postpone overdue kist to revised_date on today without payload.effective_date, using operation timestamp
     url = reverse('sync-push')
     op_id = str(uuid.uuid4())
     payload = {
@@ -1486,11 +1499,11 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
             {
                 'operation_id': op_id,
                 'type': 'modify_schedule',
-                'timestamp': '2026-01-05T14:30:00Z',
+                'timestamp': timezone.now().isoformat(),
                 'payload': {
                     'loan_id': str(loan.id),
                     'installment_number': 1,
-                    'revised_effective_due_date': '2026-02-01',
+                    'revised_effective_due_date': str(revised_date),
                     'accrued_penalty_action': 'NONE',
                     'reason': 'Borrower requested extension without explicit effective_date'
                 }
@@ -1501,7 +1514,7 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
     assert response.status_code == 200
     assert response.data['results'][0]['status'] == 'ACCEPTED'
 
-    # 4 overdue days (Jan 2, 3, 4, 5) must be assessed
+    # 4 overdue days must be assessed
     assessed_penalties = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
     assert assessed_penalties.count() == 4
     total_assessed = sum(tx.amount_paise for tx in assessed_penalties)
@@ -1509,7 +1522,7 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
 
     # Schedule is updated to new date
     kist.refresh_from_db()
-    assert str(kist.effective_due_date) == '2026-02-01'
+    assert str(kist.effective_due_date) == str(revised_date)
 
     # Outstanding penalties remain payable on the ledger
     outstanding_pen = (
@@ -1517,6 +1530,111 @@ def test_modify_schedule_postponement_action_none_with_omitted_effective_date_pr
         .aggregate(total=models.Sum('amount_paise'))['total'] or 0
     )
     assert outstanding_pen == 40000
+
+
+@pytest.mark.django_db
+def test_modify_schedule_postponement_backdated_client_date_preserves_accrued_penalties_via_server_clock(api_client, lender_setup):
+    """
+    Verifies that if a client attempts to backdate the postponement effective date to avoid accrued late fees,
+    the server clock bound max(effective_date, server_date) governs penalty assessment, preserving all accrued fees.
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    today = timezone.now().date()
+    due_date = today - timedelta(days=4)
+    revised_date = today + timedelta(days=20)
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Backdated Date', phone='9876543997')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date=str(due_date),
+        due_day=due_date.day,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date=str(due_date),
+        effective_due_date=str(due_date),
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    # Client sends backdated effective_date = due_date (attempting to erase the 4 overdue days)
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': str(revised_date),
+                    'effective_date': str(due_date),  # Backdated!
+                    'accrued_penalty_action': 'NONE',
+                    'reason': 'Borrower attempted backdating'
+                }
+            }
+        ]
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # The 4 overdue days must still be assessed up to server clock
+    assessed_penalties = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+    assert assessed_penalties.count() == 4
+    total_assessed = sum(tx.amount_paise for tx in assessed_penalties)
+    assert total_assessed == 40000
+
+    kist.refresh_from_db()
+    assert str(kist.effective_due_date) == str(revised_date)
+
+
+@pytest.mark.django_db
+def test_sync_push_create_loan_rejects_excess_markup_precision(api_client, lender_setup):
+    """
+    Verifies that create_loan rejects markup_factor values that exceed 4 decimal places,
+    preventing precision mismatch between initial and extended schedules.
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Precision', phone='9876543996')
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'create_loan',
+                'payload': {
+                    'borrower_id': str(borrower.id),
+                    'principal_paise': 100000,
+                    'markup_factor': '0.12345',  # 5 decimal places - excess precision!
+                    'term_months': 1,
+                    'start_date': '2026-01-01',
+                    'due_day': 1,
+                    'product_type': 'instalment'
+                }
+            }
+        ]
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'REJECTED'
+    assert 'markup_factor cannot exceed 4 decimal places' in response.data['results'][0]['error']
 
 
 
