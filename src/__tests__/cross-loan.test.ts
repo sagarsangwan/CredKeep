@@ -1921,4 +1921,87 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     unsub();
   });
+
+  it('pulling a server REVERSAL penalty waiver delta triggers pending collection replay', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-pull-waiver', 'Pull Waiver Borrower', '9876543666', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-pull-waiver', 'b-pull-waiver', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pw-1', 'loan-pull-waiver', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Prior penalty assessment: 300 paise assessed
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-pw-pen', 'op-pw-pen', 'loan-pull-waiver', 'PENALTY_ASSESSMENT', 300, 0, 0, 0, '2026-01-02', '2026-01-02')
+    `);
+
+    // Offline pending payment P1 (1000 paise) made locally on 2026-01-05 (which initially paid 300 to penalty, 700 to markup)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-pw-1', 'op-pw-1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-pull-waiver', amount_paise: 1000, effective_date: '2026-01-05' })}', 'PENDING', '2026-01-05T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-pw-1', 'op-pw-1', 'loan-pull-waiver', 'COLLECTION', 1000, 0, 700, 300, '2026-01-05', '2026-01-05')
+    `);
+
+    // Server sends a REVERSAL waiver delta (forgives all 300 paise of penalty)
+    const modifiedLoans = new Set<string>();
+    await SyncService.applyServerChange(db, {
+      record_type: 'TRANSACTION',
+      operation_type: 'INSERT',
+      payload: {
+        id: 'tx-serv-waiver-1',
+        operation_id: 'op-serv-waiver-1',
+        loan_id: 'loan-pull-waiver',
+        transaction_type: 'REVERSAL',
+        amount_paise: 0,
+        forgiven_penalty_paise: 300,
+        effective_date: '2026-01-03'
+      }
+    }, modifiedLoans);
+
+    // Verify modifiedLoans set recorded the loan ID from the REVERSAL waiver change
+    expect(modifiedLoans.has('loan-pull-waiver')).toBe(true);
+
+    // Reapply pending collections for modified loan
+    for (const loanId of modifiedLoans) {
+      await SyncService.reapplyPendingCollections(db, loanId);
+    }
+
+    // Pending collection must have reallocated the 300 funds away from penalty to markup
+    const reallocTx = await db.getFirstAsync<any>(`
+      SELECT * FROM transactions WHERE operation_id LIKE 'realloc-op-pw-1-%'
+    `);
+    expect(reallocTx).not.toBeNull();
+    // Delta should reduce penalty by 300 (-300) and increase markup by 300 (+300)
+    expect(reallocTx?.allocated_penalty_paise).toBe(-300);
+    expect(reallocTx?.allocated_markup_paise).toBe(300);
+    expect(reallocTx?.allocated_principal_paise).toBe(0);
+  });
+
+  it('retrying a locally rejected payment with same operation_id throws error and rejects retry', async () => {
+    const db = createRealSqliteDb();
+    const repo = new TransactionRepository(db);
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-rej-retry', 'Rej Retry Borrower', '9876543555', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-rej-retry', 'b-rej-retry', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rej-1', 'loan-rej-retry', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 1. Record original cash payment
+    const opId = 'op-rejected-payment-1';
+    const res = await repo.recordCashPayment('loan-rej-retry', toPaise(5000), opId, '2026-01-01');
+    expect(res.success).toBe(true);
+
+    // 2. Server rejects the payment, mobile triggers compensation
+    await SyncService.revertRejectedPayment(db, opId, 'Server validation failed: loan settled');
+
+    // Verify outbox status is REJECTED
+    const outbox = await db.getFirstAsync<any>(`SELECT status FROM sync_outbox WHERE operation_id = ?`, [opId]);
+    expect(outbox?.status).toBe('REJECTED');
+
+    // 3. Client retries recording payment with same operation_id -> MUST throw error!
+    await expect(repo.recordCashPayment('loan-rej-retry', toPaise(5000), opId, '2026-01-01'))
+      .rejects.toThrow(/Payment operation op-rejected-payment-1 was rejected/);
+  });
 });

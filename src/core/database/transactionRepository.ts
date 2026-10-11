@@ -19,6 +19,16 @@ export class TransactionRepository {
 
       await this.db.withExclusiveTransactionAsync(async (tx) => {
         // Idempotency check
+        const outboxRec = await tx.getFirstAsync<any>(
+          `SELECT status, error_message FROM sync_outbox WHERE operation_id = ?`,
+          [operationId]
+        );
+        if (outboxRec && outboxRec.status === 'REJECTED') {
+          throw new Error(
+            `Payment operation ${operationId} was rejected: ${outboxRec.error_message || 'Terminal rejection'}`
+          );
+        }
+
         const existing = await tx.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = ?`, [operationId]);
         if (existing) {
           if (

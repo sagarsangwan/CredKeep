@@ -140,7 +140,9 @@ export class SyncService {
     if (
       (record_type === 'KIST' ||
         (record_type === 'TRANSACTION' &&
-          (payload.transaction_type === 'WAIVER' || payload.transaction_type === 'PENALTY_ASSESSMENT'))) &&
+          (payload.transaction_type === 'WAIVER' ||
+            payload.transaction_type === 'PENALTY_ASSESSMENT' ||
+            (payload.transaction_type === 'REVERSAL' && (payload.forgiven_penalty_paise || 0) > 0)))) &&
       payload.loan_id &&
       modifiedLoanIds
     ) {
