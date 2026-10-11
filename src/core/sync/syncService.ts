@@ -379,8 +379,6 @@ export class SyncService {
       }
     });
 
-    if (relevant.length === 0) return;
-
     // Calculate actual outstanding penalties dynamically (excluding pending and rejected collections, including REVERSAL adjustments)
     const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
       `SELECT
@@ -402,7 +400,8 @@ export class SyncService {
     );
     let outstandingPenalty = Math.max(0, (penaltyRow?.assessed || 0) - (penaltyRow?.paid || 0) - (penaltyRow?.forgiven || 0)) as Paise;
 
-    for (const item of relevant) {
+    if (relevant.length > 0) {
+      for (const item of relevant) {
       const p = JSON.parse(item.payload);
       const paymentAmount = (p.amount_paise || 0) as Paise;
       const effectiveDate = p.effective_date || new Date().toISOString().split('T')[0];
@@ -442,6 +441,33 @@ export class SyncService {
           [uk.principalPaid, uk.markupPaid, uk.status || 'PENDING', loanId, uk.kistNumber]
         );
       }
+    }
+  }
+
+    // Reconcile loan status with authoritative server state and outstanding penalties
+    const finalKists = await tx.getAllAsync<any>(
+      `SELECT * FROM repayment_schedules WHERE loan_id = ?`,
+      [loanId]
+    );
+    const allPaid = finalKists.length > 0 && finalKists.every((k) => k.status === 'PAID');
+    const loan = await tx.getFirstAsync<any>(`SELECT * FROM loans WHERE id = ?`, [loanId]);
+    if (loan) {
+      let isSettled = false;
+      if (loan.product_type === 'instalment') {
+        const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
+        isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise && outstandingPenalty <= 0;
+      } else if (loan.product_type === 'bullet') {
+        const bulletPrincipalRow = await tx.getFirstAsync<{ total: number }>(
+          `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
+           WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+             AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
+             AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
+          [loanId]
+        );
+        const bulletPrincipalPaid = bulletPrincipalRow?.total || 0;
+        isSettled = allPaid && bulletPrincipalPaid >= loan.principal_paise && outstandingPenalty <= 0;
+      }
+      await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [isSettled ? 'SETTLED' : 'ACTIVE', loanId]);
     }
   }
 
@@ -527,6 +553,7 @@ export class SyncService {
     );
 
     let replayedPenaltyPaid = 0;
+    let replayedBulletPrincipalPaid = 0;
 
     for (const col of collections) {
       const penaltyRow = await tx.getFirstAsync<{ assessed: number; forgiven: number }>(
@@ -540,6 +567,7 @@ export class SyncService {
         `SELECT
            COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
              AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+             AND operation_id NOT LIKE 'realloc-%'
              AND effective_date <= ?
              THEN allocated_penalty_paise ELSE 0 END), 0) as deltaPenalty
          FROM transactions WHERE loan_id = ?`,
@@ -575,8 +603,77 @@ export class SyncService {
       };
 
       const result = allocatePayment(allocInput);
+      let newAllocPrincipal = 0;
+      let newAllocMarkup = 0;
+      let newAllocPenalty = 0;
       for (const a of result.allocations) {
-        replayedPenaltyPaid += a.allocatedToPenalty;
+        newAllocPrincipal += a.allocatedToPrincipal;
+        newAllocMarkup += a.allocatedToMarkup;
+        newAllocPenalty += a.allocatedToPenalty;
+      }
+      replayedPenaltyPaid += newAllocPenalty;
+
+      let newAllocSurplus = result.unallocatedFunds || 0;
+      if (loan.product_type === 'bullet' && newAllocSurplus > 0) {
+        const remainingPrincipal = Math.max(0, loan.principal_paise - replayedBulletPrincipalPaid);
+        const payPrincipal = Math.min(newAllocSurplus, remainingPrincipal);
+        newAllocPrincipal += payPrincipal;
+        newAllocSurplus -= payPrincipal;
+        replayedBulletPrincipalPaid += payPrincipal;
+      }
+
+      const origPrincipal = col.allocated_principal_paise || 0;
+      const origMarkup = col.allocated_markup_paise || 0;
+      const origPenalty = col.allocated_penalty_paise || 0;
+      const origSurplus = col.unallocated_surplus_paise || 0;
+
+      const deltaPrincipal = newAllocPrincipal - origPrincipal;
+      const deltaMarkup = newAllocMarkup - origMarkup;
+      const deltaPenalty = newAllocPenalty - origPenalty;
+      const deltaSurplus = newAllocSurplus - origSurplus;
+
+      if (deltaPrincipal !== 0 || deltaMarkup !== 0 || deltaPenalty !== 0 || deltaSurplus !== 0) {
+        const reallocOpId = `realloc-${col.operation_id}`;
+        const existingRealloc = await tx.getFirstAsync<any>(
+          `SELECT id FROM transactions WHERE operation_id = ?`,
+          [reallocOpId]
+        );
+        if (!existingRealloc) {
+          const reallocId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('realloc-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+          await tx.runAsync(
+            `INSERT INTO transactions (
+               id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+               amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
+               unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              reallocId,
+              reallocOpId,
+              col.loan_id,
+              'REVERSAL',
+              0,
+              'SYSTEM',
+              0,
+              deltaPrincipal,
+              deltaMarkup,
+              deltaPenalty,
+              deltaSurplus,
+              0,
+              col.effective_date || new Date().toISOString().split('T')[0],
+              new Date().toISOString(),
+            ]
+          );
+        } else {
+          await tx.runAsync(
+            `UPDATE transactions SET
+               allocated_principal_paise = ?,
+               allocated_markup_paise = ?,
+               allocated_penalty_paise = ?,
+               unallocated_surplus_paise = ?
+             WHERE operation_id = ?`,
+            [deltaPrincipal, deltaMarkup, deltaPenalty, deltaSurplus, reallocOpId]
+          );
+        }
       }
 
       for (const uk of result.updatedKists) {
@@ -598,6 +695,7 @@ export class SyncService {
          COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven,
          COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
            AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+           AND operation_id NOT LIKE 'realloc-%'
            THEN allocated_penalty_paise ELSE 0 END), 0) as reconPenalty
        FROM transactions WHERE loan_id = ?`,
       [loanId]

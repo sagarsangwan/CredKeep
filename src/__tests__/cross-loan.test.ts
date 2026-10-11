@@ -4,6 +4,7 @@ import { Paise, toPaise } from '../core/domain/money';
 import { OutboxManager } from '../core/sync/outbox';
 import { SyncService } from '../core/sync/syncService';
 import { runMigrations } from '../core/database/schema';
+import { getDatabaseName } from '../core/database/dbName';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 
@@ -1052,6 +1053,33 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rej-1'`);
     expect(kist?.principal_paid_paise).toBe(0);
     expect(kist?.markup_paid_paise).toBe(0);
+
+    // Compensating REVERSAL transaction was recorded in ledger
+    const reallocTx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'realloc-op-p2'`);
+    expect(reallocTx).not.toBeNull();
+    expect(reallocTx?.allocated_penalty_paise).toBe(100);
+    expect(reallocTx?.allocated_principal_paise).toBe(-100);
+
+    // Journal totals in transactions reflect exact new allocations
+    const journal = await db.getFirstAsync<any>(`
+      SELECT
+        SUM(allocated_principal_paise) as principal,
+        SUM(allocated_penalty_paise) as penalty
+      FROM transactions
+      WHERE transaction_type IN ('COLLECTION', 'REVERSAL')
+        AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
+        AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+    `);
+    expect(journal?.principal).toBe(0);
+    expect(journal?.penalty).toBe(100);
+
+    // Subsequent payment P3 of 100 paise pays kist (markup), NOT the penalty again!
+    const txRepo = new TransactionRepository(db);
+    const resP3 = await txRepo.recordCashPayment('loan-rej-pen', 100 as Paise, 'op-p3', '2026-02-01');
+    expect(resP3.success).toBe(true);
+    const p3Tx = await db.getFirstAsync<any>(`SELECT * FROM transactions WHERE operation_id = 'op-p3'`);
+    expect(p3Tx?.allocated_penalty_paise).toBe(0);
+    expect(p3Tx?.allocated_markup_paise).toBe(100);
   });
 
   it('correctly recovers and preserves settlement status for bullet loans and respects penalties', async () => {
@@ -1120,5 +1148,32 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     // Loan is NOT settled because principal is not fully paid (only 95000 paid)
     const loan = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-inst-pen'`);
     expect(loan?.status).toBe('ACTIVE');
+  });
+
+  it('updates local SETTLED loan to server ACTIVE state upon pulling authoritative server changes', async () => {
+    const db = createRealSqliteDb();
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-sync-active', 'Borrower Active', '9876543218', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-sync-active', 'b-sync-active', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'SETTLED', '2026-01-01')`);
+
+    // Server sends authoritative LOAN update indicating status is ACTIVE (e.g. server-assessed penalties)
+    await SyncService.applyServerChange(db, {
+      record_type: 'LOAN',
+      operation_type: 'UPDATE',
+      payload: { id: 'loan-sync-active', status: 'ACTIVE' }
+    });
+
+    const loan = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-sync-active'`);
+    expect(loan?.status).toBe('ACTIVE');
+  });
+
+  it('isolates database filenames by tenant ID ensuring multi-tenant data separation', async () => {
+    const nameA = await getDatabaseName('tenant-111');
+    const nameB = await getDatabaseName('tenant-222');
+    const nameDefault = await getDatabaseName(null);
+
+    expect(nameA).toBe('credkeep_tenant-111.db');
+    expect(nameB).toBe('credkeep_tenant-222.db');
+    expect(nameDefault).toBe('credkeep.db');
+    expect(nameA).not.toBe(nameB);
   });
 });

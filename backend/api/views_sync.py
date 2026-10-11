@@ -485,7 +485,12 @@ class SyncPushView(APIView):
                 return 'REJECTED', f"Unsupported accrued_penalty_action '{accrued_penalty_action}'."
 
             # Unconditionally assess penalties through effective modification date before changing schedule due date
-            eff_today = str(payload.get('effective_date') or kist.effective_due_date)
+            eff_today = payload.get('effective_date')
+            if not eff_today and op.get('timestamp'):
+                eff_today = str(op['timestamp'])
+            if not eff_today:
+                eff_today = str(timezone.now().date())
+            eff_today = str(eff_today)
             if 'T' in eff_today:
                 eff_today = eff_today.split('T')[0]
             ledger_service.assess_penalties(loan, eff_today)

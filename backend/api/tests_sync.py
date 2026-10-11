@@ -1241,15 +1241,9 @@ def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_cl
         status='PENDING'
     )
 
-    # Assess penalty of 20,000 paise
-    LedgerTx.objects.create(
-        tenant=tenant,
-        operation_id=uuid.uuid4(),
-        loan=loan,
-        transaction_type='PENALTY_ASSESSMENT',
-        amount_paise=20000,
-        effective_date='2026-01-05'
-    )
+    # Assess penalty of 20,000 paise (2 days late: Jan 2, Jan 3)
+    ledger_service.assess_penalties(loan, '2026-01-03')
+    assert LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT').count() == 2
 
     # Modify schedule with penalty waiver
     res = api_client.post(reverse('sync-push'), {
@@ -1257,11 +1251,12 @@ def test_modify_schedule_waiver_creates_compensating_reversal_transaction(api_cl
         'operations': [{
             'operation_id': str(uuid.uuid4()),
             'type': 'modify_schedule',
-            'timestamp': timezone.now().isoformat(),
+            'timestamp': '2026-01-03T00:00:00Z',
             'payload': {
                 'loan_id': str(loan.id),
                 'installment_number': 1,
                 'revised_effective_due_date': '2026-01-15',
+                'effective_date': '2026-01-03',
                 'accrued_penalty_action': 'WAIVE',
                 'waived_penalty_paise': 20000
             }
@@ -1447,6 +1442,82 @@ def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(ap
         .aggregate(total=models.Sum('amount_paise'))['total'] or 0
     )
     assert outstanding_pen == 40000
+
+
+@pytest.mark.django_db
+def test_modify_schedule_postponement_action_none_with_omitted_effective_date_preserves_accrued_penalties(api_client, lender_setup):
+    """
+    Verifies that when payload.effective_date is omitted, modify_schedule resolves
+    the modification date from operation timestamp and assesses accrued penalties
+    before postponing the due date under 'Retain Penalty' (action NONE).
+    """
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Omitted Date', phone='9876543998')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    # Postpone overdue kist to 2026-02-01 on Jan 5 without payload.effective_date, using operation timestamp
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'modify_schedule',
+                'timestamp': '2026-01-05T14:30:00Z',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-01',
+                    'accrued_penalty_action': 'NONE',
+                    'reason': 'Borrower requested extension without explicit effective_date'
+                }
+            }
+        ]
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # 4 overdue days (Jan 2, 3, 4, 5) must be assessed
+    assessed_penalties = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+    assert assessed_penalties.count() == 4
+    total_assessed = sum(tx.amount_paise for tx in assessed_penalties)
+    assert total_assessed == 40000
+
+    # Schedule is updated to new date
+    kist.refresh_from_db()
+    assert str(kist.effective_due_date) == '2026-02-01'
+
+    # Outstanding penalties remain payable on the ledger
+    outstanding_pen = (
+        LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+        .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+    )
+    assert outstanding_pen == 40000
+
 
 
 

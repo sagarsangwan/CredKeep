@@ -328,17 +328,17 @@ def record_collection(
                         locked_loan.save(update_fields=['status'])
                         settled_now = True
 
-                if settled_now:
-                    SyncOutbox.objects.create(
-                        tenant=tenant,
-                        record_type='LOAN',
-                        record_id=locked_loan.id,
-                        operation_type='UPDATE',
-                        payload={
-                            'id': str(locked_loan.id),
-                            'status': 'SETTLED'
-                        }
-                    )
+                # Always publish authoritative loan status to SyncOutbox for client delta sync
+                SyncOutbox.objects.create(
+                    tenant=tenant,
+                    record_type='LOAN',
+                    record_id=locked_loan.id,
+                    operation_type='UPDATE',
+                    payload={
+                        'id': str(locked_loan.id),
+                        'status': locked_loan.status
+                    }
+                )
 
                 # Create SyncOutbox entry for delta-sync
                 SyncOutbox.objects.create(

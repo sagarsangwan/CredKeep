@@ -1,9 +1,10 @@
 import * as SQLite from 'expo-sqlite';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
+import { getDatabaseName } from './dbName';
+export { getDatabaseName };
 
 const DB_KEY_NAME = 'credkeep_db_master_key';
-const DB_NAME = 'credkeep.db';
 
 function bufferToHex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer))
@@ -27,11 +28,12 @@ export async function getDatabaseKey(): Promise<string> {
   return key;
 }
 
-export async function initDatabase(): Promise<SQLite.SQLiteDatabase> {
+export async function initDatabase(tenantId?: string | null): Promise<SQLite.SQLiteDatabase> {
   const key = await getDatabaseKey();
+  const dbName = await getDatabaseName(tenantId);
   
   // Note: expo-sqlite SDK 50+ natively supports opening databases.
-  const db = await SQLite.openDatabaseAsync(DB_NAME);
+  const db = await SQLite.openDatabaseAsync(dbName);
   
   // PRAGMA configuration
   await db.execAsync(`
