@@ -79,7 +79,7 @@ if is_testing:
     }
 else:
     DATABASES = {
-        'default': env.db('DATABASE_URL', default=f'sqlite:///{BASE_DIR}/db.sqlite3')
+        'default': env.db('DATABASE_URL')
     }
 DATABASES['default']['ATOMIC_REQUESTS'] = True
 if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':

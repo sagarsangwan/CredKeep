@@ -29,4 +29,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8000/api/v2/health/ || exit 1
 
 # Start gunicorn server
-CMD ["sh", "-c", "python manage.py migrate && gunicorn credkeep_backend.wsgi:application --bind 0.0.0.0:${PORT}"]
+CMD ["sh", "-c", "gunicorn credkeep_backend.wsgi:application --bind 0.0.0.0:${PORT}"]
