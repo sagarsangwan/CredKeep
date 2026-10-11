@@ -381,13 +381,21 @@ export class SyncService {
 
     if (relevant.length === 0) return;
 
-    // Calculate actual outstanding penalties dynamically (excluding pending collections and including REVERSAL waivers)
+    // Calculate actual outstanding penalties dynamically (excluding pending and rejected collections, including REVERSAL adjustments)
     const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
       `SELECT
          COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' THEN amount_paise ELSE 0 END), 0) as assessed,
-         COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' AND operation_id NOT IN (
-           SELECT operation_id FROM sync_outbox WHERE status = 'PENDING'
-         ) THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
+         COALESCE(SUM(CASE WHEN transaction_type IN ('COLLECTION', 'REVERSAL')
+           AND operation_id NOT IN (
+             SELECT operation_id FROM sync_outbox WHERE status = 'PENDING'
+           )
+           AND operation_id NOT IN (
+             SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED'
+           )
+           AND operation_id NOT IN (
+             SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED'
+           )
+           THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
          COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
        FROM transactions WHERE loan_id = ?`,
       [loanId]
@@ -518,16 +526,32 @@ export class SyncService {
       [loanId]
     );
 
+    let replayedPenaltyPaid = 0;
+
     for (const col of collections) {
-      const penaltyRow = await tx.getFirstAsync<{ assessed: number; paid: number; forgiven: number }>(
+      const penaltyRow = await tx.getFirstAsync<{ assessed: number; forgiven: number }>(
         `SELECT
            COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' AND effective_date <= ? THEN amount_paise ELSE 0 END), 0) as assessed,
-           COALESCE(SUM(CASE WHEN transaction_type = 'COLLECTION' AND sequence_number < ? THEN allocated_penalty_paise ELSE 0 END), 0) as paid,
            COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') AND effective_date <= ? THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven
          FROM transactions WHERE loan_id = ?`,
-        [col.effective_date, col.sequence_number, col.effective_date, loanId]
+        [col.effective_date, col.effective_date, loanId]
       );
-      const outstandingPenalty = Math.max(0, (penaltyRow?.assessed || 0) - (penaltyRow?.paid || 0) - (penaltyRow?.forgiven || 0)) as Paise;
+      const reconRow = await tx.getFirstAsync<{ deltaPenalty: number }>(
+        `SELECT
+           COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
+             AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+             AND effective_date <= ?
+             THEN allocated_penalty_paise ELSE 0 END), 0) as deltaPenalty
+         FROM transactions WHERE loan_id = ?`,
+        [col.effective_date, loanId]
+      );
+
+      const assessed = penaltyRow?.assessed || 0;
+      const forgiven = penaltyRow?.forgiven || 0;
+      const reconPenalty = reconRow?.deltaPenalty || 0;
+      const totalPaidPrior = replayedPenaltyPaid + reconPenalty;
+
+      const outstandingPenalty = Math.max(0, assessed - totalPaidPrior - forgiven) as Paise;
 
       const kists = await tx.getAllAsync<any>(
         `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
@@ -551,6 +575,10 @@ export class SyncService {
       };
 
       const result = allocatePayment(allocInput);
+      for (const a of result.allocations) {
+        replayedPenaltyPaid += a.allocatedToPenalty;
+      }
+
       for (const uk of result.updatedKists) {
         await tx.runAsync(
           `UPDATE repayment_schedules SET
@@ -563,15 +591,45 @@ export class SyncService {
       }
     }
 
+    // Compute final remaining penalty across whole loan history
+    const finalPenaltyRow = await tx.getFirstAsync<{ assessed: number; forgiven: number; reconPenalty: number }>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN transaction_type = 'PENALTY_ASSESSMENT' THEN amount_paise ELSE 0 END), 0) as assessed,
+         COALESCE(SUM(CASE WHEN transaction_type IN ('WAIVER', 'REVERSAL') THEN forgiven_penalty_paise ELSE 0 END), 0) as forgiven,
+         COALESCE(SUM(CASE WHEN transaction_type = 'REVERSAL'
+           AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')
+           THEN allocated_penalty_paise ELSE 0 END), 0) as reconPenalty
+       FROM transactions WHERE loan_id = ?`,
+      [loanId]
+    );
+    const finalRemainingPenalty = Math.max(
+      0,
+      (finalPenaltyRow?.assessed || 0) - (replayedPenaltyPaid + (finalPenaltyRow?.reconPenalty || 0)) - (finalPenaltyRow?.forgiven || 0)
+    );
+
     // Check final settlement status of loan
     const finalKists = await tx.getAllAsync<any>(
       `SELECT * FROM repayment_schedules WHERE loan_id = ?`,
       [loanId]
     );
     const allPaid = finalKists.length > 0 && finalKists.every((k) => k.status === 'PAID');
-    const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
 
-    const isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise;
+    let isSettled = false;
+    if (loan.product_type === 'instalment') {
+      const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
+      isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise && finalRemainingPenalty <= 0;
+    } else if (loan.product_type === 'bullet') {
+      const bulletPrincipalRow = await tx.getFirstAsync<{ total: number }>(
+        `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
+         WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+           AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
+           AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
+        [loanId]
+      );
+      const bulletPrincipalPaid = bulletPrincipalRow?.total || 0;
+      isSettled = allPaid && bulletPrincipalPaid >= loan.principal_paise && finalRemainingPenalty <= 0;
+    }
+
     const newStatus = isSettled ? 'SETTLED' : 'ACTIVE';
     await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [newStatus, loanId]);
   }

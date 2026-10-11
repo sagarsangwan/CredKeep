@@ -60,6 +60,9 @@ export async function runMigrations(db: SQLiteDatabase) {
     try {
       await db.execAsync(`ALTER TABLE repayment_schedules ADD COLUMN server_status TEXT NOT NULL DEFAULT 'PENDING';`);
     } catch {}
+    try {
+      await db.execAsync(`CREATE UNIQUE INDEX IF NOT EXISTS idx_repayment_schedules_loan_installment ON repayment_schedules (loan_id, installment_number);`);
+    } catch {}
 
     // 4. Transactions table (Fixing the duplicate PK defect)
     await db.execAsync(`

@@ -3,6 +3,7 @@ import { TransactionRepository } from '../core/database/transactionRepository';
 import { Paise, toPaise } from '../core/domain/money';
 import { OutboxManager } from '../core/sync/outbox';
 import { SyncService } from '../core/sync/syncService';
+import { runMigrations } from '../core/database/schema';
 // @ts-ignore
 import { DatabaseSync } from 'node:sqlite';
 
@@ -928,5 +929,196 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     expect(kistForg?.principal_paid_paise).toBe(100000);
     expect(kistForg?.markup_paid_paise).toBe(10000);
     expect(kistForg?.status).toBe('PAID');
+  });
+
+  it('applies runMigrations to an existing V1 schema database and enforces unique schedule index', async () => {
+    const sqlite = new DatabaseSync(':memory:');
+    // Legacy V1 repayment_schedules table without server_... columns and without inline UNIQUE constraint
+    sqlite.exec(`
+      CREATE TABLE borrowers (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+      CREATE TABLE loans (id TEXT PRIMARY KEY NOT NULL, borrower_id TEXT NOT NULL, principal_paise INTEGER NOT NULL, markup_factor REAL NOT NULL, term_months INTEGER NOT NULL, start_date TEXT NOT NULL, due_day INTEGER NOT NULL, product_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TEXT NOT NULL);
+      CREATE TABLE repayment_schedules (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        installment_number INTEGER NOT NULL,
+        original_due_date TEXT NOT NULL,
+        effective_due_date TEXT NOT NULL,
+        principal_component_paise INTEGER NOT NULL,
+        markup_component_paise INTEGER NOT NULL,
+        total_due_paise INTEGER NOT NULL,
+        principal_paid_paise INTEGER NOT NULL DEFAULT 0,
+        markup_paid_paise INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'PENDING'
+      );
+    `);
+
+    // Insert an initial kist in V1 schema
+    sqlite.exec(`
+      INSERT INTO repayment_schedules VALUES ('kist-v1-1', 'loan-v1', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING');
+    `);
+
+    // Create adapter
+    const adapter: any = {
+      sqlite,
+      async execAsync(sql: string) {
+        sqlite.exec(sql);
+      },
+      async runAsync(sql: string, params: any[] = []) {
+        const bound = params.map(p => p === undefined ? null : p);
+        const stmt = sqlite.prepare(sql);
+        stmt.run(...bound);
+      },
+      async getFirstAsync<T>(sql: string, params: any[] = []): Promise<T | null> {
+        const bound = params.map(p => p === undefined ? null : p);
+        const stmt = sqlite.prepare(sql);
+        return (stmt.get(...bound) as T) || null;
+      },
+      async getAllAsync<T>(sql: string, params: any[] = []): Promise<T[]> {
+        const bound = params.map(p => p === undefined ? null : p);
+        const stmt = sqlite.prepare(sql);
+        return stmt.all(...bound) as T[];
+      },
+      async withExclusiveTransactionAsync<T>(callback: (tx: any) => Promise<T>): Promise<T> {
+        sqlite.exec('BEGIN EXCLUSIVE TRANSACTION');
+        try {
+          const res = await callback(adapter);
+          sqlite.exec('COMMIT');
+          return res;
+        } catch (e) {
+          sqlite.exec('ROLLBACK');
+          throw e;
+        }
+      }
+    };
+
+    // Run migrations on legacy DB
+    await runMigrations(adapter);
+
+    // Verify new columns exist
+    const kistRow: any = await adapter.getFirstAsync(`SELECT server_principal_paid_paise, server_status FROM repayment_schedules WHERE id = 'kist-v1-1'`);
+    expect(kistRow?.server_principal_paid_paise).toBe(0);
+    expect(kistRow?.server_status).toBe('PENDING');
+
+    // Verify duplicate (loan_id, installment_number) insertion throws constraint violation
+    await expect(async () => {
+      await adapter.runAsync(`
+        INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise)
+        VALUES ('kist-v1-dup', 'loan-v1', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000)
+      `);
+    }).rejects.toThrow();
+  });
+
+  it('restores penalty balance on rejection and re-credits surviving payment to penalty', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-rej-pen', 'Borrower RejPen', '9876543215', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-rej-pen', 'b-rej-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rej-1', 'loan-rej-pen', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // 100 paise penalty assessed
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-pen-assess-100', 'pen-op-100', 'loan-rej-pen', 'PENALTY_ASSESSMENT', 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // Payment 1 (100 paise) originally paid penalty
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-p1', 'op-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-rej-pen', amount_paise: 100, effective_date: '2026-01-02' })}', 'PENDING', '2026-01-02T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-p1', 'op-p1', 'loan-rej-pen', 'COLLECTION', 100, 0, 0, 100, '2026-01-02', '2026-01-02')
+    `);
+
+    // Payment 2 (100 paise) originally paid principal
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-p2', 'op-p2', 'record_collection', '${JSON.stringify({ loan_id: 'loan-rej-pen', amount_paise: 100, effective_date: '2026-01-03' })}', 'PENDING', '2026-01-03T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-p2', 'op-p2', 'loan-rej-pen', 'COLLECTION', 100, 100, 0, 0, '2026-01-03', '2026-01-03')
+    `);
+
+    // Now server rejects Payment 1
+    await SyncService.revertRejectedPayment(db, 'op-p1', 'Server rejected payment 1');
+
+    // Outbox status of Payment 1 is REJECTED
+    const outbox1 = await db.getFirstAsync<any>(`SELECT status FROM sync_outbox WHERE operation_id = 'op-p1'`);
+    expect(outbox1?.status).toBe('REJECTED');
+
+    // Surviving Payment 2 must now cover the restored 100-paise penalty, NOT principal!
+    const kist = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rej-1'`);
+    expect(kist?.principal_paid_paise).toBe(0);
+    expect(kist?.markup_paid_paise).toBe(0);
+  });
+
+  it('correctly recovers and preserves settlement status for bullet loans and respects penalties', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-bullet-set', 'Borrower Bullet', '9876543216', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-bullet-set', 'b-bullet-set', 5000, 0.1, 1, '2026-01-01', 1, 'bullet', 'SETTLED', '2026-01-01')`);
+    // Bullet schedule has 0 principal component, 500 markup component
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-bullet-1', 'loan-bullet-set', 1, '2026-01-01', '2026-01-01', 0, 500, 500, 0, 500, 'PAID', 0, 500, 'PAID')`);
+
+    // Bullet principal was paid via transactions (5000 paise)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-bullet-p1', 'op-bullet-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-bullet-set', amount_paise: 500, effective_date: '2026-01-01' })}', 'SYNCED', '2026-01-01T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-bullet-p1', 'op-bullet-p1', 'loan-bullet-set', 'COLLECTION', 500, 0, 500, '2026-01-01', '2026-01-01')
+    `);
+
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-bullet-p2', 'op-bullet-p2', 'record_collection', '${JSON.stringify({ loan_id: 'loan-bullet-set', amount_paise: 5000, effective_date: '2026-01-01' })}', 'SYNCED', '2026-01-01T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, effective_date, created_at)
+      VALUES ('tx-bullet-p2', 'op-bullet-p2', 'loan-bullet-set', 'COLLECTION', 5000, 5000, 0, '2026-01-01', '2026-01-01')
+    `);
+
+    // Recalculating loan schedule must keep the bullet loan SETTLED
+    await SyncService.recalculateLoanSchedule(db, 'loan-bullet-set');
+    const loanAfterRecalc = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-bullet-set'`);
+    expect(loanAfterRecalc?.status).toBe('SETTLED');
+
+    // If principal payment op-bullet-p2 is rejected, loan status must reactivate to ACTIVE
+    await SyncService.revertRejectedPayment(db, 'op-bullet-p2', 'Principal rejected');
+    const loanAfterRejection = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-bullet-set'`);
+    expect(loanAfterRejection?.status).toBe('ACTIVE');
+  });
+
+  it('does not settle an instalment loan if outstanding penalties remain unpaid', async () => {
+    const db = createRealSqliteDb();
+
+    await db.runAsync(`INSERT INTO borrowers VALUES ('b-inst-pen', 'Borrower PenLoan', '9876543217', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans VALUES ('loan-inst-pen', 'b-inst-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-inst-1', 'loan-inst-pen', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
+
+    // Penalty assessed: 5000 paise
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
+      VALUES ('tx-pen-5000', 'op-pen-5000', 'loan-inst-pen', 'PENALTY_ASSESSMENT', 5000, '2026-01-01', '2026-01-01')
+    `);
+
+    // Payment of 110,000 paise (pays 5000 penalty, 10000 markup, 95000 principal)
+    await db.runAsync(`
+      INSERT INTO sync_outbox (id, operation_id, operation_type, payload, status, created_at)
+      VALUES ('outbox-inst-p1', 'op-inst-p1', 'record_collection', '${JSON.stringify({ loan_id: 'loan-inst-pen', amount_paise: 110000, effective_date: '2026-01-02' })}', 'SYNCED', '2026-01-02T10:00:00Z')
+    `);
+    await db.runAsync(`
+      INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise, effective_date, created_at)
+      VALUES ('tx-inst-p1', 'op-inst-p1', 'loan-inst-pen', 'COLLECTION', 110000, 95000, 10000, 5000, '2026-01-02', '2026-01-02')
+    `);
+
+    await SyncService.recalculateLoanSchedule(db, 'loan-inst-pen');
+
+    // Loan is NOT settled because principal is not fully paid (only 95000 paid)
+    const loan = await db.getFirstAsync<any>(`SELECT status FROM loans WHERE id = 'loan-inst-pen'`);
+    expect(loan?.status).toBe('ACTIVE');
   });
 });

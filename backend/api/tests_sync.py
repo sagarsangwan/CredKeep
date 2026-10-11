@@ -1358,6 +1358,97 @@ def test_transaction_queryset_update_bulk_update_prohibited(lender_setup):
         LedgerTx.objects.filter(id=tx.id).delete()
 
 
+@pytest.mark.django_db
+def test_device_collision_cross_tenant_returns_409(api_client, lender_setup, other_lender_setup):
+    user1, tenant1, token1 = lender_setup
+    user2, tenant2, token2 = other_lender_setup
+
+    dev_id = uuid.uuid4()
+    # Tenant 1 owns dev_id
+    Device.objects.create(id=dev_id, tenant=tenant1)
+
+    # Tenant 2 tries to push using dev_id
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token2.key}')
+    url = reverse('sync-push')
+    payload = {
+        'device_id': str(dev_id),
+        'operations': []
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 409
+    assert 'registered to another tenant' in response.data['error']
+
+
+@pytest.mark.django_db
+def test_modify_schedule_postponement_action_none_preserves_accrued_penalties(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    borrower = Borrower.objects.create(tenant=tenant, name='Borrower Overdue', phone='9876543999')
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=100000,
+        markup_factor=Decimal('0.10'),
+        term_months=1,
+        start_date='2026-01-01',
+        due_day=1,
+        product_type='instalment',
+        status='ACTIVE'
+    )
+    kist = Kist.objects.create(
+        tenant=tenant,
+        loan=loan,
+        installment_number=1,
+        original_due_date='2026-01-01',
+        effective_due_date='2026-01-01',
+        principal_component_paise=100000,
+        markup_component_paise=10000,
+        total_due_paise=110000,
+        status='PENDING'
+    )
+
+    # Postpone overdue kist to 2026-02-01 on effective_date 2026-01-05 (4 overdue days: Jan 2, 3, 4, 5) with action NONE
+    url = reverse('sync-push')
+    op_id = str(uuid.uuid4())
+    payload = {
+        'operations': [
+            {
+                'operation_id': op_id,
+                'type': 'modify_schedule',
+                'payload': {
+                    'loan_id': str(loan.id),
+                    'installment_number': 1,
+                    'revised_effective_due_date': '2026-02-01',
+                    'effective_date': '2026-01-05',
+                    'accrued_penalty_action': 'NONE',
+                    'reason': 'Borrower requested extension'
+                }
+            }
+        ]
+    }
+    response = api_client.post(url, payload, format='json')
+    assert response.status_code == 200
+    assert response.data['results'][0]['status'] == 'ACCEPTED'
+
+    # Overdue penalties must have been assessed prior to moving due date
+    assessed_penalties = LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+    assert assessed_penalties.count() == 4
+    total_assessed = sum(tx.amount_paise for tx in assessed_penalties)
+    assert total_assessed == 40000  # 4 days * 10,000 paise (Rs 100/day)
+
+    # Schedule is updated to new date
+    kist.refresh_from_db()
+    assert str(kist.effective_due_date) == '2026-02-01'
+
+    # Loan balance still includes the accrued penalties
+    outstanding_pen = (
+        LedgerTx.objects.filter(loan=loan, transaction_type='PENALTY_ASSESSMENT')
+        .aggregate(total=models.Sum('amount_paise'))['total'] or 0
+    )
+    assert outstanding_pen == 40000
+
+
 
 
 

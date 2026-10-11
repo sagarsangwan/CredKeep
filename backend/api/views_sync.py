@@ -58,13 +58,27 @@ class SyncPushView(APIView):
         if device_id_raw:
             try:
                 dev_uuid = uuid.UUID(str(device_id_raw))
+                existing_device = Device.objects.filter(id=dev_uuid).first()
+                if existing_device and existing_device.tenant_id != tenant.id:
+                    return Response(
+                        {"error": "Device ID is registered to another tenant."},
+                        status=status.HTTP_409_CONFLICT
+                    )
                 device, _ = Device.objects.get_or_create(
                     id=dev_uuid,
                     tenant=tenant,
                     defaults={'last_sync': timezone.now()}
                 )
             except (ValueError, TypeError):
-                pass
+                return Response(
+                    {"error": "Invalid device_id format."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            except IntegrityError:
+                return Response(
+                    {"error": "Device ID collision with another tenant."},
+                    status=status.HTTP_409_CONFLICT
+                )
 
         if not device:
             device = Device.objects.filter(tenant=tenant).first()
@@ -470,13 +484,15 @@ class SyncPushView(APIView):
             if accrued_penalty_action not in ('NONE', 'WAIVE', 'CAP'):
                 return 'REJECTED', f"Unsupported accrued_penalty_action '{accrued_penalty_action}'."
 
+            # Unconditionally assess penalties through effective modification date before changing schedule due date
+            eff_today = str(payload.get('effective_date') or kist.effective_due_date)
+            if 'T' in eff_today:
+                eff_today = eff_today.split('T')[0]
+            ledger_service.assess_penalties(loan, eff_today)
+
             actual_waived = 0
             outstanding_pen = 0
             if accrued_penalty_action == 'WAIVE' or waived_pen > 0:
-                eff_today = str(payload.get('effective_date') or kist.effective_due_date)
-                if 'T' in eff_today:
-                    eff_today = eff_today.split('T')[0]
-                ledger_service.assess_penalties(loan, eff_today)
 
                 total_assessed = (
                     LedgerTx.objects

@@ -60,11 +60,14 @@ export class TransactionRepository {
           [loanId]
         );
         const penaltyPaid = await tx.getFirstAsync<any>(
-          `SELECT SUM(allocated_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+          `SELECT SUM(allocated_penalty_paise) as total FROM transactions
+           WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+             AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
+             AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
           [loanId]
         );
         const penaltyForgiven = await tx.getFirstAsync<any>(
-          `SELECT SUM(forgiven_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'REVERSAL'`,
+          `SELECT SUM(forgiven_penalty_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type IN ('WAIVER', 'REVERSAL')`,
           [loanId]
         );
         
@@ -91,7 +94,10 @@ export class TransactionRepository {
         let pastPrincipalPaid = 0;
         if (loan.product_type === 'bullet') {
           const pastPrincipalPaidRes = await tx.getFirstAsync<any>(
-            `SELECT SUM(allocated_principal_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+            `SELECT SUM(allocated_principal_paise) as total FROM transactions
+             WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')
+               AND operation_id NOT IN (SELECT operation_id FROM sync_outbox WHERE status = 'REJECTED')
+               AND operation_id NOT IN (SELECT 'reversal-' || operation_id FROM sync_outbox WHERE status = 'REJECTED')`,
             [loanId]
           );
           pastPrincipalPaid = pastPrincipalPaidRes?.total || 0;
