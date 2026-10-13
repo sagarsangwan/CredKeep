@@ -1,8 +1,24 @@
 import { Platform } from 'react-native';
 import { AuthStore } from '../auth/authStore';
 
-const DEFAULT_SERVER_URL =
-  Platform.OS === 'android' ? 'http://10.0.2.2:8000/api/v2' : 'http://localhost:8000/api/v2';
+export function resolveDefaultServerUrl(): string {
+  const envUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
+  if (envUrl) {
+    const trimmed = envUrl.endsWith('/') ? envUrl.slice(0, -1) : envUrl;
+    return trimmed.endsWith('/api/v2') ? trimmed : `${trimmed}/api/v2`;
+  }
+
+  // Development-only fallback for local testing (Android emulator loopback vs localhost)
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    return Platform.OS === 'android' ? 'http://10.0.2.2:8000/api/v2' : 'http://localhost:8000/api/v2';
+  }
+
+  throw new Error(
+    'EXPO_PUBLIC_API_URL environment variable is required in production and staging builds.'
+  );
+}
+
+const DEFAULT_SERVER_URL = resolveDefaultServerUrl();
 
 export class ApiClient {
   private static baseUrl: string = DEFAULT_SERVER_URL;

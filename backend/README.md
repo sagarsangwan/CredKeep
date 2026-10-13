@@ -127,7 +127,31 @@ For macOS or Linux, activate the environment with `source .venv/bin/activate` an
 
 The API is then available at `http://127.0.0.1:8000/`. Interactive API documentation is served at `http://127.0.0.1:8000/api/docs/`.
 
-### Docker
+### Docker & Docker Compose
+
+**Running the full backend stack (PostgreSQL + Django API) with Docker Compose:**
+
+From either the repository root or the `backend` directory:
+
+```bash
+docker compose up -d
+```
+
+This starts:
+- **`credkeep_db`**: PostgreSQL 15 database on internal port 5432 (mapped to host `127.0.0.1:5433` by default to avoid collision with any existing local PostgreSQL and prevent external LAN exposure), preconfigured with the restricted `credkeep_app` application role for RLS.
+- **`credkeep_migration`**: One-off migration job that waits for database health and applies migrations with administrative credentials before exiting.
+- **`credkeep_backend`**: Django REST Framework API with Gunicorn on port `8000`, running strictly under the restricted `credkeep_app` application role after migrations complete successfully, exposing endpoints at `http://localhost:8000/`.
+
+To inspect logs or run commands inside the container:
+
+```bash
+docker compose logs -f backend
+docker compose exec backend python manage.py createsuperuser
+docker compose exec backend pytest
+docker compose down
+```
+
+**Single-container build (connecting to an external database):**
 
 ```bash
 docker build -t credkeep-backend .
