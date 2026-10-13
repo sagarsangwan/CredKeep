@@ -29,5 +29,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f "http://localhost:${PORT:-8000}/api/v2/ready/" || exit 1
 
-# Validate the database role, apply pending migrations, and start Gunicorn.
+# Validate the runtime database role and RLS state, then start Gunicorn.
 CMD ["./scripts/render-start.sh"]

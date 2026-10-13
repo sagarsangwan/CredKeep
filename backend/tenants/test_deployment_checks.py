@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,6 +7,9 @@ from django.core.management.base import CommandError
 from tenants.management.commands.verify_database_role import Command as VerifyRoleCommand
 from tenants.management.commands.verify_rls import EXPECTED_RLS_TABLES
 from tenants.management.commands.verify_rls import Command as VerifyRlsCommand
+
+
+RENDER_START_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "render-start.sh"
 
 
 def postgres_connection(fetchall=None, fetchone=None):
@@ -47,3 +51,11 @@ def test_rls_check_accepts_all_expected_tables():
 
     with patch("tenants.management.commands.verify_rls.connection", connection):
         VerifyRlsCommand().handle()
+
+
+def test_render_startup_validates_runtime_database_without_running_migrations():
+    script = RENDER_START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "manage.py migrate" not in script
+    assert script.index("manage.py verify_database_role") < script.index("manage.py verify_rls")
+    assert script.index("manage.py verify_rls") < script.index("exec gunicorn")
