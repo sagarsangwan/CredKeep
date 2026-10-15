@@ -37,13 +37,14 @@ function RootNavigator() {
     if (isAuthenticated === null) return;
 
     const inAuthGroup = segments[0] === 'auth';
-    const isSecuritySetup = (segments as string[])[1] === 'security-setup';
+    const segList = segments as string[];
+    const isWelcomeScreen = inAuthGroup && (!segList[1] || segList[1] === 'index');
 
     if (!isAuthenticated && !inAuthGroup) {
       // Unauthenticated cold start or logged out: Gate immediately to Welcome/Auth
       router.replace('/auth');
-    } else if (isAuthenticated && inAuthGroup && !isSecuritySetup) {
-      // Authenticated session: ensure user is redirected to dashboard unless completing PIN onboarding
+    } else if (isAuthenticated && isWelcomeScreen) {
+      // Authenticated session landing on Welcome screen: forward to dashboard
       router.replace('/(tabs)');
     }
   }, [isAuthenticated, segments, router]);
