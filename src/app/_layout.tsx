@@ -37,12 +37,13 @@ function RootNavigator() {
     if (isAuthenticated === null) return;
 
     const inAuthGroup = segments[0] === 'auth';
+    const isSecuritySetup = (segments as string[])[1] === 'security-setup';
 
     if (!isAuthenticated && !inAuthGroup) {
       // Unauthenticated cold start or logged out: Gate immediately to Welcome/Auth
       router.replace('/auth');
-    } else if (isAuthenticated && inAuthGroup) {
-      // Authenticated session: ensure user is redirected to dashboard
+    } else if (isAuthenticated && inAuthGroup && !isSecuritySetup) {
+      // Authenticated session: ensure user is redirected to dashboard unless completing PIN onboarding
       router.replace('/(tabs)');
     }
   }, [isAuthenticated, segments, router]);
@@ -62,7 +63,6 @@ function RootNavigator() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="borrower/[id]" options={{ headerShown: false }} />
       <Stack.Screen name="loan/[id]" options={{ headerShown: false }} />
-      <Stack.Screen name="reports" options={{ headerShown: false }} />
       <Stack.Screen name="reports/index" options={{ headerShown: false }} />
       <Stack.Screen name="settings/security" options={{ headerShown: false }} />
       <Stack.Screen name="settings/backup" options={{ headerShown: false }} />
