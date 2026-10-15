@@ -42,14 +42,29 @@ export default function HomeScreen() {
 
         const todayStr = new Date().toISOString().split('T')[0];
 
-        // 1. Calculate net remaining receivables (FIN-001)
+        // 1. Calculate net remaining receivables (FIN-001 + Bullet principal)
         const netReceivablesRow = await db.getFirstAsync<{ remainingDue: number }>(
           `SELECT COALESCE(SUM(total_due_paise - (principal_paid_paise + markup_paid_paise)), 0) as remainingDue
            FROM repayment_schedules
            JOIN loans ON repayment_schedules.loan_id = loans.id
            WHERE loans.status = 'ACTIVE' AND repayment_schedules.status != 'PAID'`
         );
-        const netReceivables = (netReceivablesRow?.remainingDue || 0) as Paise;
+        const scheduleRemaining = netReceivablesRow?.remainingDue || 0;
+
+        const bulletPrincipalRow = await db.getFirstAsync<{ bulletRemaining: number }>(
+          `SELECT COALESCE(SUM(
+             loans.principal_paise - COALESCE((
+               SELECT SUM(t.allocated_principal_paise)
+               FROM transactions t
+               WHERE t.loan_id = loans.id
+             ), 0)
+           ), 0) as bulletRemaining
+           FROM loans
+           WHERE loans.status = 'ACTIVE' AND loans.product_type = 'bullet'`
+        );
+        const bulletRemaining = bulletPrincipalRow?.bulletRemaining || 0;
+
+        const netReceivables = (scheduleRemaining + bulletRemaining) as Paise;
         setTotalOut(netReceivables);
 
         // 2. Calculate Due Today (UX-001)
@@ -90,8 +105,10 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadDashboard();
-    }, [loadDashboard])
+      if (refreshVersion >= 0) {
+        loadDashboard();
+      }
+    }, [loadDashboard, refreshVersion])
   );
 
   const getSyncBadge = () => {

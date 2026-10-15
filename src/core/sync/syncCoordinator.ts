@@ -21,8 +21,9 @@ export class SyncCoordinator {
   private static isSyncing = false;
   private static queuedSync = false;
   private static appStateSubscription: any = null;
-  private static networkInterval: any = null;
+  private static networkSubscription: any = null;
   private static wasOffline = false;
+  private static onDataChangedCallback: (() => void) | null = null;
 
   private static currentState: SyncState = {
     status: 'IDLE',
@@ -57,10 +58,11 @@ export class SyncCoordinator {
   /**
    * Initializes the coordinator with the active tenant database handle.
    */
-  static async init(db: SQLiteDatabase): Promise<void> {
+  static async init(db: SQLiteDatabase, onDataChanged?: () => void): Promise<void> {
     this.db = db;
     this.isSyncing = false;
     this.queuedSync = false;
+    this.onDataChangedCallback = onDataChanged || null;
 
     // Load initial metadata from database
     try {
@@ -90,13 +92,14 @@ export class SyncCoordinator {
     this.db = null;
     this.isSyncing = false;
     this.queuedSync = false;
+    this.onDataChangedCallback = null;
     if (this.appStateSubscription) {
       this.appStateSubscription.remove();
       this.appStateSubscription = null;
     }
-    if (this.networkInterval) {
-      clearInterval(this.networkInterval);
-      this.networkInterval = null;
+    if (this.networkSubscription) {
+      this.networkSubscription.remove();
+      this.networkSubscription = null;
     }
     this.currentState = {
       status: 'IDLE',
@@ -117,14 +120,13 @@ export class SyncCoordinator {
       }
     });
 
-    if (this.networkInterval) {
-      clearInterval(this.networkInterval);
+    if (this.networkSubscription) {
+      this.networkSubscription.remove();
     }
-    // Periodic check for network recovery when active
-    this.networkInterval = setInterval(async () => {
-      try {
-        const netState = await Network.getNetworkStateAsync();
-        const isOnline = Boolean(netState.isConnected && netState.isInternetReachable !== false);
+    // Event-driven network listener — no continuous battery-draining polling
+    try {
+      this.networkSubscription = Network.addNetworkStateListener((event) => {
+        const isOnline = Boolean(event.isConnected && event.isInternetReachable !== false);
 
         if (!isOnline) {
           this.wasOffline = true;
@@ -137,10 +139,10 @@ export class SyncCoordinator {
           // Connectivity recovered: Trigger sync!
           this.triggerSync('network_recovery');
         }
-      } catch {
-        // Suppress network check errors
-      }
-    }, 10000);
+      });
+    } catch {
+      // Fallback for non-supported test environments
+    }
   }
 
   /**
@@ -205,6 +207,9 @@ export class SyncCoordinator {
           pendingCount: pending.length,
           errorMessage: null,
         };
+        if (res.pushedCount > 0 || res.pulledCount > 0) {
+          this.onDataChangedCallback?.();
+        }
       } else {
         this.currentState = {
           status: 'ERROR',

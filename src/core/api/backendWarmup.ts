@@ -1,11 +1,22 @@
+import { ApiClient } from './client';
+
 let isWarmingUp = false;
 let warmUpCompleted = false;
 
-const HEALTH_URL = 'https://credkeep-v2-staging.onrender.com/api/v2/health/';
 const TIMEOUT_MS = 12000;
 
+function getHealthUrl(): string {
+  try {
+    const base = ApiClient.getBaseUrl();
+    const cleanBase = base.endsWith('/') ? base.slice(0, -1) : base;
+    return `${cleanBase}/health/`;
+  } catch {
+    return 'https://credkeep-v2-staging.onrender.com/api/v2/health/';
+  }
+}
+
 /**
- * Triggers an asynchronous, non-blocking health check ping to wake the Render staging server.
+ * Triggers an asynchronous, non-blocking health check ping to wake the configured backend server.
  * - Single-flight: Prevents duplicate concurrent requests.
  * - Non-blocking: Bounded timeout, does not throw or block UI.
  * - No credentials or tokens attached.
@@ -16,13 +27,14 @@ export function triggerBackendWarmup(): void {
   }
 
   isWarmingUp = true;
+  const healthUrl = getHealthUrl();
 
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();
   }, TIMEOUT_MS);
 
-  fetch(HEALTH_URL, {
+  fetch(healthUrl, {
     method: 'GET',
     headers: {
       Accept: 'application/json',

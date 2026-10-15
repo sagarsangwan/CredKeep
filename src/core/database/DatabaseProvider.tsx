@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { SQLiteDatabase } from 'expo-sqlite';
 import { initDatabase } from './db';
 import { runMigrations } from './schema';
@@ -34,6 +34,7 @@ const DatabaseContext = createContext<DatabaseContextType>({
 
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const loadGenerationRef = useRef(0);
 
   const triggerRefresh = useCallback(() => {
     setRefreshVersion((v) => v + 1);
@@ -48,6 +49,7 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   });
 
   const closeCurrentDatabase = useCallback(async () => {
+    loadGenerationRef.current++;
     SyncCoordinator.reset();
     setState((prev) => {
       if (prev.db && typeof (prev.db as any).closeAsync === 'function') {
@@ -65,7 +67,10 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const loadDatabase = useCallback(async (tenantId?: string | null) => {
+    const generation = ++loadGenerationRef.current;
     const activeTenant = tenantId !== undefined ? tenantId : await AuthStore.getTenantId();
+
+    if (generation !== loadGenerationRef.current) return;
 
     if (!activeTenant || activeTenant.trim().length === 0) {
       // Unauthenticated state: Do not open any database
@@ -87,7 +92,20 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const db = await initDatabase(activeTenant);
+      if (generation !== loadGenerationRef.current) {
+        if (typeof (db as any).closeAsync === 'function') {
+          (db as any).closeAsync().catch(() => {});
+        }
+        return;
+      }
+
       await runMigrations(db);
+      if (generation !== loadGenerationRef.current) {
+        if (typeof (db as any).closeAsync === 'function') {
+          (db as any).closeAsync().catch(() => {});
+        }
+        return;
+      }
 
       setState((prev) => {
         if (prev.db && prev.db !== db && typeof (prev.db as any).closeAsync === 'function') {
@@ -103,9 +121,12 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
       });
       setRefreshVersion((v) => v + 1);
 
-      // Initialize automatic sync for this active tenant
-      SyncCoordinator.init(db);
+      // Initialize automatic sync for this active tenant with data refresh callback
+      SyncCoordinator.init(db, () => {
+        setRefreshVersion((v) => v + 1);
+      });
     } catch (e: any) {
+      if (generation !== loadGenerationRef.current) return;
       SyncCoordinator.reset();
       setState((prev) => ({
         ...prev,
