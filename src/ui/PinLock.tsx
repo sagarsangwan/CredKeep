@@ -1,8 +1,9 @@
 import React, { useState, useEffect, createContext, useContext, useRef } from 'react';
-import { View, StyleSheet, TouchableOpacity, AppState, AppStateStatus } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, AppState, AppStateStatus, Modal } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { Typography } from './Typography';
+import { Button } from './Button';
 import { theme } from './theme';
 import { Keypad } from './Keypad';
 
@@ -37,6 +38,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   const [pinEntry, setPinEntry] = useState('');
   const [storedPin, setStoredPin] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const appState = useRef<AppStateStatus>(AppState.currentState);
@@ -58,6 +60,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
         if (auth.success) {
           setIsLocked(false);
           setPinEntry('');
+          setStorageError(null);
         }
       }
     } catch (e) {
@@ -69,6 +72,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
 
   const checkPinSetup = async () => {
     try {
+      setStorageError(null);
       const pin = await SecureStore.getItemAsync(PIN_KEY);
       const bio = await SecureStore.getItemAsync(BIO_ENABLED_KEY);
 
@@ -86,10 +90,11 @@ export function PinLock({ children }: { children: React.ReactNode }) {
       } else {
         setIsLocked(false);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('SecureStore error', e);
-      // Fail-safe: if PIN exists or error, keep unlocked unless stored pin is verified
-      setIsLocked(false);
+      // Fail-secure: If SecureStore fails, stay locked and allow the user to retry
+      setIsLocked(true);
+      setStorageError('Failed to access secure storage. Please retry.');
     } finally {
       setLoading(false);
     }
@@ -97,23 +102,23 @@ export function PinLock({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
-      const prevAppState = appState.current;
       appState.current = nextAppState;
 
-      // Do NOT lock if we are currently presenting a native biometric dialog
+      // Do NOT lock if native biometric prompt dialog is currently active
       if (isAuthenticatingBioRef.current) {
         return;
       }
 
       if (nextAppState === 'background') {
+        // Record timestamp when the app enters background
         backgroundTimestampRef.current = Date.now();
       } else if (nextAppState === 'active') {
-        // Only trigger lock when returning from genuine background (NOT inactive)
-        // AND when the background elapsed time exceeds the grace period
-        if (prevAppState === 'background' && backgroundTimestampRef.current !== null) {
+        // When returning to active, check if the app was previously backgrounded
+        if (backgroundTimestampRef.current !== null) {
           const elapsed = Date.now() - backgroundTimestampRef.current;
           backgroundTimestampRef.current = null;
 
+          // Only lock if genuine background duration met or exceeded grace period
           if (hasPin && elapsed >= BACKGROUND_LOCK_GRACE_PERIOD_MS) {
             setIsLocked(true);
             setPinEntry('');
@@ -123,6 +128,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
           }
         }
       }
+      // Note: Transitions to 'inactive' do NOT clear backgroundTimestampRef or trigger lock
     });
 
     return () => subscription.remove();
@@ -143,6 +149,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
         if (newPin === storedPin) {
           setIsLocked(false);
           setPinEntry('');
+          setStorageError(null);
         } else {
           setError(true);
           setTimeout(() => setPinEntry(''), 500);
@@ -199,7 +206,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   return (
     <SecurityContext.Provider value={contextValue}>
       <View style={styles.root}>
-        {/* Navigation children are ALWAYS mounted to preserve navigation state and form input */}
+        {/* Navigation children are ALWAYS kept mounted underneath to preserve navigation and form state */}
         <View
           style={StyleSheet.absoluteFill}
           pointerEvents={isLocked || loading ? 'none' : 'auto'}
@@ -215,37 +222,56 @@ export function PinLock({ children }: { children: React.ReactNode }) {
           </View>
         )}
 
-        {/* PIN lock full-screen overlay when locked */}
-        {isLocked && !loading && (
-          <View style={[StyleSheet.absoluteFill, styles.overlay]}>
+        {/* Top-level Modal overlay when locked: covers all screens including native Android Modals */}
+        <Modal
+          visible={isLocked && !loading}
+          animationType="fade"
+          transparent={false}
+          statusBarTranslucent
+          onRequestClose={() => {
+            // Android back button cannot dismiss PIN lock
+          }}
+        >
+          <View style={styles.container}>
             <Typography variant="headlineMd" color={theme.colors.primary} style={styles.title}>
               Enter PIN
             </Typography>
 
-            <View style={styles.dotsContainer}>
-              {[1, 2, 3, 4].map((i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.dot,
-                    pinEntry.length >= i ? styles.dotFilled : null,
-                    error ? styles.dotError : null,
-                  ]}
-                />
-              ))}
-            </View>
-
-            <Keypad onKeyPress={handleKeyPress} onBackspace={handleBackspace} />
-
-            {bioEnabled && (
-              <TouchableOpacity onPress={handleRetryBio} style={styles.bioButton}>
-                <Typography variant="labelLg" color={theme.colors.primary}>
-                  Use Biometrics
+            {storageError ? (
+              <View style={styles.errorContainer}>
+                <Typography variant="bodyMd" color={theme.colors.error} style={{ marginBottom: 16 }}>
+                  {storageError}
                 </Typography>
-              </TouchableOpacity>
+                <Button title="Retry Security Check" onPress={() => checkPinSetup()} />
+              </View>
+            ) : (
+              <>
+                <View style={styles.dotsContainer}>
+                  {[1, 2, 3, 4].map((i) => (
+                    <View
+                      key={i}
+                      style={[
+                        styles.dot,
+                        pinEntry.length >= i ? styles.dotFilled : null,
+                        error ? styles.dotError : null,
+                      ]}
+                    />
+                  ))}
+                </View>
+
+                <Keypad onKeyPress={handleKeyPress} onBackspace={handleBackspace} />
+
+                {bioEnabled && (
+                  <TouchableOpacity onPress={handleRetryBio} style={styles.bioButton}>
+                    <Typography variant="labelLg" color={theme.colors.primary}>
+                      Use Biometrics
+                    </Typography>
+                  </TouchableOpacity>
+                )}
+              </>
             )}
           </View>
-        )}
+        </Modal>
       </View>
     </SecurityContext.Provider>
   );
@@ -261,6 +287,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 9999,
+  },
+  container: {
+    flex: 1,
+    backgroundColor: theme.colors.background,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   title: {
     marginBottom: 40,
@@ -287,5 +319,9 @@ const styles = StyleSheet.create({
   bioButton: {
     marginTop: 40,
     padding: 16,
+  },
+  errorContainer: {
+    alignItems: 'center',
+    padding: 24,
   },
 });
