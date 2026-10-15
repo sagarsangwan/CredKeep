@@ -98,18 +98,23 @@ export default function LoansScreen() {
 
   const handleCreate = async () => {
     if (!selectedBorrowerId) return;
+    if (!loans) {
+      Alert.alert('Database Initializing', 'Please wait for database initialization.');
+      return;
+    }
     try {
-      await loans!.createLoanWithSchedule(selectedBorrowerId, {
+      await loans.createLoanWithSchedule(selectedBorrowerId, {
         principal: toPaise(parseInt(principal)),
         markupFactor: parseFloat(markupPercent) / 100,
         termMonths: parseInt(termMonths),
         startDate: new Date().toISOString().split('T')[0],
         dueDay: parseInt(dueDay),
         productType,
+        collateral: collateral.trim() || undefined,
       });
       setModalVisible(false);
       resetForm();
-      triggerRefresh(); // Automatically triggers re-fetch via useEffect
+      triggerRefresh();
     } catch (e: any) {
       Alert.alert('Error', e.message || 'An error occurred');
     }

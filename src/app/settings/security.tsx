@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { View, StyleSheet, Alert, Switch, Modal } from 'react-native';
+import { View, StyleSheet, Alert, Switch, Modal, TouchableOpacity } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
-import { Shield } from 'lucide-react-native';
+import { useRouter } from 'expo-router';
+import { Shield, ArrowLeft } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { theme } from '../../ui/theme';
 import { Button } from '../../ui/Button';
@@ -10,6 +11,7 @@ import { Keypad } from '../../ui/Keypad';
 import { Card } from '../../ui/Card';
 
 export default function SecuritySettingsScreen() {
+  const router = useRouter();
   const { hasPin, bioEnabled, setPin, removePin, setBioEnabled } = useSecurity();
   const [pinEntry, setPinEntry] = useState('');
   const [isSettingPin, setIsSettingPin] = useState(false);
@@ -82,11 +84,21 @@ export default function SecuritySettingsScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
+      <View style={styles.topNav}>
+        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <ArrowLeft size={24} color={theme.colors.onBackground} />
+        </TouchableOpacity>
+        <Typography variant="headlineSm" style={styles.topNavTitle}>
+          App Security
+        </Typography>
+        <View style={{ width: 40 }} />
+      </View>
+
       <View style={styles.container}>
         <View style={styles.header}>
           <Shield size={32} color={theme.colors.primary} />
           <Typography variant="headlineMd" color={theme.colors.onBackground} style={styles.title}>
-            App Security
+            PIN & Biometrics
           </Typography>
         </View>
 
@@ -164,6 +176,22 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: theme.colors.background,
+  },
+  topNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.surfaceVariant,
+    backgroundColor: theme.colors.surface,
+  },
+  backButton: {
+    padding: theme.spacing.xs,
+  },
+  topNavTitle: {
+    fontWeight: '700',
   },
   container: {
     padding: theme.spacing.xl,

@@ -24,10 +24,17 @@ export async function runMigrations(db: SQLiteDatabase) {
         due_day INTEGER NOT NULL,
         product_type TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'ACTIVE',
+        collateral TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (borrower_id) REFERENCES borrowers(id) ON DELETE RESTRICT
       );
     `);
+
+    const loanColumns: any[] = await (tx as any).getAllAsync(`PRAGMA table_info(loans);`);
+    const loanColNames = new Set((loanColumns || []).map((c: any) => c.name));
+    if (!loanColNames.has('collateral')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN collateral TEXT;`);
+    }
 
     // 3. Repayment Schedules
     await tx.execAsync(`

@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
-import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
 import { useRouter } from 'expo-router';
+import { ArrowLeft } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { Input } from '../../ui/Input';
 import { Button } from '../../ui/Button';
 import { theme } from '../../ui/theme';
 import { AuthService } from '../../core/auth/authService';
+import { triggerBackendWarmup } from '../../core/api/backendWarmup';
 
 export default function RegisterScreen() {
   const router = useRouter();
@@ -15,6 +17,11 @@ export default function RegisterScreen() {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Non-blocking Render staging server wake-up ping
+    triggerBackendWarmup();
+  }, []);
 
   const handleRegister = async () => {
     if (!username.trim() || !password) {
@@ -31,9 +38,11 @@ export default function RegisterScreen() {
         workspaceName: workspaceName.trim() || undefined,
         email: email.trim() || undefined,
       });
-      router.replace('/(tabs)');
+
+      // Onboarding step: offer optional offline security setup (biometric/PIN)
+      router.replace('/auth/security-setup');
     } catch (err: any) {
-      setError(err?.message || 'Registration failed. Please try a different username.');
+      setError(err?.message || 'Registration failed. Please check your network or try a different username.');
     } finally {
       setLoading(false);
     }
@@ -45,6 +54,13 @@ export default function RegisterScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <TouchableOpacity style={styles.backButton} onPress={() => router.replace('/auth')}>
+          <ArrowLeft size={24} color={theme.colors.onBackground} />
+          <Typography variant="labelLg" color={theme.colors.onBackground} style={{ marginLeft: 8 }}>
+            Welcome
+          </Typography>
+        </TouchableOpacity>
+
         <View style={styles.header}>
           <Typography variant="headlineLg" color={theme.colors.primary} style={styles.title}>
             CredKeep
@@ -117,7 +133,7 @@ export default function RegisterScreen() {
           <Button
             title="Already have an account? Log In"
             variant="ghost"
-            onPress={() => router.back()}
+            onPress={() => router.push('/auth/login')}
             style={styles.backBtn}
           />
         </View>
@@ -136,6 +152,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: theme.spacing.lg,
   },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.lg,
+    paddingVertical: 8,
+  },
   header: {
     alignItems: 'center',
     marginBottom: theme.spacing.xl,
@@ -148,7 +170,7 @@ const styles = StyleSheet.create({
     marginTop: theme.spacing.xs,
   },
   formCard: {
-    backgroundColor: theme.colors.surface,
+    backgroundColor: theme.colors.surfaceContainerLowest,
     padding: theme.spacing.xl,
     borderRadius: theme.borderRadius.lg,
     borderWidth: 1,
@@ -161,13 +183,14 @@ const styles = StyleSheet.create({
   errorContainer: {
     backgroundColor: '#FDE8E8',
     padding: theme.spacing.md,
-    borderRadius: theme.borderRadius.sm,
+    borderRadius: theme.borderRadius.md,
     marginBottom: theme.spacing.md,
   },
   registerBtn: {
-    marginTop: theme.spacing.sm,
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
   },
   backBtn: {
-    marginTop: theme.spacing.md,
+    marginTop: theme.spacing.xs,
   },
 });

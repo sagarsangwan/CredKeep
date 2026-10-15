@@ -7,7 +7,7 @@ import { Card } from '../../ui/Card';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
 import { Loan } from '../../core/database/loanRepository';
-import { formatINR } from '../../core/domain/money';
+import { formatINR, Paise } from '../../core/domain/money';
 
 export default function LoanDetailsScreen() {
   const { id } = useLocalSearchParams();
@@ -38,7 +38,7 @@ export default function LoanDetailsScreen() {
     return (
       <SafeAreaView style={styles.center} edges={['bottom', 'left', 'right']}>
         <Stack.Screen options={{ title: 'Loan Details', headerShown: true }} />
-        <Typography>Loading...</Typography>
+        <Typography>Loading loan details...</Typography>
       </SafeAreaView>
     );
   }
@@ -47,64 +47,94 @@ export default function LoanDetailsScreen() {
     <SafeAreaView style={styles.container} edges={['bottom', 'left', 'right']}>
       <ScrollView contentContainerStyle={{ padding: theme.spacing.lg, paddingBottom: 40 }}>
         <Stack.Screen options={{ title: 'Loan Details', headerShown: true }} />
-        
+
         <Card style={styles.headerCard}>
-        <Typography variant="headlineMd">Principal: {loan.principal_paise / 100} INR</Typography>
-        <Typography variant="bodyLg">Status: {loan.status}</Typography>
-        <Typography variant="bodyMd" color={theme.colors.textSecondary}>
-          Created: {new Date(loan.created_at).toLocaleDateString()}
-        </Typography>
-      </Card>
-
-      {earnings && (
-        <Card style={styles.earningsCard}>
-          <Typography variant="titleMd" style={{marginBottom: 10}}>Earnings & Collection Summary</Typography>
-          <View style={styles.row}>
-            <Typography variant="bodyMd">Principal Returned:</Typography>
-            <Typography variant="bodyMd">{formatINR(earnings.principalReturned)}</Typography>
-          </View>
-          <View style={styles.row}>
-            <Typography variant="bodyMd">Markup Received:</Typography>
-            <Typography variant="bodyMd">{formatINR(earnings.markupReceived)}</Typography>
-          </View>
-          <View style={styles.row}>
-            <Typography variant="bodyMd">Penalty Received:</Typography>
-            <Typography variant="bodyMd">{formatINR(earnings.penaltyReceived)}</Typography>
-          </View>
-          <View style={[styles.row, {marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderColor: theme.colors.outlineVariant}]}>
-            <Typography variant="labelLg">Total Actual Earnings:</Typography>
-            <Typography variant="labelLg" color={theme.colors.success}>{formatINR(earnings.totalEarnings)}</Typography>
-          </View>
-        </Card>
-      )}
-
-      <Typography variant="headlineSm" style={styles.sectionTitle}>Repayment Schedule</Typography>
-      
-      {schedule.map((kist) => (
-        <Card key={kist.id} style={styles.kistCard}>
-          <View style={styles.kistHeader}>
-            <Typography variant="labelLg">Kist {kist.installment_number}</Typography>
-            <Typography variant="labelLg" color={kist.status === 'PAID' ? theme.colors.success : theme.colors.warning}>
-              {kist.status}
+          <Typography variant="headlineMd" color={theme.colors.onPrimary}>
+            Principal: {formatINR(loan.principal_paise as Paise)}
+          </Typography>
+          <Typography variant="bodyLg" color={theme.colors.onPrimaryContainer} style={{ marginTop: 4 }}>
+            Status: {loan.status} • {loan.product_type === 'instalment' ? 'Monthly Instalment' : 'Bullet (Interest Only)'}
+          </Typography>
+          {loan.collateral && (
+            <Typography variant="bodyMd" color={theme.colors.secondaryFixed} style={{ marginTop: 4 }}>
+              Collateral / Security: {loan.collateral}
             </Typography>
-          </View>
-          
-          <View style={styles.kistRow}>
-            <Typography variant="bodyMd">Due Date:</Typography>
-            <Typography variant="bodyMd">{kist.effective_due_date}</Typography>
-          </View>
-          
-          <View style={styles.kistRow}>
-            <Typography variant="bodyMd">Total Due:</Typography>
-            <Typography variant="bodyMd">{kist.total_due_paise / 100} INR</Typography>
-          </View>
-          
-          <View style={styles.kistRow}>
-            <Typography variant="bodyMd">Paid:</Typography>
-            <Typography variant="bodyMd">{(kist.principal_paid_paise + kist.markup_paid_paise) / 100} INR</Typography>
-          </View>
+          )}
+          <Typography variant="bodySm" color={theme.colors.onPrimaryContainer} style={{ marginTop: 4 }}>
+            Created: {new Date(loan.created_at).toLocaleDateString()}
+          </Typography>
         </Card>
-      ))}
+
+        {earnings && (
+          <Card style={styles.earningsCard}>
+            <Typography variant="titleMd" style={{ marginBottom: 10 }}>
+              Earnings & Collection Summary
+            </Typography>
+            <View style={styles.row}>
+              <Typography variant="bodyMd">Principal Returned:</Typography>
+              <Typography variant="bodyMd">{formatINR(earnings.principalReturned)}</Typography>
+            </View>
+            <View style={styles.row}>
+              <Typography variant="bodyMd">Markup Received:</Typography>
+              <Typography variant="bodyMd">{formatINR(earnings.markupReceived)}</Typography>
+            </View>
+            <View style={styles.row}>
+              <Typography variant="bodyMd">Penalty Received:</Typography>
+              <Typography variant="bodyMd">{formatINR(earnings.penaltyReceived)}</Typography>
+            </View>
+            <View
+              style={[
+                styles.row,
+                {
+                  marginTop: 10,
+                  paddingTop: 10,
+                  borderTopWidth: 1,
+                  borderColor: theme.colors.outlineVariant,
+                },
+              ]}
+            >
+              <Typography variant="labelLg">Total Actual Earnings:</Typography>
+              <Typography variant="labelLg" color={theme.colors.success}>
+                {formatINR(earnings.totalEarnings)}
+              </Typography>
+            </View>
+          </Card>
+        )}
+
+        <Typography variant="headlineSm" style={styles.sectionTitle}>
+          Repayment Schedule
+        </Typography>
+
+        {schedule.map((kist) => (
+          <Card key={kist.id} style={styles.kistCard}>
+            <View style={styles.kistHeader}>
+              <Typography variant="labelLg">Kist {kist.installment_number}</Typography>
+              <Typography
+                variant="labelLg"
+                color={kist.status === 'PAID' ? theme.colors.success : theme.colors.warning}
+              >
+                {kist.status}
+              </Typography>
+            </View>
+
+            <View style={styles.kistRow}>
+              <Typography variant="bodyMd">Due Date:</Typography>
+              <Typography variant="bodyMd">{kist.effective_due_date}</Typography>
+            </View>
+
+            <View style={styles.kistRow}>
+              <Typography variant="bodyMd">Total Due:</Typography>
+              <Typography variant="bodyMd">{formatINR(kist.total_due_paise as Paise)}</Typography>
+            </View>
+
+            <View style={styles.kistRow}>
+              <Typography variant="bodyMd">Paid:</Typography>
+              <Typography variant="bodyMd">
+                {formatINR((kist.principal_paid_paise + kist.markup_paid_paise) as Paise)}
+              </Typography>
+            </View>
+          </Card>
+        ))}
       </ScrollView>
     </SafeAreaView>
   );
@@ -122,11 +152,15 @@ const styles = StyleSheet.create({
   },
   headerCard: {
     marginBottom: theme.spacing.xl,
-    backgroundColor: theme.colors.primaryContainer,
+    backgroundColor: theme.colors.primary,
+    padding: theme.spacing.lg,
   },
   earningsCard: {
     marginBottom: theme.spacing.xl,
-    backgroundColor: theme.colors.surfaceTint,
+    backgroundColor: theme.colors.surfaceContainerLowest,
+    padding: theme.spacing.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.outlineVariant,
   },
   row: {
     flexDirection: 'row',
@@ -138,18 +172,19 @@ const styles = StyleSheet.create({
   },
   kistCard: {
     marginBottom: theme.spacing.sm,
+    padding: theme.spacing.md,
   },
   kistHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: theme.spacing.sm,
     borderBottomWidth: 1,
-    borderBottomColor: theme.colors.outline,
+    borderBottomColor: theme.colors.outlineVariant,
     paddingBottom: theme.spacing.xs,
   },
   kistRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 4,
-  }
+  },
 });

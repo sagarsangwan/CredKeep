@@ -8,6 +8,7 @@ export type ScheduleOptions = {
   startDate: string; // YYYY-MM-DD
   dueDay: number; // 1-31
   productType: 'instalment' | 'bullet';
+  collateral?: string | null;
 };
 
 function getDaysInMonth(year: number, month: number): number {

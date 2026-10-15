@@ -1425,7 +1425,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     expect(nameA).toBe('credkeep_tenant-111.db');
     expect(nameB).toBe('credkeep_tenant-222.db');
-    expect(nameDefault).toBe('credkeep.db');
+    expect(nameDefault).toBeNull();
     expect(nameA).not.toBe(nameB);
   });
 
@@ -1937,7 +1937,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     // 3. Clear auth on logout
     await AuthStore.clearAuth();
     expect(notifiedTenant).toBeNull();
-    expect(await getDatabaseName()).toBe('credkeep.db');
+    expect(await getDatabaseName()).toBeNull();
 
     unsub();
   });

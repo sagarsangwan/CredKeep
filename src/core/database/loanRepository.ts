@@ -3,6 +3,7 @@ import * as crypto from 'expo-crypto';
 import { ScheduleOptions, generateSchedule, calculateNextDueDate } from '../domain/schedule';
 import { multiplyPaise, Paise } from '../domain/money';
 import { OutboxManager } from '../sync/outbox';
+import { SyncCoordinator } from '../sync/syncCoordinator';
 
 export type Loan = {
   id: string;
@@ -14,6 +15,7 @@ export type Loan = {
   due_day: number;
   product_type: string;
   status: string;
+  collateral?: string | null;
   created_at: string;
 };
 
@@ -90,11 +92,19 @@ export class LoanRepository {
         }
       }
 
-      await txHandle.runAsync(
-        `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [loanId, borrowerId, options.principal, options.markupFactor, options.termMonths, options.startDate, options.dueDay, options.productType, created_at]
-      );
+      if (options.collateral) {
+        await txHandle.runAsync(
+          `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, collateral, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [loanId, borrowerId, options.principal, options.markupFactor, options.termMonths, options.startDate, options.dueDay, options.productType, options.collateral, created_at]
+        );
+      } else {
+        await txHandle.runAsync(
+          `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [loanId, borrowerId, options.principal, options.markupFactor, options.termMonths, options.startDate, options.dueDay, options.productType, created_at]
+        );
+      }
       
       const statement = await txHandle.prepareAsync(`
         INSERT INTO repayment_schedules 
@@ -131,9 +141,12 @@ export class LoanRepository {
           start_date: options.startDate,
           due_day: options.dueDay,
           product_type: options.productType,
+          collateral: options.collateral || null,
         },
       });
     });
+
+    SyncCoordinator.notifyMutation();
 
     if (resolvedLoan) {
       return resolvedLoan;

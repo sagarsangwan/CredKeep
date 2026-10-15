@@ -5,6 +5,7 @@ import { Paise, toPaise } from '../domain/money';
 import { LoanRepository } from './loanRepository';
 import { calculateNewPenalties } from '../domain/penalty';
 import { OutboxManager } from '../sync/outbox';
+import { SyncCoordinator } from '../sync/syncCoordinator';
 
 export class TransactionRepository {
   constructor(private db: SQLiteDatabase) {}
@@ -223,6 +224,7 @@ export class TransactionRepository {
         returnResult = { success: true, transactionId, result };
       });
       
+      SyncCoordinator.notifyMutation();
       return returnResult;
   }
 

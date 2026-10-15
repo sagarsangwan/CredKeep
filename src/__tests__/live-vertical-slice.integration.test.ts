@@ -109,6 +109,7 @@ function createRealSqliteDb(): SQLiteDatabase {
       due_day INTEGER NOT NULL,
       product_type TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'ACTIVE',
+      collateral TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE repayment_schedules (

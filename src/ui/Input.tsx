@@ -4,16 +4,18 @@ import { Typography } from './Typography';
 import { theme } from './theme';
 
 interface InputProps extends TextInputProps {
-  label: string;
+  label?: string;
   error?: string;
 }
 
 export function Input({ label, error, style, ...rest }: InputProps) {
   return (
     <View style={styles.container}>
-      <Typography variant="labelLg" color={theme.colors.textPrimary} style={styles.label}>
-        {label}
-      </Typography>
+      {label ? (
+        <Typography variant="labelLg" color={theme.colors.textPrimary} style={styles.label}>
+          {label}
+        </Typography>
+      ) : null}
       <TextInput
         style={[styles.input, error && styles.inputError, style]}
         placeholderTextColor={theme.colors.textSecondary}
@@ -36,15 +38,15 @@ const styles = StyleSheet.create({
     marginBottom: theme.spacing.xs,
   },
   input: {
-    height: 48,
+    backgroundColor: theme.colors.surface,
     borderWidth: 1,
     borderColor: theme.colors.outline,
-    borderRadius: theme.borderRadius.md,
+    borderRadius: theme.borderRadius.sm,
     paddingHorizontal: theme.spacing.md,
-    backgroundColor: theme.colors.surface,
+    paddingVertical: theme.spacing.sm,
     color: theme.colors.textPrimary,
     fontSize: 16,
-    fontFamily: 'Inter',
+    minHeight: 48,
   },
   inputError: {
     borderColor: theme.colors.error,

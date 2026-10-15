@@ -6,6 +6,7 @@ import { BorrowerRepository } from './borrowerRepository';
 import { LoanRepository } from './loanRepository';
 import { TransactionRepository } from './transactionRepository';
 import { AuthStore } from '../auth/authStore';
+import { SyncCoordinator } from '../sync/syncCoordinator';
 
 type DatabaseContextType = {
   db: SQLiteDatabase | null;
@@ -16,6 +17,7 @@ type DatabaseContextType = {
   refreshVersion: number;
   triggerRefresh: () => void;
   switchTenant: (tenantId?: string | null) => Promise<void>;
+  closeCurrentDatabase: () => Promise<void>;
 };
 
 const DatabaseContext = createContext<DatabaseContextType>({
@@ -27,16 +29,17 @@ const DatabaseContext = createContext<DatabaseContextType>({
   refreshVersion: 0,
   triggerRefresh: () => {},
   switchTenant: async () => {},
+  closeCurrentDatabase: async () => {},
 });
 
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
 
   const triggerRefresh = useCallback(() => {
-    setRefreshVersion(v => v + 1);
+    setRefreshVersion((v) => v + 1);
   }, []);
 
-  const [state, setState] = useState<Omit<DatabaseContextType, 'refreshVersion' | 'triggerRefresh' | 'switchTenant'>>({
+  const [state, setState] = useState<Omit<DatabaseContextType, 'refreshVersion' | 'triggerRefresh' | 'switchTenant' | 'closeCurrentDatabase'>>({
     db: null,
     borrowers: null,
     loans: null,
@@ -44,12 +47,49 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     error: null,
   });
 
+  const closeCurrentDatabase = useCallback(async () => {
+    SyncCoordinator.reset();
+    setState((prev) => {
+      if (prev.db && typeof (prev.db as any).closeAsync === 'function') {
+        (prev.db as any).closeAsync().catch(() => {});
+      }
+      return {
+        db: null,
+        borrowers: null,
+        loans: null,
+        transactions: null,
+        error: null,
+      };
+    });
+    setRefreshVersion((v) => v + 1);
+  }, []);
+
   const loadDatabase = useCallback(async (tenantId?: string | null) => {
+    const activeTenant = tenantId !== undefined ? tenantId : await AuthStore.getTenantId();
+
+    if (!activeTenant || activeTenant.trim().length === 0) {
+      // Unauthenticated state: Do not open any database
+      SyncCoordinator.reset();
+      setState((prev) => {
+        if (prev.db && typeof (prev.db as any).closeAsync === 'function') {
+          (prev.db as any).closeAsync().catch(() => {});
+        }
+        return {
+          db: null,
+          borrowers: null,
+          loans: null,
+          transactions: null,
+          error: null,
+        };
+      });
+      return;
+    }
+
     try {
-      const db = await initDatabase(tenantId);
+      const db = await initDatabase(activeTenant);
       await runMigrations(db);
 
-      setState(prev => {
+      setState((prev) => {
         if (prev.db && prev.db !== db && typeof (prev.db as any).closeAsync === 'function') {
           (prev.db as any).closeAsync().catch(() => {});
         }
@@ -61,9 +101,20 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
           error: null,
         };
       });
-      setRefreshVersion(v => v + 1);
+      setRefreshVersion((v) => v + 1);
+
+      // Initialize automatic sync for this active tenant
+      SyncCoordinator.init(db);
     } catch (e: any) {
-      setState(prev => ({ ...prev, error: e }));
+      SyncCoordinator.reset();
+      setState((prev) => ({
+        ...prev,
+        db: null,
+        borrowers: null,
+        loans: null,
+        transactions: null,
+        error: e,
+      }));
     }
   }, []);
 
@@ -75,16 +126,20 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     loadDatabase();
 
     const unsubscribe = AuthStore.onAuthChange((newTenantId) => {
-      loadDatabase(newTenantId);
+      if (newTenantId) {
+        loadDatabase(newTenantId);
+      } else {
+        closeCurrentDatabase();
+      }
     });
 
     return () => {
       unsubscribe();
     };
-  }, [loadDatabase]);
+  }, [loadDatabase, closeCurrentDatabase]);
 
   return (
-    <DatabaseContext.Provider value={{ ...state, refreshVersion, triggerRefresh, switchTenant }}>
+    <DatabaseContext.Provider value={{ ...state, refreshVersion, triggerRefresh, switchTenant, closeCurrentDatabase }}>
       {children}
     </DatabaseContext.Provider>
   );

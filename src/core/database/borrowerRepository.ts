@@ -1,6 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { OutboxManager } from '../sync/outbox';
+import { SyncCoordinator } from '../sync/syncCoordinator';
 
 export type Borrower = {
   id: string;
@@ -50,7 +51,31 @@ export class BorrowerRepository {
       });
     });
     
+    SyncCoordinator.notifyMutation();
     return { id, name, phone, created_at };
+  }
+
+  async update(id: string, name: string, phone: string, clientOpId?: string): Promise<Borrower> {
+    await this.db.withExclusiveTransactionAsync(async (tx) => {
+      const txHandle = tx || this.db;
+      await txHandle.runAsync(
+        `UPDATE borrowers SET name = ?, phone = ? WHERE id = ?`,
+        [name.trim(), phone.trim(), id]
+      );
+
+      await OutboxManager.enqueue(txHandle, {
+        operationId: clientOpId,
+        operationType: 'create_borrower',
+        payload: { id, name: name.trim(), phone: phone.trim() },
+      });
+    });
+
+    SyncCoordinator.notifyMutation();
+    const updated = await this.getById(id);
+    if (!updated) {
+      throw new Error(`Borrower ${id} not found after update`);
+    }
+    return updated;
   }
 
   async getAll(): Promise<Borrower[]> {
