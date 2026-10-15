@@ -7,9 +7,11 @@ import { Card } from '../../ui/Card';
 import { Input } from '../../ui/Input';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
+import { useRouter } from 'expo-router';
 import { Borrower } from '../../core/database/borrowerRepository';
 
 export default function BorrowersScreen() {
+  const router = useRouter();
   const { borrowers, loans, refreshVersion, triggerRefresh } = useDatabase();
   const [data, setData] = useState<Borrower[]>([]);
   const [isModalVisible, setModalVisible] = useState(false);
@@ -57,10 +59,12 @@ export default function BorrowersScreen() {
         keyExtractor={item => item.id}
         contentContainerStyle={styles.list}
         renderItem={({ item }) => (
-          <Card elevated style={styles.card}>
-            <Typography variant="headlineSm">{item.name}</Typography>
-            <Typography variant="bodyMd" color={theme.colors.textSecondary}>{item.phone}</Typography>
-          </Card>
+          <TouchableOpacity activeOpacity={0.7} onPress={() => router.push(`/borrower/${item.id}` as any)}>
+            <Card elevated style={styles.card}>
+              <Typography variant="headlineSm">{item.name}</Typography>
+              <Typography variant="bodyMd" color={theme.colors.textSecondary}>{item.phone}</Typography>
+            </Card>
+          </TouchableOpacity>
         )}
         ListEmptyComponent={() => (
           <View style={styles.empty}>
