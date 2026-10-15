@@ -103,4 +103,7 @@ backend/.venv/
 .coverage
 htmlcov/
 .jest-cache/
+# Build artifacts & packages
+artifacts/**/*.apk
+artifacts/**/*.aab
 
