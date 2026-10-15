@@ -1,4 +1,11 @@
 import { withDbTransaction } from '../core/database/transaction';
+import { initDatabase } from '../core/database/db';
+
+jest.mock('expo-asset', () => ({ Asset: {} }), { virtual: true });
+const mockOpenDatabaseAsync = jest.fn();
+jest.mock('expo-sqlite', () => ({
+  openDatabaseAsync: (...args: any[]) => mockOpenDatabaseAsync(...args),
+}));
 
 describe('V2 Runtime Stability & Transaction Invariants', () => {
   it('withDbTransaction executes transaction on existing connection and commits', async () => {
@@ -90,4 +97,21 @@ describe('V2 Runtime Stability & Transaction Invariants', () => {
     expect(executed[0]).toBe('BEGIN IMMEDIATE;');
     expect(executed[1]).toBe('ROLLBACK;');
   });
+
+  it('initDatabase attempts standard passphrase pragma before legacy raw hex', async () => {
+    const mockDbInstance: any = {
+      nativeDatabase: {},
+      execAsync: jest.fn().mockResolvedValue(undefined),
+      getFirstAsync: jest.fn().mockResolvedValue({ '1': 1 }),
+      closeAsync: jest.fn().mockResolvedValue(undefined),
+    };
+    mockOpenDatabaseAsync.mockResolvedValue(mockDbInstance);
+
+    const db = await initDatabase('test-tenant-priority');
+    expect(db).toBe(mockDbInstance);
+    // First execAsync call must be candidate 1: PRAGMA key = '<key>';
+    const firstExecCall = mockDbInstance.execAsync.mock.calls[0][0];
+    expect(firstExecCall).toMatch(/^PRAGMA key = '[a-f0-9]+';$/);
+  });
 });
+

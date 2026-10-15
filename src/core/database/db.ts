@@ -40,10 +40,10 @@ export async function initDatabase(tenantId?: string | null): Promise<SQLite.SQL
   const key = await getDatabaseKey();
   console.log(`[LIFECYCLE] DATABASE_OPENING: opening ${dbName}`);
 
-  // Support both Build 1 (x'...' raw hex) and Build 2 ('...' passphrase) key formats
+  // Support both Build 2 ('...' passphrase standard) and legacy Build 1 (x'...' raw hex) key formats
   const candidates = [
-    { label: "raw hex (Build 1)", pragma: `PRAGMA key = "x'${key}'";` },
-    { label: "passphrase (Build 2)", pragma: `PRAGMA key = '${key}';` },
+    { label: "passphrase (standard)", pragma: `PRAGMA key = '${key}';` },
+    { label: "raw hex (legacy Build 1)", pragma: `PRAGMA key = "x'${key}'";` },
   ];
 
   let openedDb: SQLite.SQLiteDatabase | null = null;

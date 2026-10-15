@@ -135,8 +135,9 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   }, [hasPin, bioEnabled]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     checkPinSetup();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleKeyPress = (num: string) => {

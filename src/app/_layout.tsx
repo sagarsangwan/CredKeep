@@ -41,6 +41,9 @@ function RootNavigator() {
     if (!isAuthenticated && !inAuthGroup) {
       // Unauthenticated cold start or logged out: Gate immediately to Welcome/Auth
       router.replace('/auth');
+    } else if (isAuthenticated && inAuthGroup) {
+      // Authenticated session: ensure user is redirected to dashboard
+      router.replace('/(tabs)');
     }
   }, [isAuthenticated, segments, router]);
 
@@ -54,13 +57,16 @@ function RootNavigator() {
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="auth" options={{ headerShown: false }} />
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="borrower/[id]" options={{ headerShown: false }} />
       <Stack.Screen name="loan/[id]" options={{ headerShown: false }} />
+      <Stack.Screen name="reports" options={{ headerShown: false }} />
       <Stack.Screen name="reports/index" options={{ headerShown: false }} />
       <Stack.Screen name="settings/security" options={{ headerShown: false }} />
       <Stack.Screen name="settings/backup" options={{ headerShown: false }} />
+      <Stack.Screen name="+not-found" options={{ headerShown: false }} />
     </Stack>
   );
 }

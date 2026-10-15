@@ -125,7 +125,7 @@ export default function MoreScreen() {
   };
 
   const menuItems = [
-    { title: 'Earnings & Reports', route: '/reports/index', icon: FileText },
+    { title: 'Earnings & Reports', route: '/reports', icon: FileText },
     { title: 'App Security (PIN / Biometrics)', route: '/settings/security', icon: Shield },
     { title: 'Backup & Restore', route: '/settings/backup', icon: Database },
   ];
