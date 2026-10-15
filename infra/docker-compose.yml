@@ -1,0 +1,136 @@
+# ==============================================================================
+# CredKeep V2 — Canonical Local Infrastructure (Docker Compose)
+# ==============================================================================
+# This Compose configuration coordinates the local development environment:
+#   1. db        — PostgreSQL 15 Alpine with persistent volume and least-privilege role setup
+#   2. migration — One-off privileged migration job applying Django schema changes
+#   3. backend   — Django REST Framework / Gunicorn API running under restricted RLS role
+#
+# Usage:
+#   docker compose -f infra/docker-compose.yml up -d
+#   docker compose -f infra/docker-compose.yml logs -f backend
+#   docker compose -f infra/docker-compose.yml down
+# ==============================================================================
+
+# Explicit project name to guarantee consistent network and volume names
+name: credkeep
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Database Service (PostgreSQL 15 Alpine)
+  # ----------------------------------------------------------------------------
+  # Image: Official lightweight PostgreSQL 15 Alpine distribution.
+  # Security: Bound to 127.0.0.1 only on the host machine to eliminate LAN exposure.
+  # Initialization: backend/init-db.sql provisions the restricted 'credkeep_app'
+  # application role on first volume boot, ensuring least-privilege RLS enforcement.
+  db:
+    image: postgres:15-alpine
+    container_name: credkeep_db
+    restart: unless-stopped
+    # Database credentials loaded directly from local infra/db.env
+    env_file:
+      - ./db.env
+    ports:
+      # Bound strictly to 127.0.0.1 to avoid exposing the database port to the local network.
+      # Host port defaults to 5434 (configurable via DB_PORT in db.env / shell environment).
+      - "127.0.0.1:${DB_PORT:-5434}:5432"
+    volumes:
+      # Persistent PostgreSQL cluster data volume (preserves all financial records across restarts)
+      - postgres_data:/var/lib/postgresql/data
+      # SQL initialization script to provision the credkeep_app role and default privileges
+      - ../backend/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      # Health probe verifies PostgreSQL is accepting client connections on the configured database.
+      # Double dollar sign ($$) ensures the variables are evaluated by the container shell at runtime.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-credkeep_v2}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  # ----------------------------------------------------------------------------
+  # 2. Database Migration Service (One-off Django Migrations)
+  # ----------------------------------------------------------------------------
+  # Role: Applies schema migrations using privileged database superuser credentials.
+  # Lifecycle: One-off task (restart: "no"). Runs to completion before backend starts.
+  # Least Privilege Boundary:
+  #   - Schema migrations (DDL) require table creation and alteration privileges.
+  #   - The runtime app role ('credkeep_app') is restricted and CANNOT alter tables.
+  #   - Therefore, migrations are strictly separated from runtime app startup.
+  migration:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: credkeep_migration
+    restart: "no"
+    # Loads database credentials (db.env) and Django application settings (backend/.env)
+    env_file:
+      - ./db.env
+      - ../backend/.env
+    # Sets DATABASE_URL to privileged MIGRATION_DATABASE_URL from db.env for schema migration
+    command: >
+      sh -c "DATABASE_URL=$${MIGRATION_DATABASE_URL:-postgres://$${POSTGRES_USER:-postgres}:$${POSTGRES_PASSWORD}@db:5432/$${POSTGRES_DB:-credkeep_v2}} python manage.py migrate --noinput"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+
+  # ----------------------------------------------------------------------------
+  # 3. Backend API Service (Django REST Framework + Gunicorn)
+  # ----------------------------------------------------------------------------
+  # Runtime: Django 6 / Python 3.13 served with Gunicorn on internal port 8000.
+  # Security: Runs under the restricted 'credkeep_app' role; enforces PostgreSQL RLS.
+  # Startup: Container entrypoint runs 'verify_database_role' and 'verify_rls' before Gunicorn.
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: credkeep_backend
+    restart: unless-stopped
+    ports:
+      # Maps host port 8000 to internal Gunicorn container port 8000
+      - "${PORT:-8000}:8000"
+    # Loads Django settings (SECRET_KEY, DEBUG, ALLOWED_HOSTS, and restricted DATABASE_URL)
+    env_file:
+      - ../backend/.env
+    environment:
+      # Direct environment variable; forces logs to appear immediately in terminal
+      PYTHONUNBUFFERED: "1"
+      # Default ALLOWED_HOSTS for local development, emulator (10.0.2.2), and Docker network
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,backend,10.0.2.2,host.docker.internal}
+    depends_on:
+      db:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      # Verifies the HTTP API process is healthy and returning 200 OK
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v2/health/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - default
+
+# ------------------------------------------------------------------------------
+# Networks
+# ------------------------------------------------------------------------------
+# Shared bridge network allowing inter-container resolution (e.g. backend -> db:5432)
+networks:
+  default:
+    name: credkeep_default
+    driver: bridge
+
+# ------------------------------------------------------------------------------
+# Volumes
+# ------------------------------------------------------------------------------
+# Explicitly references the canonical 'credkeep_postgres_data' volume.
+# Setting 'name: credkeep_postgres_data' guarantees the same volume is mounted
+# regardless of working directory, avoiding any silent data reinitialization.
+volumes:
+  postgres_data:
+    name: credkeep_postgres_data
+    driver: local
