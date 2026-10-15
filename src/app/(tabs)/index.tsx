@@ -97,6 +97,7 @@ export default function HomeScreen() {
           const totalOverdue = (overdueLoansRow?.overdueSum || 0) + summary.outstandingPenalty;
           setOverdue(totalOverdue as Paise);
         }
+        console.log('[LIFECYCLE] DASHBOARD_READY: Home dashboard data loaded');
       } catch {
         // Suppress read errors during schema migrations
       }

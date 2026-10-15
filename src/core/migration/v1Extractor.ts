@@ -3,6 +3,7 @@ import { OutboxManager } from '../sync/outbox';
 import { SyncService } from '../sync/syncService';
 import { ApiClient } from '../api/client';
 import { isUuid, deterministicUuid, getMigratedTransactionOpId } from './uuidUtils';
+import { withDbTransaction } from '../database/transaction';
 
 export interface V1BorrowerRecord {
   id: string;
@@ -278,20 +279,7 @@ export class V1DataExtractor {
         }
       };
 
-      if (typeof (db as any).withExclusiveTransactionAsync === 'function') {
-        await (db as any).withExclusiveTransactionAsync(atomicMigrationWork);
-      } else if (typeof (db as any).runAsync === 'function') {
-        await db.runAsync('BEGIN IMMEDIATE');
-        try {
-          await atomicMigrationWork(db);
-          await db.runAsync('COMMIT');
-        } catch (e) {
-          await db.runAsync('ROLLBACK');
-          throw e;
-        }
-      } else {
-        await atomicMigrationWork(db);
-      }
+      await withDbTransaction(db, atomicMigrationWork);
 
       // Execute push
       const pushResult = await SyncService.pushPending(db);

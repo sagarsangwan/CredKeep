@@ -6,6 +6,7 @@ import { OutboxManager, registerOutboxRevertHandler } from './outbox';
 import { allocatePayment } from '../domain/allocation';
 import { Paise } from '../domain/money';
 import { getMigratedTransactionOpId } from '../migration/uuidUtils';
+import { withDbTransaction } from '../database/transaction';
 
 
 export interface SyncResult {
@@ -111,7 +112,7 @@ export class SyncService {
       if (changes.length > 0) {
         cursor = response.next_cursor;
         hasMore = Boolean(response.has_more);
-        await db.withExclusiveTransactionAsync(async (tx) => {
+        await withDbTransaction(db, async (tx) => {
           const modifiedScheduleLoanIds = new Set<string>();
           for (const change of changes) {
             await this.applyServerChange(tx, change, modifiedScheduleLoanIds);
@@ -695,7 +696,7 @@ export class SyncService {
    * reverses affected kist paid amounts, and restores loan status.
    */
   static async revertRejectedPayment(db: SQLiteDatabase, operationId: string, errorReason?: string): Promise<void> {
-    await db.withExclusiveTransactionAsync(async (tx) => {
+    await withDbTransaction(db, async (tx) => {
       await OutboxManager.markStatus(tx, operationId, 'REJECTED', errorReason);
 
       const origTx = await tx.getFirstAsync<any>(

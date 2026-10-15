@@ -28,29 +28,56 @@ export async function getDatabaseKey(): Promise<string> {
   return key;
 }
 
+export { withDbTransaction } from './transaction';
+
 export async function initDatabase(tenantId?: string | null): Promise<SQLite.SQLiteDatabase> {
+  const t0 = Date.now();
   const dbName = await getDatabaseName(tenantId);
   if (!dbName) {
     throw new Error('Authentication required: cannot open database without active tenant.');
   }
 
   const key = await getDatabaseKey();
+  console.log(`[LIFECYCLE] DATABASE_OPENING: opening ${dbName}`);
 
-  // Open database handle
-  const db = await SQLite.openDatabaseAsync(dbName);
+  // Support both Build 1 (x'...' raw hex) and Build 2 ('...' passphrase) key formats
+  const candidates = [
+    { label: "raw hex (Build 1)", pragma: `PRAGMA key = "x'${key}'";` },
+    { label: "passphrase (Build 2)", pragma: `PRAGMA key = '${key}';` },
+  ];
 
-  // SQLCipher: Key MUST be executed as the very first single statement before any pager access
-  await db.execAsync(`PRAGMA key = '${key}';`);
+  let openedDb: SQLite.SQLiteDatabase | null = null;
+  let lastError: any = null;
 
-  // Performance and integrity pragmas
-  await db.execAsync(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
-    PRAGMA foreign_keys = ON;
-  `);
+  for (const candidate of candidates) {
+    let db: SQLite.SQLiteDatabase | null = null;
+    try {
+      db = await SQLite.openDatabaseAsync(dbName);
+      await db.execAsync(candidate.pragma);
+      await db.execAsync(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA foreign_keys = ON;
+      `);
+      // Verify decryption by reading schema
+      await db.getFirstAsync('SELECT 1');
+      console.log(`[LIFECYCLE] SQLCIPHER_VERIFIED: unlocked ${dbName} using ${candidate.label} in ${Date.now() - t0}ms`);
+      openedDb = db;
+      break;
+    } catch (err: any) {
+      lastError = err;
+      if (db && typeof (db as any).closeAsync === 'function') {
+        try {
+          await (db as any).closeAsync();
+        } catch {}
+      }
+    }
+  }
 
-  // Verify encryption by querying schema/page 1
-  await db.getFirstAsync('SELECT 1');
+  if (!openedDb) {
+    console.error(`[LIFECYCLE] DATABASE_OPEN_FAILED: could not unlock ${dbName}: ${lastError?.message || lastError}`);
+    throw new Error(`Database unlock failed: ${lastError?.message || 'Invalid key or corrupted database'}`);
+  }
 
-  return db;
+  return openedDb;
 }

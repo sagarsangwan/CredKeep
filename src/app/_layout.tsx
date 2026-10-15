@@ -13,13 +13,18 @@ function RootNavigator() {
   const router = useRouter();
 
   useEffect(() => {
+    console.log('[LIFECYCLE] APP_START: RootLayout mounted');
+    console.log('[LIFECYCLE] AUTH_HYDRATING: Checking authentication session');
+
     async function checkAuth() {
       const auth = await AuthStore.isAuthenticated();
+      console.log(`[LIFECYCLE] ${auth ? 'AUTHENTICATED' : 'UNAUTHENTICATED'}: session checked`);
       setIsAuthenticated(auth);
     }
     checkAuth();
 
     const unsubscribe = AuthStore.onAuthChange((tenantId) => {
+      console.log(`[LIFECYCLE] AUTH_CHANGED: tenantId=${tenantId}`);
       setIsAuthenticated(Boolean(tenantId));
     });
 

@@ -2,6 +2,7 @@ import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 import { OutboxManager } from '../sync/outbox';
 import { SyncCoordinator } from '../sync/syncCoordinator';
+import { withDbTransaction } from './transaction';
 
 export type Borrower = {
   id: string;
@@ -37,8 +38,7 @@ export class BorrowerRepository {
     const id = generateUuid();
     const created_at = new Date().toISOString();
     
-    await this.db.withExclusiveTransactionAsync(async (tx) => {
-      const txHandle = tx || this.db;
+    await withDbTransaction(this.db, async (txHandle) => {
       await txHandle.runAsync(
         `INSERT INTO borrowers (id, name, phone, created_at) VALUES (?, ?, ?, ?)`,
         [id, name, phone, created_at]
@@ -56,8 +56,7 @@ export class BorrowerRepository {
   }
 
   async update(id: string, name: string, phone: string, clientOpId?: string): Promise<Borrower> {
-    await this.db.withExclusiveTransactionAsync(async (tx) => {
-      const txHandle = tx || this.db;
+    await withDbTransaction(this.db, async (txHandle) => {
       await txHandle.runAsync(
         `UPDATE borrowers SET name = ?, phone = ? WHERE id = ?`,
         [name.trim(), phone.trim(), id]

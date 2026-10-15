@@ -61,7 +61,7 @@ export default function WelcomeScreen() {
 
         <View style={styles.footer}>
           <Typography variant="bodySm" color={theme.colors.textSecondary} style={styles.footerText}>
-            CredKeep V2 • Build 2 (Release Candidate)
+            CredKeep V2 • Build 3 (Release Candidate)
           </Typography>
         </View>
       </ScrollView>

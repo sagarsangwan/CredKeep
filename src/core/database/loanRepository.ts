@@ -4,6 +4,7 @@ import { ScheduleOptions, generateSchedule, calculateNextDueDate } from '../doma
 import { multiplyPaise, Paise } from '../domain/money';
 import { OutboxManager } from '../sync/outbox';
 import { SyncCoordinator } from '../sync/syncCoordinator';
+import { withDbTransaction } from './transaction';
 
 export type Loan = {
   id: string;
@@ -53,7 +54,7 @@ export class LoanRepository {
     
     const schedule = generateSchedule(options);
 
-    await this.db.withExclusiveTransactionAsync(async (tx) => {
+    await withDbTransaction(this.db, async (tx) => {
       const txHandle = tx || this.db;
 
       if (clientOpId) {

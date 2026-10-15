@@ -12,7 +12,7 @@ import { Borrower } from '../../core/database/borrowerRepository';
 
 export default function BorrowersScreen() {
   const router = useRouter();
-  const { borrowers, refreshVersion, triggerRefresh } = useDatabase();
+  const { borrowers, status, error, refreshVersion, triggerRefresh, retryInitDatabase } = useDatabase();
   const [data, setData] = useState<Borrower[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isModalVisible, setModalVisible] = useState(false);
@@ -49,8 +49,19 @@ export default function BorrowersScreen() {
       return;
     }
 
-    if (!borrowers) {
-      Alert.alert('Database Initializing', 'Please wait for database initialization.');
+    if (!borrowers || status !== 'READY') {
+      if (status === 'ERROR') {
+        Alert.alert(
+          'Database Error',
+          `Database initialization failed: ${error?.message || 'Unknown error'}. Would you like to retry?`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Retry', onPress: () => retryInitDatabase() },
+          ]
+        );
+      } else {
+        Alert.alert('Database Initializing', 'Please wait for database initialization to complete.');
+      }
       return;
     }
 

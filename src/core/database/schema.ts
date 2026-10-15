@@ -1,7 +1,9 @@
 import { SQLiteDatabase } from 'expo-sqlite';
+import { withDbTransaction } from './transaction';
 
 export async function runMigrations(db: SQLiteDatabase) {
-  await db.withExclusiveTransactionAsync(async (tx) => {
+  const t0 = Date.now();
+  await withDbTransaction(db, async (tx) => {
     // 1. Borrowers table
     await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS borrowers (
@@ -151,4 +153,5 @@ export async function runMigrations(db: SQLiteDatabase) {
       );
     `);
   });
+  console.log(`[LIFECYCLE] MIGRATIONS_COMPLETE: all tables and triggers ready in ${Date.now() - t0}ms`);
 }

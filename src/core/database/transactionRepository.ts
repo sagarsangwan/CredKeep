@@ -6,6 +6,7 @@ import { LoanRepository } from './loanRepository';
 import { calculateNewPenalties } from '../domain/penalty';
 import { OutboxManager } from '../sync/outbox';
 import { SyncCoordinator } from '../sync/syncCoordinator';
+import { withDbTransaction } from './transaction';
 
 export class TransactionRepository {
   constructor(private db: SQLiteDatabase) {}
@@ -18,7 +19,7 @@ export class TransactionRepository {
   ) {
       let returnResult: any = null;
 
-      await this.db.withExclusiveTransactionAsync(async (tx) => {
+      await withDbTransaction(this.db, async (tx) => {
         // Idempotency check
         const outboxRec = await tx.getFirstAsync<any>(
           `SELECT status, error_message FROM sync_outbox WHERE operation_id = ?`,

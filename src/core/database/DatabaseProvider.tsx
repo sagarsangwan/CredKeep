@@ -8,16 +8,20 @@ import { TransactionRepository } from './transactionRepository';
 import { AuthStore } from '../auth/authStore';
 import { SyncCoordinator } from '../sync/syncCoordinator';
 
+export type DatabaseStatus = 'IDLE' | 'LOADING' | 'READY' | 'ERROR';
+
 type DatabaseContextType = {
   db: SQLiteDatabase | null;
   borrowers: BorrowerRepository | null;
   loans: LoanRepository | null;
   transactions: TransactionRepository | null;
+  status: DatabaseStatus;
   error: Error | null;
   refreshVersion: number;
   triggerRefresh: () => void;
   switchTenant: (tenantId?: string | null) => Promise<void>;
   closeCurrentDatabase: () => Promise<void>;
+  retryInitDatabase: () => Promise<void>;
 };
 
 const DatabaseContext = createContext<DatabaseContextType>({
@@ -25,11 +29,13 @@ const DatabaseContext = createContext<DatabaseContextType>({
   borrowers: null,
   loans: null,
   transactions: null,
+  status: 'IDLE',
   error: null,
   refreshVersion: 0,
   triggerRefresh: () => {},
   switchTenant: async () => {},
   closeCurrentDatabase: async () => {},
+  retryInitDatabase: async () => {},
 });
 
 export function DatabaseProvider({ children }: { children: React.ReactNode }) {
@@ -40,11 +46,19 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
     setRefreshVersion((v) => v + 1);
   }, []);
 
-  const [state, setState] = useState<Omit<DatabaseContextType, 'refreshVersion' | 'triggerRefresh' | 'switchTenant' | 'closeCurrentDatabase'>>({
+  const [state, setState] = useState<{
+    db: SQLiteDatabase | null;
+    borrowers: BorrowerRepository | null;
+    loans: LoanRepository | null;
+    transactions: TransactionRepository | null;
+    status: DatabaseStatus;
+    error: Error | null;
+  }>({
     db: null,
     borrowers: null,
     loans: null,
     transactions: null,
+    status: 'IDLE',
     error: null,
   });
 
@@ -60,6 +74,7 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
         borrowers: null,
         loans: null,
         transactions: null,
+        status: 'IDLE',
         error: null,
       };
     });
@@ -68,6 +83,10 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
 
   const loadDatabase = useCallback(async (tenantId?: string | null) => {
     const generation = ++loadGenerationRef.current;
+    
+    // Mark status LOADING before resolving tenant
+    setState((prev) => ({ ...prev, status: 'LOADING', error: null }));
+
     const activeTenant = tenantId !== undefined ? tenantId : await AuthStore.getTenantId();
 
     if (generation !== loadGenerationRef.current) return;
@@ -84,11 +103,14 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
           borrowers: null,
           loans: null,
           transactions: null,
+          status: 'IDLE',
           error: null,
         };
       });
       return;
     }
+
+    console.log(`[LIFECYCLE] TENANT_RESOLVED: ${activeTenant}`);
 
     try {
       const db = await initDatabase(activeTenant);
@@ -107,15 +129,22 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const borrowerRepo = new BorrowerRepository(db);
+      const loanRepo = new LoanRepository(db);
+      const transactionRepo = new TransactionRepository(db);
+
+      console.log(`[LIFECYCLE] REPOSITORIES_READY: Borrower, Loan, and Transaction repositories initialized`);
+
       setState((prev) => {
         if (prev.db && prev.db !== db && typeof (prev.db as any).closeAsync === 'function') {
           (prev.db as any).closeAsync().catch(() => {});
         }
         return {
           db,
-          borrowers: new BorrowerRepository(db),
-          loans: new LoanRepository(db),
-          transactions: new TransactionRepository(db),
+          borrowers: borrowerRepo,
+          loans: loanRepo,
+          transactions: transactionRepo,
+          status: 'READY',
           error: null,
         };
       });
@@ -125,8 +154,10 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
       SyncCoordinator.init(db, () => {
         setRefreshVersion((v) => v + 1);
       });
+      console.log(`[LIFECYCLE] SYNC_INITIALIZED: SyncCoordinator bound to database`);
     } catch (e: any) {
       if (generation !== loadGenerationRef.current) return;
+      console.error(`[LIFECYCLE] DATABASE_ERROR: ${e?.message || e}`);
       SyncCoordinator.reset();
       setState((prev) => ({
         ...prev,
@@ -134,13 +165,18 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
         borrowers: null,
         loans: null,
         transactions: null,
-        error: e,
+        status: 'ERROR',
+        error: e instanceof Error ? e : new Error(String(e)),
       }));
     }
   }, []);
 
   const switchTenant = useCallback(async (tenantId?: string | null) => {
     await loadDatabase(tenantId);
+  }, [loadDatabase]);
+
+  const retryInitDatabase = useCallback(async () => {
+    await loadDatabase();
   }, [loadDatabase]);
 
   useEffect(() => {
@@ -160,7 +196,16 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   }, [loadDatabase, closeCurrentDatabase]);
 
   return (
-    <DatabaseContext.Provider value={{ ...state, refreshVersion, triggerRefresh, switchTenant, closeCurrentDatabase }}>
+    <DatabaseContext.Provider
+      value={{
+        ...state,
+        refreshVersion,
+        triggerRefresh,
+        switchTenant,
+        closeCurrentDatabase,
+        retryInitDatabase,
+      }}
+    >
       {children}
     </DatabaseContext.Provider>
   );
