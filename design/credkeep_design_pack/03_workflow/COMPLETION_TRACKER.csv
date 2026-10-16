@@ -1,0 +1,73 @@
+"id","type","status","stitch_project_id","stitch_screen_id","preview_path","last_operation","validation_result","remaining_issue","notes"
+"COMP-01","component","BLOCKED","8106667901868227815","97819215930f42aeaadc9913a6415cea","projects/8106667901868227815/files/eb344207519740939bf026ddb64eab97","generated then corrected once with design system 9280003817496754250","failed visual verification","still presented on a dominant dark navy board after correction; neutral tokens exist but visual direction is noncompliant","original generation 4a0f8ef703d546ab875b27e319f86afd"
+"COMP-02","component","VERIFIED","8106667901868227815","a3cb34fecd1f4931876d5519580e4af1","projects/8106667901868227815/files/a284cfe53a0f4e328a55654f15215fb8","generated and visually inspected","passed","","neutral button variants and states; user approval pending"
+"COMP-03","component","VERIFIED","8106667901868227815","6aa6a2b4b4414f80a751ee2e0bcd5c72","projects/8106667901868227815/files/9450f9051d3e4a9caf42bf96c3dd5df2","generated and visually inspected","passed","","neutral input types and states; user approval pending"
+"COMP-04","component","VERIFIED","8106667901868227815","a2775a2d229249bab39ed10ca65e80bc","projects/8106667901868227815/files/1fa5bef985574e5d9a35c1176ce4e1bb","generated and visually inspected","passed","","user approval pending"
+"COMP-05","component","VERIFIED","8106667901868227815","0ec90ca1fd204414ba43c2e2a46531ab","projects/8106667901868227815/files/8d7282f74b1d454a98b34497c3b0d1a4","generated and visually inspected","passed","","user approval pending"
+"COMP-06","component","VERIFIED","8106667901868227815","f5017d49b77f43ec883fd12ecd6d9a97","projects/8106667901868227815/files/98a19d1d812e437985bf4d77f5be8012","generated and visually inspected","passed","","user approval pending"
+"COMP-07","component","VERIFIED","8106667901868227815","430ca750e0564293aad0418444a6dfe9","projects/8106667901868227815/files/326a1f95f1784340a8926afbc047b53d","generated; corrected financial examples once; visually inspected","passed","","user approval pending"
+"COMP-08","component","BLOCKED","8106667901868227815","ee2e74f1c7b447eda037e592dee50ed1","projects/8106667901868227815/files/4ff4604e69934d4b948de70a1bb959ca","generated then corrected financial examples once","failed verification","Stitch returned a corrected derivative but did not expose its child screen ID/preview in retrievable listings; corrected financial content cannot be independently verified","original preview contains invalid math"
+"COMP-09","component","VERIFIED","8106667901868227815","192db0dd658642579b070a75024ca5b1","projects/8106667901868227815/files/5c333209f37c488e8f4503f412d47c8a","generated; corrected financial examples once; visually inspected","passed","","user approval pending"
+"COMP-10","component","VERIFIED","8106667901868227815","dce13c1352f54b939d1b5401dff0cfb9","projects/8106667901868227815/files/6960313d4c3d4d4eb967eeddf0a4eb0a","generated and visually inspected","passed","","user approval pending"
+"COMP-11","component","VERIFIED","8106667901868227815","b39aaf666cab46eba228f5a3aa1875c4","projects/8106667901868227815/files/6565f4a6d88c426fa388e1c97173a1db","generated and visually inspected","passed","","user approval pending"
+"COMP-12","component","VERIFIED","8106667901868227815","310279f1c4e64e1c96f93e89999bba8a","projects/8106667901868227815/files/30d9f6b38c8e47748c1324e737ae39e1","generated and visually inspected","passed","","user approval pending"
+"COMP-13","component","VERIFIED","8106667901868227815","2ea782bdf32a46938b0edee6b5f2f311","projects/8106667901868227815/files/f699860074f040c9823779a1dc1fc75e","generated and visually inspected","passed","","neutral sync states and operational guidance; user approval pending"
+"COMP-14","component","VERIFIED","8106667901868227815","f1b02e2dafb34c79ad5c8e92c0c05dbf","projects/8106667901868227815/files/31966a10492f499da1a7a8700f7d07c0","generated and visually inspected","passed","","neutral icon and utility variants; user approval pending"
+"AUTH-01","screen","BLOCKED","8106667901868227815","3aee6ba5d6e34654a2dc96466ab9132c","projects/8106667901868227815/files/3c18045ef00c482fae0c5d032fc4e3c6","generated then corrected once","failed frame validation","Stitch returned a 2560x2048 DESKTOP presentation board containing a phone mockup; device-switch correction was ignored","content direction is visually compliant but frame contract is not"
+"AUTH-02","screen","BLOCKED","8106667901868227815","b2f5acaed98f452199a01a6be9476e26","projects/8106667901868227815/files/d78db4e23f21489492aebafba7179072","generated then corrected once","failed frame validation","Stitch returned a 2560x2048 DESKTOP presentation board containing a phone mockup; device-switch correction was ignored","content direction is visually compliant but frame contract is not"
+"AUTH-03","screen","BLOCKED","8106667901868227815","7464df881c8241748a1910952b2861ad","projects/8106667901868227815/files/734310752fd047069503c90dc01049be","generated then corrected once","failed frame validation","Stitch returned a 2560x2048 DESKTOP presentation board containing a phone mockup; device-switch correction was ignored","content direction is visually compliant but frame contract is not"
+"AUTH-04","screen","VERIFIED","8106667901868227815","25d41d5456094642be195da97289ac8e","projects/8106667901868227815/files/4e8d557f48224fdbb1c2bc86623126d6","generated as native-mobile variant and visually inspected","passed revised native-frame validation","","780x1768 rendered pixels equals approved 390x884 logical frame; user approval pending"
+"AUTH-05","screen","VERIFIED","8106667901868227815","b3026b7472514509934d3c1a158e741c","projects/8106667901868227815/files/7cbdb29bceaa4c82b2c3cd4da7e9703a","native-mobile preflight generated and visually inspected","passed","","MOBILE 780x1768 rendered pixels; one 390x884 screen; user approval pending"
+"AUTH-06","screen","VERIFIED","8106667901868227815","df8f5fd1f4f74e6ea84fcd7287caed08","projects/8106667901868227815/files/8142c727e18c4d9295de09f0d492b26b","generated by native-mobile variant method and visually inspected","passed","","MOBILE 780x1768; user approval pending"
+"HOME-01","screen","BLOCKED","8106667901868227815","bc58e21e76a1471e99a28f40b394df74","projects/8106667901868227815/files/c60a82eabda541888ae8d65a9baab71f","generated once by native-mobile variant method","failed frame validation","Stitch returned a 2560x2048 DESKTOP board despite native-mobile source and prompt","repeated desktop behavior; no retry per user instruction"
+"HOME-02","screen","BLOCKED","8106667901868227815","79264284a56448be9457e3ea98182a4a","projects/8106667901868227815/files/1b03fb1964ca4aad9837b26e7b8160ea","generated once by native-mobile variant method","failed frame validation","Stitch returned a 2560x2048 DESKTOP board despite native-mobile source and prompt","repeated desktop behavior; no retry per user instruction"
+"BOR-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"BOR-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"BOR-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"BOR-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"BOR-05","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-04A","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-04B","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-05","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-06A","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-06B","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"LOAN-07","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"KIST-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"KIST-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"KIST-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"KIST-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"KIST-05","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-05","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-06","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-07","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"ONCE-08","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"COL-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"COL-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"COL-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"COL-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"COL-05","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"COL-06","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"DOC-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"DOC-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"DOC-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"DOC-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"REP-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"REP-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SET-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SET-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SET-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SET-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-01","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-02","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-03","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-04","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-05","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-06","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,
+"SYS-07","screen","GENERATING","8106667901868227815","","","queued for native-mobile variant generation","pending",,

@@ -17,8 +17,11 @@ from ledger.models import (
     ScheduleModification,
     SyncLog,
     SyncOutbox,
+    LoanTerm,
+    PaymentCorrection,
+    LoanAttachment,
 )
-from ledger.engine.schedule import generate_schedule
+from ledger.engine.schedule import generate_schedule, calculate_contract_interest, calculate_next_due_date
 from ledger.engine import ledger_service
 
 
@@ -539,6 +542,30 @@ class SyncPushView(APIView):
                 return 'REJECTED', "Cannot create loan with terminal status 'SETTLED'. Newly created loans must start with active schedules to reconstruct repayment accounting."
             status = 'WRITTEN_OFF' if raw_status == 'WRITTEN_OFF' else 'ACTIVE'
 
+            collateral = str(payload.get('collateral', '') or '').strip()
+            rate_basis = payload.get('rate_basis')
+            raw_annual_rate = payload.get('annual_rate')
+            annual_rate = None
+            if raw_annual_rate is not None:
+                try:
+                    annual_rate = Decimal(str(raw_annual_rate))
+                except Exception:
+                    return 'REJECTED', f'Invalid annual_rate: {raw_annual_rate}'
+
+            if rate_basis is None:
+                rate_basis = 'ANNUAL_SIMPLE_FLAT' if annual_rate is not None else 'LEGACY_FIXED_TERM'
+
+            if rate_basis == 'ANNUAL_SIMPLE_FLAT':
+                if annual_rate is None:
+                    annual_rate = markup_factor * Decimal('100')
+                interest_paise = calculate_contract_interest(principal_paise, annual_rate, term_months)
+                total_paise = principal_paise + interest_paise
+                maturity_date = calculate_next_due_date(start_date, term_months, due_day)
+            else:
+                interest_paise = int((Decimal(principal_paise) * markup_factor).quantize(Decimal('1')))
+                total_paise = principal_paise + interest_paise
+                maturity_date = calculate_next_due_date(start_date, term_months, due_day)
+
             loan = LoanAccount.objects.create(
                 id=loan_id,
                 tenant=tenant,
@@ -549,7 +576,13 @@ class SyncPushView(APIView):
                 start_date=start_date,
                 due_day=due_day,
                 product_type=product_type,
-                status=status
+                status=status,
+                rate_basis=rate_basis,
+                annual_rate=annual_rate,
+                interest_paise=interest_paise,
+                total_paise=total_paise,
+                maturity_date=maturity_date,
+                collateral=collateral
             )
 
             # Emit LOAN outbox record FIRST so replica devices process parent loan before child kists
@@ -567,49 +600,91 @@ class SyncPushView(APIView):
                     'start_date': str(loan.start_date),
                     'due_day': loan.due_day,
                     'product_type': loan.product_type,
-                    'status': loan.status
+                    'status': loan.status,
+                    'rate_basis': loan.rate_basis,
+                    'annual_rate': str(loan.annual_rate) if loan.annual_rate is not None else None,
+                    'interest_paise': loan.interest_paise,
+                    'total_paise': loan.total_paise,
+                    'maturity_date': str(loan.maturity_date) if loan.maturity_date else None,
+                    'collateral': loan.collateral
                 }
             )
 
-            # Generate initial kist schedule
-            schedule_items = generate_schedule(
-                principal_paise=principal_paise,
-                markup_factor=markup_factor,
-                term_months=term_months,
-                start_date_str=start_date,
-                due_day=due_day,
-                product_type=product_type
-            )
-
-            for item in schedule_items:
-                kist = Kist.objects.create(
+            if product_type == 'bullet' and rate_basis == 'ANNUAL_SIMPLE_FLAT':
+                # ONE-TIME REPAYMENT: NO monthly kists. Create initial LoanTerm.
+                term_obj = LoanTerm.objects.create(
                     tenant=tenant,
                     loan=loan,
-                    installment_number=item.kist_number,
-                    original_due_date=item.due_date,
-                    effective_due_date=item.due_date,
-                    principal_component_paise=item.principal_due,
-                    markup_component_paise=item.markup_due,
-                    total_due_paise=item.amount_due,
-                    status='PENDING'
+                    term_number=1,
+                    duration_months=term_months,
+                    annual_rate=annual_rate,
+                    interest_paise=interest_paise,
+                    start_date=start_date,
+                    maturity_date=maturity_date,
+                    interest_paid_paise=0,
+                    settled=False,
+                    operation_id=operation_id
                 )
                 SyncOutbox.objects.create(
                     tenant=tenant,
-                    record_type='KIST',
-                    record_id=kist.id,
+                    record_type='LOAN_TERM',
+                    record_id=term_obj.id,
                     operation_type='INSERT',
                     payload={
-                        'id': str(kist.id),
+                        'id': str(term_obj.id),
                         'loan_id': str(loan.id),
-                        'installment_number': kist.installment_number,
-                        'original_due_date': str(kist.original_due_date),
-                        'effective_due_date': str(kist.effective_due_date),
-                        'principal_component_paise': kist.principal_component_paise,
-                        'markup_component_paise': kist.markup_component_paise,
-                        'total_due_paise': kist.total_due_paise,
-                        'status': kist.status
+                        'term_number': 1,
+                        'duration_months': term_months,
+                        'annual_rate': str(annual_rate),
+                        'interest_paise': interest_paise,
+                        'start_date': str(start_date),
+                        'maturity_date': str(maturity_date),
+                        'settled': False,
+                        'operation_id': str(operation_id)
                     }
                 )
+            else:
+                # Generate initial kist schedule
+                schedule_items = generate_schedule(
+                    principal_paise=principal_paise,
+                    markup_factor=markup_factor,
+                    term_months=term_months,
+                    start_date_str=start_date,
+                    due_day=due_day,
+                    product_type=product_type,
+                    annual_rate=annual_rate,
+                    rate_basis=rate_basis
+                )
+
+                for item in schedule_items:
+                    kist = Kist.objects.create(
+                        tenant=tenant,
+                        loan=loan,
+                        installment_number=item.kist_number,
+                        original_due_date=item.due_date,
+                        effective_due_date=item.due_date,
+                        principal_component_paise=item.principal_due,
+                        markup_component_paise=item.markup_due,
+                        total_due_paise=item.amount_due,
+                        status='PENDING'
+                    )
+                    SyncOutbox.objects.create(
+                        tenant=tenant,
+                        record_type='KIST',
+                        record_id=kist.id,
+                        operation_type='INSERT',
+                        payload={
+                            'id': str(kist.id),
+                            'loan_id': str(loan.id),
+                            'installment_number': kist.installment_number,
+                            'original_due_date': str(kist.original_due_date),
+                            'effective_due_date': str(kist.effective_due_date),
+                            'principal_component_paise': kist.principal_component_paise,
+                            'markup_component_paise': kist.markup_component_paise,
+                            'total_due_paise': kist.total_due_paise,
+                            'status': kist.status
+                        }
+                    )
             return 'ACCEPTED', None
 
         elif op_type == 'record_collection':
@@ -983,6 +1058,165 @@ class SyncPushView(APIView):
                     }
                 )
 
+            return 'ACCEPTED', None
+
+        elif op_type == 'extend_loan':
+            loan_id_raw = payload.get('loan_id') or op.get('loan_id')
+            if not loan_id_raw:
+                return 'REJECTED', 'Missing loan_id.'
+
+            try:
+                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+            except (LoanAccount.DoesNotExist, ValueError):
+                return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
+
+            raw_add_months = payload.get('additional_months')
+            if raw_add_months is None or isinstance(raw_add_months, bool) or not isinstance(raw_add_months, int) or raw_add_months <= 0:
+                return 'REJECTED', 'additional_months must be an exact positive integer.'
+
+            raw_collected = payload.get('interest_collected_paise', 0)
+            if raw_collected is not None and (isinstance(raw_collected, bool) or not isinstance(raw_collected, int) or raw_collected < 0):
+                return 'REJECTED', 'interest_collected_paise must be a non-negative integer.'
+            interest_collected_paise = int(raw_collected or 0)
+
+            eff_date = str(payload.get('effective_date') or timezone.now().date())
+            if 'T' in eff_date:
+                eff_date = eff_date.split('T')[0]
+
+            pay_op_id = None
+            if payload.get('payment_operation_id'):
+                try:
+                    pay_op_id = uuid.UUID(str(payload['payment_operation_id']))
+                except ValueError:
+                    return 'REJECTED', 'Invalid payment_operation_id format.'
+
+            try:
+                ledger_service.extend_loan(
+                    loan=loan,
+                    additional_months=raw_add_months,
+                    interest_collected_paise=interest_collected_paise,
+                    operation_id=operation_id,
+                    effective_date_str=eff_date,
+                    payment_operation_id=pay_op_id
+                )
+            except (ValidationError, ValueError) as err:
+                return 'REJECTED', str(err)
+            return 'ACCEPTED', None
+
+        elif op_type == 'correct_payment':
+            loan_id_raw = payload.get('loan_id') or op.get('loan_id')
+            if not loan_id_raw:
+                return 'REJECTED', 'Missing loan_id.'
+
+            try:
+                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+            except (LoanAccount.DoesNotExist, ValueError):
+                return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
+
+            orig_op_raw = payload.get('original_operation_id') or payload.get('original_transaction_id')
+            if not orig_op_raw:
+                return 'REJECTED', 'Missing original_operation_id or original_transaction_id.'
+            try:
+                orig_op_id = uuid.UUID(str(orig_op_raw))
+            except ValueError:
+                return 'REJECTED', f'Invalid original_operation_id format: {orig_op_raw}'
+
+            raw_corrected = payload.get('corrected_amount_paise')
+            if raw_corrected is None or isinstance(raw_corrected, bool) or not isinstance(raw_corrected, int) or raw_corrected < 0:
+                return 'REJECTED', 'corrected_amount_paise must be an exact non-negative integer.'
+
+            reason = str(payload.get('reason', '') or '').strip()
+            if not reason:
+                return 'REJECTED', 'Correction reason is required.'
+
+            eff_date = payload.get('effective_date')
+            if eff_date and 'T' in str(eff_date):
+                eff_date = str(eff_date).split('T')[0]
+
+            try:
+                ledger_service.correct_payment(
+                    loan=loan,
+                    original_operation_id=orig_op_id,
+                    corrected_amount_paise=raw_corrected,
+                    reason=reason,
+                    operation_id=operation_id,
+                    effective_date_str=str(eff_date) if eff_date else None
+                )
+            except (ValidationError, ValueError) as err:
+                return 'REJECTED', str(err)
+            return 'ACCEPTED', None
+
+        elif op_type == 'close_loan':
+            loan_id_raw = payload.get('loan_id') or op.get('loan_id')
+            if not loan_id_raw:
+                return 'REJECTED', 'Missing loan_id.'
+
+            try:
+                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+            except (LoanAccount.DoesNotExist, ValueError):
+                return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
+
+            raw_settlement = payload.get('settlement_amount_paise', 0)
+            if raw_settlement is not None and (isinstance(raw_settlement, bool) or not isinstance(raw_settlement, int) or raw_settlement < 0):
+                return 'REJECTED', 'settlement_amount_paise must be a non-negative integer.'
+
+            eff_date = str(payload.get('effective_date') or timezone.now().date())
+            if 'T' in eff_date:
+                eff_date = eff_date.split('T')[0]
+
+            pm = str(payload.get('payment_method', 'CASH') or 'CASH').upper()
+
+            try:
+                ledger_service.close_loan(
+                    loan=loan,
+                    settlement_amount_paise=int(raw_settlement or 0),
+                    operation_id=operation_id,
+                    effective_date_str=eff_date,
+                    payment_method=pm
+                )
+            except (ValidationError, ValueError) as err:
+                return 'REJECTED', str(err)
+            return 'ACCEPTED', None
+
+        elif op_type == 'upload_attachment_metadata':
+            loan_id_raw = payload.get('loan_id') or op.get('loan_id')
+            if not loan_id_raw:
+                return 'REJECTED', 'Missing loan_id.'
+
+            try:
+                loan = LoanAccount.objects.get(tenant=tenant, id=uuid.UUID(str(loan_id_raw)))
+            except (LoanAccount.DoesNotExist, ValueError):
+                return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
+
+            doc_type = payload.get('document_type', 'OTHER')
+            file_name = payload.get('file_name', 'attachment')
+            file_size = payload.get('file_size', 0)
+            notes = payload.get('notes', '')
+
+            att_id = uuid.UUID(str(payload['id'])) if payload.get('id') else uuid.uuid4()
+            att = LoanAttachment.objects.create(
+                id=att_id,
+                tenant=tenant,
+                loan=loan,
+                document_type=doc_type,
+                file_name=file_name,
+                file_size=file_size,
+                notes=notes
+            )
+            SyncOutbox.objects.create(
+                tenant=tenant,
+                record_type='LOAN_ATTACHMENT',
+                record_id=att.id,
+                operation_type='INSERT',
+                payload={
+                    'id': str(att.id),
+                    'loan_id': str(loan.id),
+                    'document_type': att.document_type,
+                    'file_name': att.file_name,
+                    'file_size': att.file_size,
+                    'notes': att.notes
+                }
+            )
             return 'ACCEPTED', None
 
         else:

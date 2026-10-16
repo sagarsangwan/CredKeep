@@ -1,18 +1,27 @@
-import React, { useState } from 'react';
-import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
 import { useRouter } from 'expo-router';
+import { ArrowLeft } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { Input } from '../../ui/Input';
 import { Button } from '../../ui/Button';
 import { theme } from '../../ui/theme';
 import { AuthService } from '../../core/auth/authService';
+import { triggerBackendWarmup } from '../../core/api/backendWarmup';
+import { useSecurity } from '../../ui/PinLock';
 
 export default function LoginScreen() {
   const router = useRouter();
+  const { hasPin, bioEnabled } = useSecurity();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Non-blocking Render staging server wake-up ping
+    triggerBackendWarmup();
+  }, []);
 
   const handleLogin = async () => {
     if (!username.trim() || !password) {
@@ -24,16 +33,18 @@ export default function LoginScreen() {
       setLoading(true);
       setError(null);
       await AuthService.login({ username, password });
-      router.replace('/(tabs)');
+
+      // If user has not yet configured offline security, offer the setup screen
+      if (!hasPin && !bioEnabled) {
+        router.replace('/auth/security-setup');
+      } else {
+        router.replace('/(tabs)');
+      }
     } catch (err: any) {
-      setError(err?.message || 'Login failed. Please check your credentials.');
+      setError(err?.message || 'Login failed. Please check your credentials or network connection.');
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleContinueOffline = () => {
-    router.replace('/(tabs)');
   };
 
   return (
@@ -42,6 +53,13 @@ export default function LoginScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <TouchableOpacity style={styles.backButton} onPress={() => router.replace('/auth')}>
+          <ArrowLeft size={24} color={theme.colors.onBackground} />
+          <Typography variant="labelLg" color={theme.colors.onBackground} style={{ marginLeft: 8 }}>
+            Welcome
+          </Typography>
+        </TouchableOpacity>
+
         <View style={styles.header}>
           <Typography variant="headlineLg" color={theme.colors.primary} style={styles.title}>
             CredKeep
@@ -101,13 +119,6 @@ export default function LoginScreen() {
             onPress={() => router.push('/auth/register')}
             style={styles.registerBtn}
           />
-
-          <Button
-            title="Continue Offline (Local Mode)"
-            variant="ghost"
-            onPress={handleContinueOffline}
-            style={styles.offlineBtn}
-          />
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -124,6 +135,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: theme.spacing.lg,
   },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.lg,
+    paddingVertical: 8,
+  },
   header: {
     alignItems: 'center',
     marginBottom: theme.spacing.xl,
@@ -136,7 +153,7 @@ const styles = StyleSheet.create({
     marginTop: theme.spacing.xs,
   },
   formCard: {
-    backgroundColor: theme.colors.surface,
+    backgroundColor: theme.colors.surfaceContainerLowest,
     padding: theme.spacing.xl,
     borderRadius: theme.borderRadius.lg,
     borderWidth: 1,
@@ -149,16 +166,14 @@ const styles = StyleSheet.create({
   errorContainer: {
     backgroundColor: '#FDE8E8',
     padding: theme.spacing.md,
-    borderRadius: theme.borderRadius.sm,
+    borderRadius: theme.borderRadius.md,
     marginBottom: theme.spacing.md,
   },
   loginBtn: {
-    marginTop: theme.spacing.sm,
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
   },
   registerBtn: {
-    marginTop: theme.spacing.md,
-  },
-  offlineBtn: {
-    marginTop: theme.spacing.sm,
+    borderColor: theme.colors.outline,
   },
 });

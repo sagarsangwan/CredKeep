@@ -1,7 +1,9 @@
 import { SQLiteDatabase } from 'expo-sqlite';
+import { withDbTransaction } from './transaction';
 
 export async function runMigrations(db: SQLiteDatabase) {
-  await db.withExclusiveTransactionAsync(async (tx) => {
+  const t0 = Date.now();
+  await withDbTransaction(db, async (tx) => {
     // 1. Borrowers table
     await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS borrowers (
@@ -24,10 +26,32 @@ export async function runMigrations(db: SQLiteDatabase) {
         due_day INTEGER NOT NULL,
         product_type TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'ACTIVE',
+        collateral TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (borrower_id) REFERENCES borrowers(id) ON DELETE RESTRICT
       );
     `);
+
+    const loanColumns: any[] = await (tx as any).getAllAsync(`PRAGMA table_info(loans);`);
+    const loanColNames = new Set((loanColumns || []).map((c: any) => c.name));
+    if (!loanColNames.has('collateral')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN collateral TEXT;`);
+    }
+    if (!loanColNames.has('annual_rate')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN annual_rate REAL;`);
+    }
+    if (!loanColNames.has('rate_basis')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN rate_basis TEXT NOT NULL DEFAULT 'LEGACY_FIXED_TERM';`);
+    }
+    if (!loanColNames.has('interest_paise')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN interest_paise INTEGER;`);
+    }
+    if (!loanColNames.has('total_paise')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN total_paise INTEGER;`);
+    }
+    if (!loanColNames.has('maturity_date')) {
+      await tx.execAsync(`ALTER TABLE loans ADD COLUMN maturity_date TEXT;`);
+    }
 
     // 3. Repayment Schedules
     await tx.execAsync(`
@@ -88,6 +112,15 @@ export async function runMigrations(db: SQLiteDatabase) {
       );
     `);
 
+    const txColumns: any[] = await (tx as any).getAllAsync(`PRAGMA table_info(transactions);`);
+    const txColNames = new Set((txColumns || []).map((c: any) => c.name));
+    if (!txColNames.has('reversal_of_id')) {
+      await tx.execAsync(`ALTER TABLE transactions ADD COLUMN reversal_of_id TEXT;`);
+    }
+    if (!txColNames.has('correction_reason')) {
+      await tx.execAsync(`ALTER TABLE transactions ADD COLUMN correction_reason TEXT;`);
+    }
+
     // Prevent transactions update/delete
     await tx.execAsync(`
       CREATE TRIGGER IF NOT EXISTS prevent_transactions_update
@@ -123,7 +156,64 @@ export async function runMigrations(db: SQLiteDatabase) {
       );
     `);
 
-    // 6. Sync Outbox (Offline-first client mutations queue)
+    // 6. Loan Terms (One-Time Repayment terms and historical extensions)
+    await tx.execAsync(`
+      CREATE TABLE IF NOT EXISTS loan_terms (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        term_number INTEGER NOT NULL,
+        duration_months INTEGER NOT NULL,
+        annual_rate REAL NOT NULL,
+        interest_paise INTEGER NOT NULL,
+        start_date TEXT NOT NULL,
+        maturity_date TEXT NOT NULL,
+        interest_paid_paise INTEGER NOT NULL DEFAULT 0,
+        settled INTEGER NOT NULL DEFAULT 0,
+        operation_id TEXT UNIQUE,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE RESTRICT
+      );
+      CREATE INDEX IF NOT EXISTS idx_loan_terms_loan ON loan_terms(loan_id, term_number);
+    `);
+
+    // 7. Payment Corrections (Auditable correction history linking reversal and replacement)
+    await tx.execAsync(`
+      CREATE TABLE IF NOT EXISTS payment_corrections (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        original_transaction_id TEXT NOT NULL,
+        original_operation_id TEXT NOT NULL,
+        reversal_transaction_id TEXT NOT NULL,
+        replacement_transaction_id TEXT,
+        original_amount_paise INTEGER NOT NULL,
+        corrected_amount_paise INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        operation_id TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE RESTRICT
+      );
+      CREATE INDEX IF NOT EXISTS idx_payment_corrections_loan ON payment_corrections(loan_id);
+    `);
+
+    // 8. Loan Attachments (Security cheques, affidavits, collateral documents)
+    await tx.execAsync(`
+      CREATE TABLE IF NOT EXISTS loan_attachments (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        document_type TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        mime_type TEXT,
+        notes TEXT,
+        sync_status TEXT NOT NULL DEFAULT 'LOCAL_ONLY',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (loan_id) REFERENCES loans(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_loan_attachments_loan ON loan_attachments(loan_id);
+    `);
+
+    // 9. Sync Outbox (Offline-first client mutations queue)
     await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS sync_outbox (
         id TEXT PRIMARY KEY NOT NULL,
@@ -136,7 +226,7 @@ export async function runMigrations(db: SQLiteDatabase) {
       );
     `);
 
-    // 7. Sync Meta (Sync state, cursors, timestamps)
+    // 10. Sync Meta (Sync state, cursors, timestamps)
     await tx.execAsync(`
       CREATE TABLE IF NOT EXISTS sync_meta (
         key TEXT PRIMARY KEY NOT NULL,
@@ -144,4 +234,5 @@ export async function runMigrations(db: SQLiteDatabase) {
       );
     `);
   });
+  console.log(`[LIFECYCLE] MIGRATIONS_COMPLETE: all tables and triggers ready in ${Date.now() - t0}ms`);
 }

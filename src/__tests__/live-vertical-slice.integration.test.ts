@@ -104,11 +104,17 @@ function createRealSqliteDb(): SQLiteDatabase {
       borrower_id TEXT NOT NULL,
       principal_paise INTEGER NOT NULL,
       markup_factor REAL NOT NULL,
+      annual_rate REAL,
+      rate_basis TEXT,
+      interest_paise INTEGER,
+      total_paise INTEGER,
+      maturity_date TEXT,
       term_months INTEGER NOT NULL,
       start_date TEXT NOT NULL,
       due_day INTEGER NOT NULL,
       product_type TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'ACTIVE',
+      collateral TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE repayment_schedules (
@@ -145,6 +151,40 @@ function createRealSqliteDb(): SQLiteDatabase {
       forgiven_markup_paise INTEGER NOT NULL DEFAULT 0,
       forgiven_penalty_paise INTEGER NOT NULL DEFAULT 0,
       effective_date TEXT NOT NULL,
+      reversal_of_id TEXT,
+      correction_reason TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE loan_terms (
+      id TEXT PRIMARY KEY NOT NULL,
+      loan_id TEXT NOT NULL,
+      term_number INTEGER NOT NULL,
+      duration_months INTEGER NOT NULL,
+      annual_rate REAL NOT NULL,
+      interest_paise INTEGER NOT NULL,
+      start_date TEXT NOT NULL,
+      maturity_date TEXT NOT NULL,
+      interest_settled INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE payment_corrections (
+      id TEXT PRIMARY KEY NOT NULL,
+      loan_id TEXT NOT NULL,
+      original_transaction_id TEXT NOT NULL,
+      reversal_transaction_id TEXT NOT NULL,
+      replacement_transaction_id TEXT,
+      previous_amount_paise INTEGER NOT NULL,
+      corrected_amount_paise INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE loan_attachments (
+      id TEXT PRIMARY KEY NOT NULL,
+      loan_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      doc_type TEXT NOT NULL,
+      notes TEXT,
+      synced INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
     CREATE TRIGGER prevent_transactions_update

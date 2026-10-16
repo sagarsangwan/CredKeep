@@ -235,6 +235,18 @@ This project uses a split-agent model:
 - **Codex:** Independent Reviewer for phase boundaries and critical security changes.
 - **Gemini / Antigravity:** Implementer and Orchestrator.
 
+### Permanent Agent Operating Rules
+Standard workflow:
+ANTIGRAVITY IMPLEMENTS
+→ TARGETED TESTS
+→ FULL LOCAL INTEGRATION TESTS
+→ ONE INDEPENDENT CODEX REVIEW
+→ ONE TARGETED REMEDIATION PASS
+→ FINAL LOCAL ACCEPTANCE
+→ REQUEST RELEASE APPROVAL.
+
+These rules apply automatically to future meaningful CredKeep changes.
+
 **Coordination Rules (Lightweight V2 Policy):**
 1. Stop requiring Codex planning for every task. Follow the executable backlog in `.workflow/V2_TASKS.md` directly.
 2. Use Gemini for continuous implementation.

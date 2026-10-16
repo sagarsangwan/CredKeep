@@ -25,6 +25,10 @@ expo-env.d.ts
 .env
 .env.*
 !.env.example
+*.env
+*.env.*
+!*.env.example
+infra/db.env
 credentials.json
 google-services.json
 GoogleService-Info.plist
@@ -99,4 +103,7 @@ backend/.venv/
 .coverage
 htmlcov/
 .jest-cache/
+# Build artifacts & packages
+artifacts/**/*.apk
+artifacts/**/*.aab
 

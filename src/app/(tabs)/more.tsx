@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, Alert, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { ChevronRight, Shield, Database, FileText } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { Button } from '../../ui/Button';
 import { Card } from '../../ui/Card';
@@ -9,17 +10,16 @@ import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
 import { AuthStore, UserInfo } from '../../core/auth/authStore';
 import { AuthService } from '../../core/auth/authService';
-import { SyncService } from '../../core/sync/syncService';
+import { SyncCoordinator, SyncState } from '../../core/sync/syncCoordinator';
 import { OutboxManager } from '../../core/sync/outbox';
 
 export default function MoreScreen() {
   const router = useRouter();
-  const { db, triggerRefresh } = useDatabase();
+  const { db, triggerRefresh, closeCurrentDatabase } = useDatabase();
 
   const [user, setUser] = useState<UserInfo | null>(null);
   const [tenantName, setTenantName] = useState<string | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [syncState, setSyncState] = useState<SyncState>(SyncCoordinator.getState());
   const [needsReviewCount, setNeedsReviewCount] = useState(0);
 
   const loadAuthAndSyncState = useCallback(async () => {
@@ -29,12 +29,7 @@ export default function MoreScreen() {
     setTenantName(tName);
 
     if (db) {
-      const syncMeta = await OutboxManager.getMeta(db, 'last_synced_at');
-      if (syncMeta) {
-        const d = new Date(syncMeta);
-        setLastSyncTime(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-      }
-      const reviewItems = await OutboxManager.getNeedsReview(db);
+      const reviewItems = await OutboxManager.getNeedsReview(db).catch(() => []);
       setNeedsReviewCount(reviewItems.length);
     }
   }, [db]);
@@ -42,6 +37,14 @@ export default function MoreScreen() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadAuthAndSyncState();
+
+    const unsubscribeSync = SyncCoordinator.subscribe((state) => {
+      setSyncState(state);
+    });
+
+    return () => {
+      unsubscribeSync();
+    };
   }, [loadAuthAndSyncState]);
 
   const promptResolveConflicts = (count: number) => {
@@ -59,7 +62,7 @@ export default function MoreScreen() {
             for (const item of items) {
               await OutboxManager.resolveNeedsReview(db, item.operation_id, 'DISCARD');
             }
-            Alert.alert('Resolved', 'Conflicting operations have been discarded.');
+            triggerRefresh();
             await loadAuthAndSyncState();
           },
         },
@@ -83,53 +86,75 @@ export default function MoreScreen() {
     }
 
     try {
-      setIsSyncing(true);
-      const res = await SyncService.syncAll(db);
-      if (res.success) {
+      const res = await SyncCoordinator.triggerSync('manual');
+      if (res && res.success) {
         triggerRefresh();
         await loadAuthAndSyncState();
         Alert.alert(
           'Sync Complete',
           `Successfully pushed ${res.pushedCount} operations and pulled ${res.pulledCount} server updates.`
         );
-      } else if (res.needsReviewCount && res.needsReviewCount > 0) {
+      } else if (res && res.needsReviewCount && res.needsReviewCount > 0) {
         triggerRefresh();
         await loadAuthAndSyncState();
         promptResolveConflicts(res.needsReviewCount);
-      } else {
+      } else if (res && !res.success) {
         Alert.alert('Sync Incomplete', res.errors?.[0] || 'Sync completed with warnings.');
       }
     } catch (err: any) {
       Alert.alert('Sync Error', err?.message || 'Network connection failed.');
-    } finally {
-      setIsSyncing(false);
     }
   };
 
   const handleLogout = async () => {
-    Alert.alert('Log Out', 'Are you sure you want to log out of cloud sync?', [
+    Alert.alert('Log Out', 'Are you sure you want to log out of your lender account?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Log Out',
         style: 'destructive',
         onPress: async () => {
           await AuthService.logout();
+          await closeCurrentDatabase();
+          SyncCoordinator.reset();
           setUser(null);
           setTenantName(null);
+          router.replace('/auth');
         },
       },
     ]);
   };
 
   const menuItems = [
-    { title: 'Earnings & Reports', route: '/reports' },
-    { title: 'App Security (PIN Lock)', route: '/settings/security' },
-    { title: 'Backup & Restore', route: '/settings/backup' },
+    { title: 'Earnings & Reports', route: '/reports', icon: FileText },
+    { title: 'App Security (PIN / Biometrics)', route: '/settings/security', icon: Shield },
+    { title: 'Backup & Restore', route: '/settings/backup', icon: Database },
   ];
+
+  const getSyncStatusBadge = () => {
+    switch (syncState.status) {
+      case 'SYNCING':
+        return { label: 'Syncing...', color: theme.colors.primary, bg: theme.colors.primaryContainer };
+      case 'PENDING':
+        return {
+          label: `${syncState.pendingCount} Pending Sync`,
+          color: theme.colors.warning,
+          bg: theme.colors.warningContainer,
+        };
+      case 'OFFLINE':
+        return { label: 'Offline Mode', color: theme.colors.error, bg: theme.colors.errorContainer };
+      case 'ERROR':
+        return { label: 'Sync Error', color: theme.colors.error, bg: theme.colors.errorContainer };
+      case 'IDLE':
+      default:
+        return { label: 'Up to Date', color: theme.colors.success, bg: theme.colors.successContainer };
+    }
+  };
+
+  const badge = getSyncStatusBadge();
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container}>
         <Typography variant="headlineMd" color={theme.colors.onBackground} style={styles.title}>
           More & Settings
         </Typography>
@@ -137,43 +162,47 @@ export default function MoreScreen() {
         {/* Cloud Sync & Account Status Card */}
         <Card style={styles.syncCard}>
           <View style={styles.syncHeader}>
-            <View>
+            <View style={{ flex: 1 }}>
               <Typography variant="titleMd" color={theme.colors.textPrimary}>
-                {user ? `Workspace: ${tenantName || 'Active'}` : 'Offline Mode (Local Only)'}
+                {user ? `Workspace: ${tenantName || 'Private'}` : 'Not Signed In'}
               </Typography>
-              <Typography variant="bodySm" color={theme.colors.textSecondary}>
-                {user
-                  ? `Logged in as @${user.username}${lastSyncTime ? ` • Synced at ${lastSyncTime}` : ''}`
-                  : 'Connect to cloud for multi-device sync and backups'}
+              <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 2 }}>
+                {user ? `Logged in as @${user.username}` : 'Sign in to access your ledger'}
+              </Typography>
+            </View>
+            <View style={[styles.badge, { backgroundColor: badge.bg }]}>
+              <Typography variant="labelSm" color={badge.color}>
+                {badge.label}
               </Typography>
             </View>
           </View>
 
+          {syncState.lastSyncedAt && (
+            <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 8 }}>
+              Last Synced: {new Date(syncState.lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Typography>
+          )}
+
+          {syncState.errorMessage && (
+            <Typography variant="bodySm" color={theme.colors.error} style={{ marginTop: 4 }}>
+              {syncState.errorMessage}
+            </Typography>
+          )}
+
           <View style={styles.syncActions}>
-            {user ? (
-              <>
-                <Button
-                  title={isSyncing ? 'Syncing...' : 'Sync Now'}
-                  variant="primary"
-                  onPress={handleSyncNow}
-                  loading={isSyncing}
-                  style={styles.actionBtn}
-                />
-                <Button
-                  title="Log Out"
-                  variant="ghost"
-                  onPress={handleLogout}
-                  style={styles.actionBtn}
-                />
-              </>
-            ) : (
-              <Button
-                title="Connect Cloud / Log In"
-                variant="primary"
-                onPress={() => router.push('/auth/login')}
-                style={styles.actionBtn}
-              />
-            )}
+            <Button
+              title={syncState.status === 'SYNCING' ? 'Syncing...' : 'Sync Now'}
+              variant="primary"
+              onPress={handleSyncNow}
+              loading={syncState.status === 'SYNCING'}
+              style={styles.actionBtn}
+            />
+            <Button
+              title="Log Out"
+              variant="outline"
+              onPress={handleLogout}
+              style={[styles.actionBtn, { borderColor: theme.colors.error }]}
+            />
           </View>
         </Card>
 
@@ -184,7 +213,7 @@ export default function MoreScreen() {
               ⚠️ Action Required: {needsReviewCount} Conflict(s)
             </Typography>
             <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 4 }}>
-              Offline updates clashed with changes from another device (e.g. actions on settled loans).
+              Offline updates clashed with changes from another device.
             </Typography>
             <View style={styles.syncActions}>
               <Button
@@ -197,33 +226,38 @@ export default function MoreScreen() {
           </Card>
         )}
 
-        {/* Existing Navigation Menu */}
-        <View style={styles.list}>
-          {menuItems.map((item, index) => (
-            <TouchableOpacity
-              key={index}
-              style={styles.listItem}
-              onPress={() => router.push(item.route as any)}
-            >
-              <Typography variant="titleMd" color={theme.colors.onSurface}>
-                {item.title}
-              </Typography>
-              <Typography variant="titleMd" color={theme.colors.onSurfaceVariant}>
-                ›
-              </Typography>
-            </TouchableOpacity>
-          ))}
+        {/* Navigation Menu */}
+        <View style={styles.menuContainer}>
+          {menuItems.map((item) => {
+            const IconComponent = item.icon;
+            return (
+              <TouchableOpacity
+                key={item.title}
+                style={styles.menuItem}
+                onPress={() => router.push(item.route as any)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.menuLeft}>
+                  <IconComponent size={20} color={theme.colors.primary} />
+                  <Typography variant="headlineSm" color={theme.colors.textPrimary} style={styles.menuText}>
+                    {item.title}
+                  </Typography>
+                </View>
+                <ChevronRight size={20} color={theme.colors.textSecondary} />
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
-        <Typography
-          variant="bodySm"
-          color={theme.colors.onSurfaceVariant}
-          align="center"
-          style={{ marginTop: 32 }}
-        >
-          CredKeep V2 — Offline-First Architecture
-        </Typography>
-      </View>
+        <View style={styles.footer}>
+          <Typography variant="bodySm" color={theme.colors.textSecondary}>
+            CredKeep V2 • Build 2
+          </Typography>
+          <Typography variant="labelSm" color={theme.colors.outline} style={{ marginTop: 2 }}>
+            Encrypted SQLite • SQLCipher 256-bit
+          </Typography>
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -235,38 +269,63 @@ const styles = StyleSheet.create({
   },
   container: {
     padding: theme.spacing.lg,
+    paddingBottom: 40,
   },
   title: {
     marginBottom: theme.spacing.lg,
+    fontWeight: '700',
   },
   syncCard: {
-    padding: theme.spacing.lg,
     marginBottom: theme.spacing.lg,
-    backgroundColor: theme.colors.surface,
-    borderColor: theme.colors.outlineVariant,
+    padding: theme.spacing.lg,
+    backgroundColor: theme.colors.surfaceContainerLowest,
   },
   syncHeader: {
-    marginBottom: theme.spacing.md,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
   },
   syncActions: {
     flexDirection: 'row',
-    gap: theme.spacing.sm,
+    gap: theme.spacing.md,
+    marginTop: theme.spacing.md,
   },
   actionBtn: {
     flex: 1,
   },
-  list: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: theme.colors.outline,
+  menuContainer: {
+    backgroundColor: theme.colors.surfaceContainerLowest,
+    borderRadius: theme.borderRadius.lg,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: theme.colors.outlineVariant,
   },
-  listItem: {
+  menuItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    padding: 20,
+    alignItems: 'center',
+    paddingVertical: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
     borderBottomWidth: 1,
-    borderBottomColor: theme.colors.outline,
+    borderBottomColor: theme.colors.surfaceContainerHigh,
+  },
+  menuLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  menuText: {
+    marginLeft: theme.spacing.md,
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  footer: {
+    alignItems: 'center',
+    marginTop: theme.spacing.xl,
+    paddingVertical: theme.spacing.md,
   },
 });
