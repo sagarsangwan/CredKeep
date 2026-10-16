@@ -117,4 +117,103 @@ describe('Schedule Generation', () => {
       expect(totalMarkup).toBe(29015);
     });
   });
+
+  describe('Section 4: Monthly Kist — Correct Financial Engine', () => {
+    it('₹50,000 at 24% p.a., 10 months -> ₹10,000 interest, ₹60,000 repayment, 10 x ₹6,000', () => {
+      const principal = toPaise(50000);
+      const schedule = generateSchedule({
+        principal,
+        annualRate: 24,
+        rateBasis: 'ANNUAL_SIMPLE_FLAT',
+        termMonths: 10,
+        startDate: '2026-01-01',
+        dueDay: 1,
+        productType: 'instalment'
+      });
+
+      expect(schedule.length).toBe(10);
+      const totalPrincipal = schedule.reduce((sum, k) => sum + k.principalDue, 0);
+      const totalMarkup = schedule.reduce((sum, k) => sum + k.markupDue, 0);
+      const totalRepayment = schedule.reduce((sum, k) => sum + k.amountDue, 0);
+
+      expect(totalPrincipal).toBe(toPaise(50000));
+      expect(totalMarkup).toBe(toPaise(10000));
+      expect(totalRepayment).toBe(toPaise(60000));
+
+      for (let i = 0; i < 10; i++) {
+        expect(schedule[i].amountDue).toBe(toPaise(6000));
+        expect(schedule[i].principalDue).toBe(toPaise(5000));
+        expect(schedule[i].markupDue).toBe(toPaise(1000));
+      }
+    });
+
+    it('handles various durations: 1, 2, 3, 6, 12, 24 months with exact paise conservation', () => {
+      const durations = [1, 2, 3, 6, 12, 24];
+      for (const term of durations) {
+        const schedule = generateSchedule({
+          principal: toPaise(35000),
+          annualRate: 20,
+          rateBasis: 'ANNUAL_SIMPLE_FLAT',
+          termMonths: term,
+          startDate: '2026-01-01',
+          dueDay: 5,
+          productType: 'instalment'
+        });
+
+        expect(schedule.length).toBe(term);
+        const expectedInterest = Math.round((toPaise(35000) * 20 * term) / 1200);
+        const sumMarkup = schedule.reduce((sum, k) => sum + k.markupDue, 0);
+        const sumPrincipal = schedule.reduce((sum, k) => sum + k.principalDue, 0);
+        const sumTotal = schedule.reduce((sum, k) => sum + k.amountDue, 0);
+
+        expect(sumMarkup).toBe(expectedInterest);
+        expect(sumPrincipal).toBe(toPaise(35000));
+        expect(sumTotal).toBe(toPaise(35000) + expectedInterest);
+      }
+    });
+  });
+
+  describe('Section 5: One-Time Repayment — Completely Separate Engine', () => {
+    it('₹10,000 at 30% p.a., 3 months -> ₹750 interest, ₹10,750 at maturity, NO monthly kists', () => {
+      const principal = toPaise(10000);
+      const schedule = generateSchedule({
+        principal,
+        annualRate: 30,
+        rateBasis: 'ANNUAL_SIMPLE_FLAT',
+        termMonths: 3,
+        startDate: '2026-01-01',
+        dueDay: 1,
+        productType: 'bullet'
+      });
+
+      // No monthly kists generated!
+      expect(schedule.length).toBe(0);
+
+      // Verify contract interest formula
+      const { calculateContractInterest, calculateMaturityDate } = require('./schedule');
+      const interest = calculateContractInterest(principal, 30, 3);
+      expect(interest).toBe(toPaise(750));
+      const maturityDue = principal + interest;
+      expect(maturityDue).toBe(toPaise(10750));
+
+      const maturityDate = calculateMaturityDate('2026-01-01', 3, 1);
+      expect(maturityDate).toBe('2026-04-01');
+    });
+
+    it('Extension: 6 additional months on ₹10,000 at 30% p.a. -> ₹1,500 additional interest', () => {
+      const { calculateContractInterest } = require('./schedule');
+      const principal = toPaise(10000);
+      const term1Interest = calculateContractInterest(principal, 30, 3);
+      expect(term1Interest).toBe(toPaise(750));
+
+      const extensionInterest = calculateContractInterest(principal, 30, 6);
+      expect(extensionInterest).toBe(toPaise(1500));
+
+      const cumulativeInterest = term1Interest + extensionInterest;
+      expect(cumulativeInterest).toBe(toPaise(2250));
+
+      const newMaturityDue = principal + extensionInterest; // Assuming term 1 interest ₹750 was collected
+      expect(newMaturityDue).toBe(toPaise(11500));
+    });
+  });
 });

@@ -53,6 +53,12 @@ class LoanAccount(models.Model):
     due_day = models.PositiveSmallIntegerField()
     product_type = models.CharField(max_length=32, choices=PRODUCT_TYPES)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='ACTIVE')
+    rate_basis = models.CharField(max_length=32, default='LEGACY_FIXED_TERM')
+    annual_rate = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    interest_paise = models.BigIntegerField(null=True, blank=True)
+    total_paise = models.BigIntegerField(null=True, blank=True)
+    maturity_date = models.DateField(null=True, blank=True)
+    collateral = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -157,6 +163,8 @@ class Transaction(models.Model):
     forgiven_markup_paise = models.BigIntegerField(default=0)
     forgiven_penalty_paise = models.BigIntegerField(default=0)
     effective_date = models.DateField()
+    reversal_of_id = models.UUIDField(null=True, blank=True, db_index=True)
+    correction_reason = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -351,3 +359,115 @@ class SyncOutbox(models.Model):
 
     def __str__(self):
         return f"Outbox #{self.sequence_number}: {self.record_type} {self.record_id} ({self.operation_type})"
+
+
+class LoanTerm(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='loan_terms'
+    )
+    loan = models.ForeignKey(
+        LoanAccount,
+        on_delete=models.CASCADE,
+        related_name='terms'
+    )
+    term_number = models.PositiveIntegerField()
+    duration_months = models.PositiveIntegerField()
+    annual_rate = models.DecimalField(max_digits=6, decimal_places=2)
+    interest_paise = models.BigIntegerField()
+    start_date = models.DateField()
+    maturity_date = models.DateField()
+    interest_paid_paise = models.BigIntegerField(default=0)
+    settled = models.BooleanField(default=False)
+    operation_id = models.UUIDField(db_index=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['loan', 'term_number']
+        constraints = [
+            models.UniqueConstraint(fields=['loan', 'term_number'], name='unique_loan_term_number')
+        ]
+
+    def __str__(self):
+        return f"Term {self.term_number} for Loan {self.loan_id} ({self.duration_months}m @ {self.annual_rate}%)"
+
+
+class PaymentCorrection(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='payment_corrections'
+    )
+    loan = models.ForeignKey(
+        LoanAccount,
+        on_delete=models.CASCADE,
+        related_name='payment_corrections'
+    )
+    original_transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.RESTRICT,
+        related_name='corrected_by'
+    )
+    reversal_transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.RESTRICT,
+        related_name='reversal_for'
+    )
+    replacement_transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.RESTRICT,
+        null=True,
+        blank=True,
+        related_name='replacement_for'
+    )
+    original_amount_paise = models.BigIntegerField()
+    corrected_amount_paise = models.BigIntegerField()
+    reason = models.TextField()
+    operation_id = models.UUIDField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'operation_id'], name='unique_tenant_correction_operation')
+        ]
+
+    def __str__(self):
+        return f"Correction {self.operation_id}: {self.original_amount_paise} -> {self.corrected_amount_paise}"
+
+
+class LoanAttachment(models.Model):
+    DOCUMENT_TYPES = [
+        ('SECURITY_CHEQUE', 'Security Cheque'),
+        ('AFFIDAVIT', 'Affidavit / Stamp Paper'),
+        ('COLLATERAL', 'Collateral'),
+        ('OTHER', 'Other'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='loan_attachments'
+    )
+    loan = models.ForeignKey(
+        LoanAccount,
+        on_delete=models.CASCADE,
+        related_name='attachments'
+    )
+    document_type = models.CharField(max_length=32, choices=DOCUMENT_TYPES)
+    file_name = models.CharField(max_length=255)
+    file_size = models.BigIntegerField(default=0)
+    mime_type = models.CharField(max_length=128, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    storage_key = models.CharField(max_length=512, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Attachment {self.document_type} for Loan {self.loan_id} ({self.file_name})"

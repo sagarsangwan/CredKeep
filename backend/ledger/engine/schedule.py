@@ -1,7 +1,7 @@
 import calendar
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Union
+from typing import List, Union, Optional
 
 @dataclass
 class ScheduledKistData:
@@ -44,29 +44,59 @@ def calculate_next_due_date(start_date_str: str, months_to_add: int, target_due_
 
     return f"{year:04d}-{month:02d}-{final_day:02d}"
 
+def calculate_contract_interest(
+    principal_paise: int,
+    annual_rate: Union[Decimal, float],
+    term_months: int
+) -> int:
+    """
+    Computes interest for annual simple-flat-interest contracts:
+    Interest = Principal × AnnualRate × DurationMonths / 1200
+    Result rounded to integer paise using ROUND_HALF_UP.
+    """
+    if annual_rate < 0 or term_months <= 0:
+        raise ValueError("annual_rate and term_months must be positive")
+    rate_dec = Decimal(str(annual_rate))
+    interest_dec = (Decimal(principal_paise) * rate_dec * Decimal(term_months)) / Decimal(1200)
+    return int(interest_dec.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
 def generate_schedule(
     principal_paise: int,
-    markup_factor: Union[Decimal, float],
-    term_months: int,
-    start_date_str: str,
-    due_day: int,
-    product_type: str = 'instalment'
+    markup_factor: Optional[Union[Decimal, float]] = None,
+    term_months: int = 1,
+    start_date_str: str = '',
+    due_day: int = 1,
+    product_type: str = 'instalment',
+    annual_rate: Optional[Union[Decimal, float]] = None,
+    rate_basis: Optional[str] = None
 ) -> List[ScheduledKistData]:
     """
     Generates initial repayment schedule.
-    - Instalment loans: both principal and markup divided across term_months.
-    - Bullet loans: only markup due in monthly kists (principal due at settlement).
+    - Monthly Kist (instalment): both principal and interest divided across term_months.
+    - One-Time Repayment (bullet): NO monthly kists are generated.
     """
-    if markup_factor is None or markup_factor < 0:
-        raise ValueError("markup_factor must be non-negative")
-    if isinstance(markup_factor, Decimal) and (markup_factor.is_nan() or markup_factor.is_infinite()):
-        raise ValueError("markup_factor must be a finite number")
+    if term_months <= 0:
+        raise ValueError("term_months must be a positive integer")
 
-    if isinstance(markup_factor, float):
-        markup_dec = Decimal(str(markup_factor))
+    if rate_basis is None:
+        rate_basis = 'ANNUAL_SIMPLE_FLAT' if annual_rate is not None else 'LEGACY_FIXED_TERM'
+
+    # ONE-TIME REPAYMENT: There are NO monthly kists.
+    if product_type == 'bullet' and rate_basis == 'ANNUAL_SIMPLE_FLAT':
+        return []
+
+    if rate_basis == 'ANNUAL_SIMPLE_FLAT' and annual_rate is not None:
+        total_markup = calculate_contract_interest(principal_paise, annual_rate, term_months)
     else:
-        markup_dec = Decimal(markup_factor)
-    total_markup = int((Decimal(principal_paise) * markup_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        if markup_factor is None or markup_factor < 0:
+            raise ValueError("markup_factor must be non-negative")
+        if isinstance(markup_factor, Decimal) and (markup_factor.is_nan() or markup_factor.is_infinite()):
+            raise ValueError("markup_factor must be a finite number")
+        if isinstance(markup_factor, float):
+            markup_dec = Decimal(str(markup_factor))
+        else:
+            markup_dec = Decimal(markup_factor)
+        total_markup = int((Decimal(principal_paise) * markup_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
 
     schedule: List[ScheduledKistData] = []
 
@@ -83,6 +113,7 @@ def generate_schedule(
                 markup_due=markup_instalments[i]
             ))
     elif product_type == 'bullet':
+        # Legacy fixed-term markup bullet
         markup_instalments = divide_paise(total_markup, term_months)
 
         for i in range(term_months):

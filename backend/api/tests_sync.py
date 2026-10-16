@@ -3215,6 +3215,296 @@ def test_portfolio_summary_includes_bullet_principal_and_reconciles_penalties(ap
     assert data_after['total_outstanding_balance_paise'] == 60000 + 225000
 
 
+@pytest.mark.django_db
+def test_monthly_kist_sync_push_creates_exact_paise_schedule(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    borrower = Borrower.objects.create(tenant=tenant, name='Kist Borrower', phone='9876543230')
+
+    loan_id = str(uuid.uuid4())
+    op_id = str(uuid.uuid4())
+
+    payload = {
+        "operations": [
+            {
+                "type": "create_loan",
+                "operation_id": op_id,
+                "payload": {
+                    "id": loan_id,
+                    "borrower_id": str(borrower.id),
+                    "principal_paise": 5000000, # ₹50,000
+                    "annual_rate": 24.0,
+                    "rate_basis": "ANNUAL_SIMPLE_FLAT",
+                    "term_months": 10,
+                    "start_date": "2026-01-01",
+                    "due_day": 5,
+                    "product_type": "instalment",
+                }
+            }
+        ]
+    }
+
+    url = reverse('sync-push')
+    res = api_client.post(url, payload, format='json')
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'ACCEPTED'
+
+    loan = LoanAccount.objects.get(id=loan_id, tenant=tenant)
+    assert loan.principal_paise == 5000000
+    assert loan.annual_rate == Decimal('24.0')
+    assert loan.rate_basis == 'ANNUAL_SIMPLE_FLAT'
+    assert loan.interest_paise == 1000000 # ₹10,000
+    assert loan.total_paise == 6000000    # ₹60,000
+
+    kists = list(loan.schedules.order_by('installment_number'))
+    assert len(kists) == 10
+    total_due = sum(k.total_due_paise for k in kists)
+    assert total_due == 6000000
+    for k in kists:
+        assert k.total_due_paise == 600000 # ₹6,000
+
+
+@pytest.mark.django_db
+def test_one_time_repayment_sync_push_and_extension(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    borrower = Borrower.objects.create(tenant=tenant, name='Bullet Borrower', phone='9876543231')
+
+    loan_id = str(uuid.uuid4())
+    op_id = str(uuid.uuid4())
+
+    # 1. Create One-Time Repayment loan: ₹10,000 at 30% p.a. for 3 months
+    create_payload = {
+        "operations": [
+            {
+                "type": "create_loan",
+                "operation_id": op_id,
+                "payload": {
+                    "id": loan_id,
+                    "borrower_id": str(borrower.id),
+                    "principal_paise": 1000000, # ₹10,000
+                    "annual_rate": 30.0,
+                    "rate_basis": "ANNUAL_SIMPLE_FLAT",
+                    "term_months": 3,
+                    "start_date": "2026-07-01",
+                    "due_day": 5,
+                    "product_type": "bullet",
+                }
+            }
+        ]
+    }
+
+    url = reverse('sync-push')
+    res = api_client.post(url, create_payload, format='json')
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] == 'ACCEPTED'
+
+    loan = LoanAccount.objects.get(id=loan_id, tenant=tenant)
+    assert loan.interest_paise == 75000   # ₹750
+    assert loan.total_paise == 1075000    # ₹10,750
+    assert loan.schedules.count() == 0        # NO monthly kists!
+
+    # Term 1 exists
+    term1 = loan.terms.get(term_number=1)
+    assert term1.duration_months == 3
+    assert term1.interest_paise == 75000
+    assert term1.settled is False
+
+    # 2. Extend loan: collect ₹750 interest now and add 6 months
+    ext_op_id = str(uuid.uuid4())
+    ext_payload = {
+        "operations": [
+            {
+                "type": "extend_loan",
+                "operation_id": ext_op_id,
+                "payload": {
+                    "loan_id": loan_id,
+                    "additional_months": 6,
+                    "interest_collected_paise": 75000,
+                    "effective_date": "2026-10-05",
+                }
+            }
+        ]
+    }
+    res_ext = api_client.post(url, ext_payload, format='json')
+    assert res_ext.status_code == 200
+    assert res_ext.data['results'][0]['status'] == 'ACCEPTED'
+
+    loan.refresh_from_db()
+    assert loan.term_months == 9       # 3 + 6 = 9 months
+    assert loan.interest_paise == 225000 # 750 + 1500 = 2,250 interest
+    assert loan.total_paise == 1225000  # 10,000 + 2,250
+    assert loan.terms.count() == 2
+    assert loan.schedules.count() == 0
+
+    term1.refresh_from_db()
+    assert term1.settled is True
+
+    term2 = loan.terms.get(term_number=2)
+    assert term2.duration_months == 6
+    assert term2.interest_paise == 150000
+    assert term2.settled is False
+
+    # 3. Close loan when fully settled
+    close_op_id = str(uuid.uuid4())
+    # Pay remaining obligations (₹10,000 principal + ₹1,500 interest)
+    pay_op_id = str(uuid.uuid4())
+    pay_payload = {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": pay_op_id,
+                "payload": {
+                    "loan_id": loan_id,
+                    "amount_paise": 1150000,
+                    "effective_date": "2026-10-05",
+                    "payment_method": "CASH",
+                    "is_cash": True
+                }
+            },
+            {
+                "type": "close_loan",
+                "operation_id": close_op_id,
+                "payload": {
+                    "loan_id": loan_id,
+                    "effective_date": "2026-10-05",
+                }
+            }
+        ]
+    }
+    res_close = api_client.post(url, pay_payload, format='json')
+    assert res_close.status_code == 200
+    assert res_close.data['results'][0]['status'] == 'ACCEPTED', res_close.data
+    assert res_close.data['results'][1]['status'] == 'ACCEPTED', res_close.data
+
+    loan.refresh_from_db()
+    assert loan.status == 'SETTLED'
+
+
+@pytest.mark.django_db
+def test_payment_correction_sync_push(api_client, lender_setup):
+    user, tenant, token = lender_setup
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.key}')
+    borrower = Borrower.objects.create(tenant=tenant, name='Correction Borrower', phone='9876543232')
+
+    loan = LoanAccount.objects.create(
+        tenant=tenant,
+        borrower=borrower,
+        principal_paise=5000000,
+        markup_factor=Decimal('0.24'),
+        term_months=10,
+        start_date="2026-01-01",
+        due_day=5,
+        product_type="instalment",
+        status="ACTIVE"
+    )
+
+    url = reverse('sync-push')
+
+    # 1. Record incorrect payment ₹25,000
+    pay_op = str(uuid.uuid4())
+    res_pay = api_client.post(url, {
+        "operations": [
+            {
+                "type": "record_collection",
+                "operation_id": pay_op,
+                "payload": {
+                    "loan_id": str(loan.id),
+                    "amount_paise": 2500000, # ₹25,000
+                    "effective_date": "2026-01-05",
+                    "payment_method": "CASH",
+                    "is_cash": True
+                }
+            }
+        ]
+    }, format='json')
+    assert res_pay.status_code == 200
+    orig_tx = loan.transactions.get(operation_id=pay_op)
+
+    # 2. Push correct_payment: correct to ₹2,500
+    corr_op = str(uuid.uuid4())
+    res_corr = api_client.post(url, {
+        "operations": [
+            {
+                "type": "correct_payment",
+                "operation_id": corr_op,
+                "payload": {
+                    "loan_id": str(loan.id),
+                    "original_transaction_id": str(orig_tx.id),
+                    "corrected_amount_paise": 250000, # ₹2,500
+                    "reason": "Data Entry Error",
+                    "effective_date": "2026-01-05",
+                }
+            }
+        ]
+    }, format='json')
+    assert res_corr.status_code == 200
+    assert res_corr.data['results'][0]['status'] == 'ACCEPTED', res_corr.data
+
+    # Check database state
+    reversal_tx = loan.transactions.filter(transaction_type='REVERSAL', reversal_of_id=orig_tx.id).first()
+    assert reversal_tx is not None
+    assert reversal_tx.correction_reason == "Data Entry Error"
+
+    corr_record = loan.payment_corrections.get(original_transaction=orig_tx)
+    assert corr_record.original_amount_paise == 2500000
+    assert corr_record.corrected_amount_paise == 250000
+    assert corr_record.reason == "Data Entry Error"
+    assert corr_record.replacement_transaction is not None
+    assert corr_record.replacement_transaction.amount_paise == 250000
+
+
+@pytest.mark.django_db
+def test_cross_tenant_isolation_on_extension_and_correction(api_client, lender_setup):
+    from rest_framework.authtoken.models import Token
+    from tenants.models import Tenant
+    from django.contrib.auth.models import User
+
+    # Lender A
+    user_a, tenant_a, token_a = lender_setup
+    borrower_a = Borrower.objects.create(tenant=tenant_a, name='Borrower A', phone='9876543240')
+    loan_a = LoanAccount.objects.create(
+        tenant=tenant_a,
+        borrower=borrower_a,
+        principal_paise=1000000,
+        markup_factor=Decimal('0.0000'),
+        annual_rate=Decimal('30.0'),
+        rate_basis='ANNUAL_SIMPLE_FLAT',
+        term_months=3,
+        start_date="2026-01-01",
+        due_day=5,
+        product_type="bullet",
+        status="ACTIVE"
+    )
+
+    # Lender B
+    user_b = User.objects.create_user(username='lender_b', password='password123')
+    tenant_b = Tenant.objects.create(name='Tenant B', owner=user_b)
+    token_b = Token.objects.create(user=user_b)
+
+    # Lender B tries to extend Lender A's loan
+    api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token_b.key}')
+    url = reverse('sync-push')
+
+    res = api_client.post(url, {
+        "operations": [
+            {
+                "type": "extend_loan",
+                "operation_id": str(uuid.uuid4()),
+                "payload": {
+                    "loan_id": str(loan_a.id),
+                    "additional_months": 3,
+                    "interest_collected_paise": 75000
+                }
+            }
+        ]
+    }, format='json')
+    assert res.status_code == 200
+    assert res.data['results'][0]['status'] in ('REJECTED', 'FAILED')
+    assert loan_a.terms.count() == 0 # Unmodified
+
+
+
 
 
 

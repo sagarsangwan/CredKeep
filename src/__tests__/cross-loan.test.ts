@@ -496,11 +496,17 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         borrower_id TEXT NOT NULL,
         principal_paise INTEGER NOT NULL,
         markup_factor REAL NOT NULL,
+        annual_rate REAL,
+        rate_basis TEXT,
+        interest_paise INTEGER,
+        total_paise INTEGER,
+        maturity_date TEXT,
         term_months INTEGER NOT NULL,
         start_date TEXT NOT NULL,
         due_day INTEGER NOT NULL,
         product_type TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'ACTIVE',
+        collateral TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE repayment_schedules (
@@ -537,6 +543,40 @@ describe('Real SQLite Engine Integration Guarantees', () => {
         forgiven_markup_paise INTEGER NOT NULL DEFAULT 0,
         forgiven_penalty_paise INTEGER NOT NULL DEFAULT 0,
         effective_date TEXT NOT NULL,
+        reversal_of_id TEXT,
+        correction_reason TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE loan_terms (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        term_number INTEGER NOT NULL,
+        duration_months INTEGER NOT NULL,
+        annual_rate REAL NOT NULL,
+        interest_paise INTEGER NOT NULL,
+        start_date TEXT NOT NULL,
+        maturity_date TEXT NOT NULL,
+        interest_settled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE payment_corrections (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        original_transaction_id TEXT NOT NULL,
+        reversal_transaction_id TEXT NOT NULL,
+        replacement_transaction_id TEXT,
+        previous_amount_paise INTEGER NOT NULL,
+        corrected_amount_paise INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE loan_attachments (
+        id TEXT PRIMARY KEY NOT NULL,
+        loan_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        doc_type TEXT NOT NULL,
+        notes TEXT,
+        synced INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
       CREATE TRIGGER prevent_transactions_update
@@ -615,7 +655,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Seed baseline
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-real', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-real', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-real', 'loan-real', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
 
     const repo = new TransactionRepository(db);
@@ -682,7 +722,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
   it('enforces real SQLite unique constraint preventing duplicate operation_ids', async () => {
     const db = createRealSqliteDb();
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-1', 'b-1', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-1', 'b-1', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
 
     await db.runAsync(
       `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
@@ -700,7 +740,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
   it('enforces real SQLite trigger prohibiting update and delete on transactions table', async () => {
     const db = createRealSqliteDb();
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-1', 'b-1', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-1', 'b-1', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(
       `INSERT INTO transactions (id, operation_id, loan_id, transaction_type, amount_paise, effective_date, created_at)
        VALUES ('tx-immutability', 'op-immut', 'loan-1', 'COLLECTION', 50000, '2026-01-01', '2026-01-01')`
@@ -722,7 +762,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const repo = new TransactionRepository(db);
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-1', 'Borrower 1', '9876543210', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-e2e', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-e2e', 'b-1', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-e2e', 'loan-e2e', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
 
     const res = await repo.recordCashPayment('loan-e2e', 260000 as Paise, 'op-e2e-1', '2026-01-01');
@@ -755,7 +795,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const repo = new TransactionRepository(db);
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-rej', 'Borrower Rej', '9876543211', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-rej', 'b-rej', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-rej', 'b-rej', 200000, 0.3, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-rej', 'loan-rej', 1, '2026-01-01', '2026-01-01', 200000, 60000, 260000, 0, 0, 'PENDING')`);
 
     // 1. Record cash collection that settles loan
@@ -801,7 +841,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-replay', 'Borrower Replay', '9876543212', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-replay', 'b-replay', 200000, 0.2, 2, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-replay', 'b-replay', 200000, 0.2, 2, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rep-1', 'loan-replay', 1, '2026-01-01', '2026-01-01', 100000, 20000, 120000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rep-2', 'loan-replay', 2, '2026-02-01', '2026-02-01', 100000, 20000, 120000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -900,7 +940,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-pen', 'Borrower Pen', '9876543213', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-pen', 'b-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-pen', 'b-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pen-1', 'loan-pen', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Penalty assessment of 5000 paise
@@ -933,7 +973,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-forg', 'Borrower Forg', '9876543214', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-forg', 'b-forg', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-forg', 'b-forg', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-forg-1', 'loan-forg', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Penalty assessment of 3000 paise
@@ -1063,7 +1103,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-rej-pen', 'Borrower RejPen', '9876543215', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-rej-pen', 'b-rej-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-rej-pen', 'b-rej-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rej-1', 'loan-rej-pen', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // 100 paise penalty assessed
@@ -1143,7 +1183,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-seq-2', 'Borrower Seq2', '9876543211', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-seq-2', 'b-seq-2', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-seq-2', 'b-seq-2', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-seq2-1', 'loan-seq-2', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // 100 paise penalty assessed
@@ -1238,7 +1278,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-seq-3', 'Borrower Seq3', '9876543212', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-seq-3', 'b-seq-3', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-seq-3', 'b-seq-3', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     // Total due 100,100 (100 markup, 100000 principal)
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-seq3-1', 'loan-seq-3', 1, '2026-02-01', '2026-02-01', 100000, 100, 100100, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -1338,7 +1378,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-bullet-set', 'Borrower Bullet', '9876543216', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-bullet-set', 'b-bullet-set', 5000, 0.1, 1, '2026-01-01', 1, 'bullet', 'SETTLED', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-bullet-set', 'b-bullet-set', 5000, 0.1, 1, '2026-01-01', 1, 'bullet', 'SETTLED', '2026-01-01')`);
     // Bullet schedule has 0 principal component, 500 markup component
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-bullet-1', 'loan-bullet-set', 1, '2026-01-01', '2026-01-01', 0, 500, 500, 0, 500, 'PAID', 0, 500, 'PAID')`);
 
@@ -1376,7 +1416,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-inst-pen', 'Borrower PenLoan', '9876543217', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-inst-pen', 'b-inst-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-inst-pen', 'b-inst-pen', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-inst-1', 'loan-inst-pen', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Penalty assessed: 5000 paise
@@ -1405,7 +1445,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
   it('updates local SETTLED loan to server ACTIVE state upon pulling authoritative server changes', async () => {
     const db = createRealSqliteDb();
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-sync-active', 'Borrower Active', '9876543218', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-sync-active', 'b-sync-active', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'SETTLED', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-sync-active', 'b-sync-active', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'SETTLED', '2026-01-01')`);
 
     // Server sends authoritative LOAN update indicating status is ACTIVE (e.g. server-assessed penalties)
     await SyncService.applyServerChange(db, {
@@ -1433,7 +1473,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-rec-confirm', 'Borrower Rec Confirm', '9876543219', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-rec-confirm', 'b-rec-confirm', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-rec-confirm', 'b-rec-confirm', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rec-1', 'loan-rec-confirm', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // 100 paise penalty assessed
@@ -1520,12 +1560,12 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Loan A
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-iso-a', 'Borrower Iso A', '9876543220', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-iso-a', 'b-iso-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-iso-a', 'b-iso-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-iso-a1', 'loan-iso-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 500, 'PENDING', 0, 0, 'PENDING')`);
 
     // Loan B
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-iso-b', 'Borrower Iso B', '9876543221', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-iso-b', 'b-iso-b', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-iso-b', 'b-iso-b', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-iso-b1', 'loan-iso-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 1000, 'PENDING', 0, 0, 'PENDING')`);
 
     // Loan A has collection op-1
@@ -1602,7 +1642,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-replay-agree', 'Borrower Replay Agree', '9876543222', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-replay-agree', 'b-replay-agree', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-replay-agree', 'b-replay-agree', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     // Initially kist is future due on 2026-02-01
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-agree-1', 'loan-replay-agree', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -1670,7 +1710,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-pen-repeat', 'Borrower Pen Repeat', '9876543111', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-pen-repeat', 'b-pen-repeat', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-pen-repeat', 'b-pen-repeat', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     // Due on 2026-01-01
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pen-1', 'loan-pen-repeat', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -1755,7 +1795,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-bullet-repeat', 'Borrower Bullet Repeat', '9876543000', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-bullet-repeat', 'b-bullet-repeat', 500000, 0.1, 1, '2026-01-01', 1, 'bullet', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-bullet-repeat', 'b-bullet-repeat', 500000, 0.1, 1, '2026-01-01', 1, 'bullet', 'ACTIVE', '2026-01-01')`);
     // Bullet loan: 1 kist for markup only (50000 paise)
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-bullet-1', 'loan-bullet-repeat', 1, '2026-01-01', '2026-01-01', 0, 50000, 50000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -1837,8 +1877,8 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const repo = new TransactionRepository(db);
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-idem-real', 'Idem Borrower', '9876543888', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-idem-a', 'b-idem-real', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-idem-b', 'b-idem-real', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-idem-a', 'b-idem-real', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-idem-b', 'b-idem-real', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-idem-a', 'loan-idem-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-idem-b', 'loan-idem-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -1867,7 +1907,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-pull-tx', 'Pull TX Borrower', '9876543777', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-pull-tx', 'b-pull-tx', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-pull-tx', 'b-pull-tx', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pull-tx-1', 'loan-pull-tx', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Offline pending payment P1 (1000 paise) made locally on 2026-01-05 (before due date: allocated to future principal)
@@ -1946,7 +1986,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-pull-waiver', 'Pull Waiver Borrower', '9876543666', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-pull-waiver', 'b-pull-waiver', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-pull-waiver', 'b-pull-waiver', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-pw-1', 'loan-pull-waiver', 1, '2026-02-01', '2026-02-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Prior penalty assessment: 300 paise assessed
@@ -2005,7 +2045,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const repo = new TransactionRepository(db);
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-rej-retry', 'Rej Retry Borrower', '9876543555', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-rej-retry', 'b-rej-retry', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-rej-retry', 'b-rej-retry', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-rej-1', 'loan-rej-retry', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // 1. Record original cash payment
@@ -2030,12 +2070,12 @@ describe('Real SQLite Engine Integration Guarantees', () => {
 
     // Loan A
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-hyphen-a', 'Borrower Hyphen A', '9876543111', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-hyphen-a', 'b-hyphen-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-hyphen-a', 'b-hyphen-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-ha-1', 'loan-hyphen-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Loan B
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-hyphen-b', 'Borrower Hyphen B', '9876543112', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-hyphen-b', 'b-hyphen-b', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-hyphen-b', 'b-hyphen-b', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-hb-1', 'loan-hyphen-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Loan A has rejected collection with operation_id 'op-1'
@@ -2118,8 +2158,8 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-wild-a', 'Borrower Wild A', '9876543113', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-wild-a', 'b-wild-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-wild-b', 'b-wild-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-wild-a', 'b-wild-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-wild-b', 'b-wild-a', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-wa-1', 'loan-wild-a', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-wb-1', 'loan-wild-b', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
@@ -2205,7 +2245,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-woff', 'Borrower Written Off', '9876543114', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-woff', 'b-woff', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'WRITTEN_OFF', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-woff', 'b-woff', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'WRITTEN_OFF', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status, server_principal_paid_paise, server_markup_paid_paise, server_status) VALUES ('kist-woff-1', 'loan-woff', 1, '2026-01-01', '2026-01-01', 100000, 10000, 110000, 0, 0, 'PENDING', 0, 0, 'PENDING')`);
 
     // Server sends a penalty assessment delta
@@ -2237,7 +2277,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-disc', 'Discard Borrower', '9876543115', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-disc', 'b-disc', 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-disc', 'b-disc', 1000, 0.0, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`INSERT INTO repayment_schedules (id, loan_id, installment_number, original_due_date, effective_due_date, principal_component_paise, markup_component_paise, total_due_paise, principal_paid_paise, markup_paid_paise, status) VALUES ('kist-disc-1', 'loan-disc', 1, '2026-01-01', '2026-01-01', 1000, 0, 1000, 0, 0, 'PENDING')`);
 
     // Record a 500-paise cash payment
@@ -2288,7 +2328,7 @@ describe('Real SQLite Engine Integration Guarantees', () => {
     const db = createRealSqliteDb();
 
     await db.runAsync(`INSERT INTO borrowers VALUES ('b-rev', 'Borrower Review', '9876543118', '2026-01-01')`);
-    await db.runAsync(`INSERT INTO loans VALUES ('loan-rev', 'b-rev', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
+    await db.runAsync(`INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at) VALUES ('loan-rev', 'b-rev', 100000, 0.1, 1, '2026-01-01', 1, 'instalment', 'ACTIVE', '2026-01-01')`);
     await db.runAsync(`
       INSERT INTO repayment_schedules (
         id, loan_id, installment_number, original_due_date, effective_due_date,

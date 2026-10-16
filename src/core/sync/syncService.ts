@@ -170,26 +170,145 @@ export class SyncService {
     } else if (record_type === 'LOAN') {
       if (operation_type === 'INSERT') {
         await tx.runAsync(
-          `INSERT INTO loans (id, borrower_id, principal_paise, markup_factor, term_months, start_date, due_day, product_type, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET status = excluded.status`,
+          `INSERT INTO loans (
+             id, borrower_id, principal_paise, markup_factor, annual_rate, rate_basis,
+             interest_paise, total_paise, maturity_date, term_months, start_date, due_day,
+             product_type, collateral, status, created_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             status = excluded.status,
+             annual_rate = excluded.annual_rate,
+             rate_basis = excluded.rate_basis,
+             interest_paise = excluded.interest_paise,
+             total_paise = excluded.total_paise,
+             maturity_date = excluded.maturity_date,
+             term_months = excluded.term_months,
+             collateral = excluded.collateral`,
           [
             payload.id,
             payload.borrower_id,
             payload.principal_paise,
-            parseFloat(payload.markup_factor),
+            parseFloat(payload.markup_factor) || 0,
+            payload.annual_rate || 0,
+            payload.rate_basis || 'ANNUAL_SIMPLE_FLAT',
+            payload.interest_paise || 0,
+            payload.total_paise || payload.principal_paise,
+            payload.maturity_date || null,
             payload.term_months,
             payload.start_date,
             payload.due_day,
             payload.product_type,
+            payload.collateral || null,
             payload.status || 'ACTIVE',
             payload.created_at || new Date().toISOString(),
           ]
         );
       } else if (operation_type === 'UPDATE') {
-        if (payload.status) {
-          await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [payload.status, payload.id]);
+        const updateFields: string[] = [];
+        const updateParams: any[] = [];
+        if (payload.status !== undefined) {
+          updateFields.push('status = ?');
+          updateParams.push(payload.status);
         }
+        if (payload.annual_rate !== undefined) {
+          updateFields.push('annual_rate = ?');
+          updateParams.push(payload.annual_rate);
+        }
+        if (payload.rate_basis !== undefined) {
+          updateFields.push('rate_basis = ?');
+          updateParams.push(payload.rate_basis);
+        }
+        if (payload.interest_paise !== undefined) {
+          updateFields.push('interest_paise = ?');
+          updateParams.push(payload.interest_paise);
+        }
+        if (payload.total_paise !== undefined) {
+          updateFields.push('total_paise = ?');
+          updateParams.push(payload.total_paise);
+        }
+        if (payload.maturity_date !== undefined) {
+          updateFields.push('maturity_date = ?');
+          updateParams.push(payload.maturity_date);
+        }
+        if (payload.term_months !== undefined) {
+          updateFields.push('term_months = ?');
+          updateParams.push(payload.term_months);
+        }
+        if (payload.collateral !== undefined) {
+          updateFields.push('collateral = ?');
+          updateParams.push(payload.collateral);
+        }
+        if (updateFields.length > 0) {
+          updateParams.push(payload.id);
+          await tx.runAsync(`UPDATE loans SET ${updateFields.join(', ')} WHERE id = ?`, updateParams);
+        }
+      }
+    } else if (record_type === 'LOAN_TERM') {
+      if (operation_type === 'INSERT') {
+        await tx.runAsync(
+          `INSERT INTO loan_terms (
+             id, loan_id, term_number, duration_months, annual_rate, interest_paise,
+             start_date, maturity_date, interest_settled, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             interest_settled = excluded.interest_settled`,
+          [
+            payload.id,
+            payload.loan_id,
+            payload.term_number,
+            payload.duration_months,
+            payload.annual_rate,
+            payload.interest_paise,
+            payload.start_date,
+            payload.maturity_date,
+            payload.interest_settled ? 1 : 0,
+            payload.created_at || new Date().toISOString(),
+          ]
+        );
+      } else if (operation_type === 'UPDATE') {
+        await tx.runAsync(
+          `UPDATE loan_terms SET interest_settled = ? WHERE id = ?`,
+          [payload.interest_settled ? 1 : 0, payload.id]
+        );
+      }
+    } else if (record_type === 'LOAN_ATTACHMENT') {
+      if (operation_type === 'INSERT') {
+        await tx.runAsync(
+          `INSERT INTO loan_attachments (id, loan_id, file_path, doc_type, notes, synced, created_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?)
+           ON CONFLICT(id) DO UPDATE SET notes = excluded.notes, synced = 1`,
+          [
+            payload.id,
+            payload.loan_id,
+            payload.file_path,
+            payload.doc_type,
+            payload.notes || null,
+            payload.created_at || new Date().toISOString(),
+          ]
+        );
+      }
+    } else if (record_type === 'PAYMENT_CORRECTION') {
+      if (operation_type === 'INSERT') {
+        await tx.runAsync(
+          `INSERT INTO payment_corrections (
+             id, loan_id, original_transaction_id, reversal_transaction_id,
+             replacement_transaction_id, previous_amount_paise, corrected_amount_paise,
+             reason, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO NOTHING`,
+          [
+            payload.id,
+            payload.loan_id,
+            payload.original_transaction_id,
+            payload.reversal_transaction_id,
+            payload.replacement_transaction_id,
+            payload.previous_amount_paise,
+            payload.corrected_amount_paise,
+            payload.reason,
+            payload.created_at || new Date().toISOString(),
+          ]
+        );
       }
     } else if (record_type === 'KIST') {
       if (operation_type === 'INSERT') {
@@ -325,8 +444,9 @@ export class SyncService {
             `INSERT INTO transactions (
                id, operation_id, loan_id, transaction_type, is_cash, payment_method,
                amount_paise, allocated_principal_paise, allocated_markup_paise, allocated_penalty_paise,
-               unallocated_surplus_paise, forgiven_penalty_paise, effective_date, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               unallocated_surplus_paise, forgiven_penalty_paise, effective_date,
+               reversal_of_id, correction_reason, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               payload.id,
               payload.operation_id,
@@ -341,6 +461,8 @@ export class SyncService {
               payload.unallocated_surplus_paise || 0,
               payload.forgiven_penalty_paise || 0,
               payload.effective_date,
+              payload.reversal_of_id || null,
+              payload.correction_reason || null,
               payload.created_at || new Date().toISOString(),
             ]
           );
