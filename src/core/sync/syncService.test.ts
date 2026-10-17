@@ -424,17 +424,17 @@ describe('SyncService & OutboxManager', () => {
       );
     });
 
-    it('reports failure, halts pull, and protects local state when push has failed operations', async () => {
+    it('reports failure and review required when push has failed operations while still pulling authoritative server state', async () => {
       const pushSpy = jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
       const pullSpy = jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });
 
       try {
         const res = await SyncService.syncAll(mockDb);
         expect(res.success).toBe(false);
-        expect(res.pulledCount).toBe(0);
-        expect(pullSpy).not.toHaveBeenCalled();
+        expect(res.pulledCount).toBe(5);
+        expect(pullSpy).toHaveBeenCalled();
         expect(res.errors).toBeDefined();
-        expect(res.errors![0]).toContain('failed to push to server; pull halted to protect local state');
+        expect(res.errors![0]).toContain('failed during push and require review');
       } finally {
         pushSpy.mockRestore();
         pullSpy.mockRestore();

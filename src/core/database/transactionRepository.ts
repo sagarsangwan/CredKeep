@@ -121,7 +121,7 @@ export class TransactionRepository {
 
           // Update terms settled if interest paid
           if ((pastMarkupPaid + allocatedMarkup) >= totalContractInterest) {
-            await tx.runAsync(`UPDATE loan_terms SET interest_settled = 1 WHERE loan_id = ?`, [loanId]);
+            await tx.runAsync(`UPDATE loan_terms SET interest_settled = 1, settled = 1 WHERE loan_id = ?`, [loanId]);
           }
 
           // Check if loan should be marked settled
@@ -349,6 +349,31 @@ export class TransactionRepository {
     clientOpId?: string
   ): Promise<{ reversalTransactionId: string; replacementTransactionId: string | null }> {
     const opId = clientOpId || ((crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('corr-' + Date.now() + '-' + Math.random().toString(36).substring(2)));
+
+    // Idempotency pre-check
+    if (clientOpId) {
+      const existingOutbox = await this.db.getFirstAsync<any>(
+        `SELECT * FROM sync_outbox WHERE operation_id = ?`,
+        [clientOpId]
+      );
+      if (existingOutbox) {
+        const existingReversal = await this.db.getFirstAsync<any>(
+          `SELECT id FROM transactions WHERE operation_id = ?`,
+          [`reversal-${clientOpId}`]
+        );
+        const existingRepl = await this.db.getFirstAsync<any>(
+          `SELECT id FROM transactions WHERE operation_id = ?`,
+          [clientOpId]
+        );
+        if (existingReversal) {
+          return {
+            reversalTransactionId: existingReversal.id,
+            replacementTransactionId: existingRepl ? existingRepl.id : null,
+          };
+        }
+      }
+    }
+
     let reversalTxId = '';
     let replacementTxId: string | null = null;
 
@@ -403,53 +428,9 @@ export class TransactionRepository {
         now
       ]);
 
-      // 2. Insert replacement COLLECTION transaction if correctedPaise > 0
-      if (correctedPaise > 0) {
-        replacementTxId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('repl-' + Date.now() + '-' + Math.random().toString(36).substring(2));
-        await tx.runAsync(`
-          INSERT INTO transactions (
-            id, operation_id, loan_id, transaction_type, is_cash, payment_method,
-            amount_paise, allocated_principal_paise, allocated_markup_paise,
-            allocated_penalty_paise, unallocated_surplus_paise, effective_date,
-            reversal_of_id, correction_reason, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [
-          replacementTxId,
-          opId,
-          orig.loan_id,
-          'COLLECTION',
-          orig.is_cash,
-          orig.payment_method,
-          correctedPaise,
-          0, 0, 0, 0,
-          orig.effective_date,
-          orig.id,
-          reason,
-          now
-        ]);
-      }
+      // 2. Recompute allocations for active collections and replacement transaction
+      let replPrin = 0, replMkp = 0, replPen = 0, replSurplus = 0;
 
-      // 3. Record in payment_corrections
-      const correctionId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('corr-rec-' + Date.now());
-      await tx.runAsync(`
-        INSERT INTO payment_corrections (
-          id, loan_id, original_transaction_id, reversal_transaction_id,
-          replacement_transaction_id, previous_amount_paise, corrected_amount_paise,
-          reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        correctionId,
-        orig.loan_id,
-        orig.id,
-        reversalTxId,
-        replacementTxId,
-        orig.amount_paise,
-        correctedPaise,
-        reason,
-        now
-      ]);
-
-      // 4. Recompute loan state
       if (loan.product_type === 'instalment' || loan.rate_basis === 'LEGACY_FIXED_TERM') {
         // Reset kists
         await tx.runAsync(`
@@ -458,13 +439,25 @@ export class TransactionRepository {
           WHERE loan_id = ?
         `, [orig.loan_id]);
 
-        // Fetch all active non-reversed collections ordered by effective_date, created_at
-        const activeCollections = await tx.getAllAsync<any>(`
+        // Fetch past non-reversed collections excluding the one being reversed
+        const pastCollections = await tx.getAllAsync<any>(`
           SELECT * FROM transactions
           WHERE loan_id = ? AND transaction_type = 'COLLECTION'
+            AND id != ?
             AND id NOT IN (SELECT reversal_of_id FROM transactions WHERE loan_id = ? AND transaction_type = 'REVERSAL' AND reversal_of_id IS NOT NULL)
           ORDER BY effective_date ASC, created_at ASC
-        `, [orig.loan_id, orig.loan_id]);
+        `, [orig.loan_id, orig.id, orig.loan_id]);
+
+        const allCollectionsToReplay = [...pastCollections];
+        if (correctedPaise > 0) {
+          allCollectionsToReplay.push({
+            id: '__replacement__',
+            amount_paise: correctedPaise,
+            effective_date: orig.effective_date,
+            created_at: now,
+          });
+          allCollectionsToReplay.sort((a, b) => (a.effective_date < b.effective_date ? -1 : a.effective_date > b.effective_date ? 1 : 0));
+        }
 
         const dbKists = await tx.getAllAsync<any>(
           `SELECT * FROM repayment_schedules WHERE loan_id = ? ORDER BY installment_number ASC`,
@@ -483,7 +476,7 @@ export class TransactionRepository {
           isDue: true
         }));
 
-        for (const col of activeCollections) {
+        for (const col of allCollectionsToReplay) {
           const penaltyAssessments = await tx.getFirstAsync<any>(
             `SELECT SUM(amount_paise) as total FROM transactions WHERE loan_id = ? AND transaction_type = 'PENALTY_ASSESSMENT' AND effective_date <= ?`,
             [orig.loan_id, col.effective_date]
@@ -496,15 +489,11 @@ export class TransactionRepository {
             pMkp += a.allocatedToMarkup;
             pPen += a.allocatedToPenalty;
           }
-          if (col.id === replacementTxId) {
-            await tx.runAsync(`
-              UPDATE transactions SET
-                allocated_principal_paise = ?,
-                allocated_markup_paise = ?,
-                allocated_penalty_paise = ?,
-                unallocated_surplus_paise = ?
-              WHERE id = ?
-            `, [pPrin, pMkp, pPen, res.unallocatedFunds, replacementTxId]);
+          if (col.id === '__replacement__') {
+            replPrin = pPrin;
+            replMkp = pMkp;
+            replPen = pPen;
+            replSurplus = res.unallocatedFunds;
           }
           kists = res.updatedKists;
         }
@@ -530,12 +519,24 @@ export class TransactionRepository {
         }
       } else {
         // Bullet with ANNUAL_SIMPLE_FLAT
-        const activeCollections = await tx.getAllAsync<any>(`
+        const pastCollections = await tx.getAllAsync<any>(`
           SELECT * FROM transactions
           WHERE loan_id = ? AND transaction_type = 'COLLECTION'
+            AND id != ?
             AND id NOT IN (SELECT reversal_of_id FROM transactions WHERE loan_id = ? AND transaction_type = 'REVERSAL' AND reversal_of_id IS NOT NULL)
           ORDER BY effective_date ASC, created_at ASC
-        `, [orig.loan_id, orig.loan_id]);
+        `, [orig.loan_id, orig.id, orig.loan_id]);
+
+        const allCollectionsToReplay = [...pastCollections];
+        if (correctedPaise > 0) {
+          allCollectionsToReplay.push({
+            id: '__replacement__',
+            amount_paise: correctedPaise,
+            effective_date: orig.effective_date,
+            created_at: now,
+          });
+          allCollectionsToReplay.sort((a, b) => (a.effective_date < b.effective_date ? -1 : a.effective_date > b.effective_date ? 1 : 0));
+        }
 
         const terms = await tx.getAllAsync<any>(
           `SELECT * FROM loan_terms WHERE loan_id = ? ORDER BY term_number ASC`,
@@ -546,7 +547,7 @@ export class TransactionRepository {
         let cumulativeMkpPaid = 0;
         let cumulativePrinPaid = 0;
 
-        for (const col of activeCollections) {
+        for (const col of allCollectionsToReplay) {
           let unallocated = col.amount_paise;
           const unpaidInterest = Math.max(0, totalContractInterest - cumulativeMkpPaid);
           const aMkp = Math.min(unallocated, unpaidInterest);
@@ -558,22 +559,18 @@ export class TransactionRepository {
           unallocated -= aPrin;
           cumulativePrinPaid += aPrin;
 
-          if (col.id === replacementTxId) {
-            await tx.runAsync(`
-              UPDATE transactions SET
-                allocated_principal_paise = ?,
-                allocated_markup_paise = ?,
-                allocated_penalty_paise = 0,
-                unallocated_surplus_paise = ?
-              WHERE id = ?
-            `, [aPrin, aMkp, unallocated, replacementTxId]);
+          if (col.id === '__replacement__') {
+            replPrin = aPrin;
+            replMkp = aMkp;
+            replPen = 0;
+            replSurplus = unallocated;
           }
         }
 
         if (cumulativeMkpPaid >= totalContractInterest) {
-          await tx.runAsync(`UPDATE loan_terms SET interest_settled = 1 WHERE loan_id = ?`, [orig.loan_id]);
+          await tx.runAsync(`UPDATE loan_terms SET interest_settled = 1, settled = 1 WHERE loan_id = ?`, [orig.loan_id]);
         } else {
-          await tx.runAsync(`UPDATE loan_terms SET interest_settled = 0 WHERE loan_id = ?`, [orig.loan_id]);
+          await tx.runAsync(`UPDATE loan_terms SET interest_settled = 0, settled = 0 WHERE loan_id = ?`, [orig.loan_id]);
         }
 
         if (cumulativePrinPaid >= loan.principal_paise && cumulativeMkpPaid >= totalContractInterest) {
@@ -582,6 +579,58 @@ export class TransactionRepository {
           await tx.runAsync(`UPDATE loans SET status = 'ACTIVE' WHERE id = ?`, [orig.loan_id]);
         }
       }
+
+      // 3. Insert replacement COLLECTION transaction ONCE with final allocations (append-only)
+      if (correctedPaise > 0) {
+        replacementTxId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('repl-' + Date.now() + '-' + Math.random().toString(36).substring(2));
+        await tx.runAsync(`
+          INSERT INTO transactions (
+            id, operation_id, loan_id, transaction_type, is_cash, payment_method,
+            amount_paise, allocated_principal_paise, allocated_markup_paise,
+            allocated_penalty_paise, unallocated_surplus_paise, effective_date,
+            reversal_of_id, correction_reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          replacementTxId,
+          opId,
+          orig.loan_id,
+          'COLLECTION',
+          orig.is_cash,
+          orig.payment_method,
+          correctedPaise,
+          replPrin,
+          replMkp,
+          replPen,
+          replSurplus,
+          orig.effective_date,
+          orig.id,
+          reason,
+          now
+        ]);
+      }
+
+      // 4. Record in payment_corrections
+      const correctionId = (crypto?.randomUUID ? crypto.randomUUID() : '') || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : '') || ('corr-rec-' + Date.now());
+      await tx.runAsync(`
+        INSERT INTO payment_corrections (
+          id, loan_id, original_transaction_id, original_operation_id, reversal_transaction_id,
+          replacement_transaction_id, original_amount_paise, previous_amount_paise, corrected_amount_paise,
+          reason, operation_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        correctionId,
+        orig.loan_id,
+        orig.id,
+        orig.operation_id,
+        reversalTxId,
+        replacementTxId,
+        orig.amount_paise,
+        orig.amount_paise,
+        correctedPaise,
+        reason,
+        opId,
+        now
+      ]);
 
       // 5. Enqueue outbox operation for sync
       await OutboxManager.enqueue(tx, {

@@ -33,11 +33,11 @@ export default function WelcomeScreen() {
           </Typography>
         </View>
 
-        <Card style={styles.featureCard}>
-          <Typography variant="headlineSm" color={theme.colors.onPrimary} style={styles.featureTitle}>
+        <Card variant="soft" style={styles.featureCard}>
+          <Typography variant="headlineSm" color={theme.colors.textPrimary} style={styles.featureTitle}>
             Secure Offline-First Ledger
           </Typography>
-          <Typography variant="bodyMd" color={theme.colors.onPrimaryContainer} style={styles.featureBody}>
+          <Typography variant="bodyMd" color={theme.colors.textSecondary} style={styles.featureBody}>
             • Hardware-backed SQLCipher 256-bit encryption{'\n'}
             • Full lending passbook, kist collection & schedule engine{'\n'}
             • Continuous cloud synchronization across your devices

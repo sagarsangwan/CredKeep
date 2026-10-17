@@ -61,10 +61,10 @@ export class SyncService {
             await this.revertRejectedPayment(db, res.operation_id, res.error);
             batchFailed++;
           } else if (res.status === 'FAILED') {
-            await OutboxManager.markStatus(db, res.operation_id, 'PENDING', res.error);
+            await OutboxManager.markStatus(db, res.operation_id, 'NEEDS_REVIEW', res.error);
             batchFailed++;
           } else {
-            await OutboxManager.markStatus(db, res.operation_id, res.status, res.error);
+            await OutboxManager.markStatus(db, res.operation_id, 'NEEDS_REVIEW', res.error || res.status);
             batchFailed++;
           }
         }
@@ -72,7 +72,7 @@ export class SyncService {
         // Validate that every submitted operation received an acknowledgment result
         for (const op of operations) {
           if (!acknowledgedOpIds.has(op.operation_id)) {
-            await OutboxManager.markStatus(db, op.operation_id, 'PENDING', 'Missing server result in push response');
+            await OutboxManager.markStatus(db, op.operation_id, 'NEEDS_REVIEW', 'Missing server result in push response');
             batchFailed++;
           }
         }
@@ -245,14 +245,16 @@ export class SyncService {
         }
       }
     } else if (record_type === 'LOAN_TERM') {
+      const isSettled = (payload.interest_settled !== undefined ? payload.interest_settled : (payload.settled ? 1 : 0)) ? 1 : 0;
       if (operation_type === 'INSERT') {
         await tx.runAsync(
           `INSERT INTO loan_terms (
              id, loan_id, term_number, duration_months, annual_rate, interest_paise,
-             start_date, maturity_date, interest_settled, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             start_date, maturity_date, interest_settled, settled, operation_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
-             interest_settled = excluded.interest_settled`,
+             interest_settled = excluded.interest_settled,
+             settled = excluded.settled`,
           [
             payload.id,
             payload.loan_id,
@@ -262,27 +264,42 @@ export class SyncService {
             payload.interest_paise,
             payload.start_date,
             payload.maturity_date,
-            payload.interest_settled ? 1 : 0,
+            isSettled,
+            isSettled,
+            payload.operation_id || null,
             payload.created_at || new Date().toISOString(),
           ]
         );
       } else if (operation_type === 'UPDATE') {
         await tx.runAsync(
-          `UPDATE loan_terms SET interest_settled = ? WHERE id = ?`,
-          [payload.interest_settled ? 1 : 0, payload.id]
+          `UPDATE loan_terms SET interest_settled = ?, settled = ? WHERE id = ?`,
+          [isSettled, isSettled, payload.id]
         );
       }
     } else if (record_type === 'LOAN_ATTACHMENT') {
       if (operation_type === 'INSERT') {
+        const docType = payload.doc_type || payload.document_type || 'OTHER';
+        const filePath = payload.file_path || payload.file_name || payload.storage_key || '';
+        const fileName = payload.file_name || (filePath ? filePath.split('/').pop()?.split('\\').pop() : 'attachment') || 'attachment';
         await tx.runAsync(
-          `INSERT INTO loan_attachments (id, loan_id, file_path, doc_type, notes, synced, created_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?)
-           ON CONFLICT(id) DO UPDATE SET notes = excluded.notes, synced = 1`,
+          `INSERT INTO loan_attachments (
+             id, loan_id, file_path, file_name, doc_type, document_type, notes, synced, sync_status, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'SYNCED', ?)
+           ON CONFLICT(id) DO UPDATE SET
+             file_path = excluded.file_path,
+             file_name = excluded.file_name,
+             doc_type = excluded.doc_type,
+             document_type = excluded.document_type,
+             notes = excluded.notes,
+             synced = 1,
+             sync_status = 'SYNCED'`,
           [
             payload.id,
             payload.loan_id,
-            payload.file_path,
-            payload.doc_type,
+            filePath,
+            fileName,
+            docType,
+            docType,
             payload.notes || null,
             payload.created_at || new Date().toISOString(),
           ]
@@ -290,22 +307,26 @@ export class SyncService {
       }
     } else if (record_type === 'PAYMENT_CORRECTION') {
       if (operation_type === 'INSERT') {
+        const origAmt = payload.original_amount_paise ?? payload.previous_amount_paise ?? 0;
         await tx.runAsync(
           `INSERT INTO payment_corrections (
-             id, loan_id, original_transaction_id, reversal_transaction_id,
-             replacement_transaction_id, previous_amount_paise, corrected_amount_paise,
-             reason, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             id, loan_id, original_transaction_id, original_operation_id, reversal_transaction_id,
+             replacement_transaction_id, original_amount_paise, previous_amount_paise, corrected_amount_paise,
+             reason, operation_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`,
           [
             payload.id,
             payload.loan_id,
             payload.original_transaction_id,
+            payload.original_operation_id || null,
             payload.reversal_transaction_id,
-            payload.replacement_transaction_id,
-            payload.previous_amount_paise,
+            payload.replacement_transaction_id || null,
+            origAmt,
+            origAmt,
             payload.corrected_amount_paise,
             payload.reason,
+            payload.operation_id || null,
             payload.created_at || new Date().toISOString(),
           ]
         );
@@ -1154,23 +1175,18 @@ export class SyncService {
   static async syncAll(db: SQLiteDatabase): Promise<SyncResult> {
     try {
       const pushRes = await this.pushPending(db);
-      if (pushRes.failed > 0) {
-        return {
-          pushedCount: pushRes.pushed,
-          pulledCount: 0,
-          success: false,
-          errors: [`${pushRes.failed} operations failed to push to server; pull halted to protect local state`],
-        };
-      }
       const pullRes = await this.pullChanges(db);
       const needsReviewItems = await OutboxManager.getNeedsReview(db);
-      if (needsReviewItems.length > 0) {
+      if (needsReviewItems.length > 0 || pushRes.failed > 0) {
         return {
           pushedCount: pushRes.pushed,
           pulledCount: pullRes.pulled,
           needsReviewCount: needsReviewItems.length,
           success: false,
-          errors: [`${needsReviewItems.length} operation(s) require review due to server conflicts`],
+          errors: [
+            ...(pushRes.failed > 0 ? [`${pushRes.failed} operation(s) failed during push and require review.`] : []),
+            ...(needsReviewItems.length > 0 ? [`${needsReviewItems.length} operation(s) require review due to server conflicts.`] : []),
+          ],
         };
       }
       return {

@@ -1188,7 +1188,7 @@ class SyncPushView(APIView):
             except (LoanAccount.DoesNotExist, ValueError):
                 return 'REJECTED', f'Loan {loan_id_raw} not found for this tenant.'
 
-            doc_type = payload.get('document_type', 'OTHER')
+            doc_type = payload.get('document_type') or payload.get('doc_type', 'OTHER')
             file_name = payload.get('file_name', 'attachment')
             file_size = payload.get('file_size', 0)
             notes = payload.get('notes', '')
@@ -1212,6 +1212,7 @@ class SyncPushView(APIView):
                     'id': str(att.id),
                     'loan_id': str(loan.id),
                     'document_type': att.document_type,
+                    'doc_type': att.document_type,
                     'file_name': att.file_name,
                     'file_size': att.file_size,
                     'notes': att.notes

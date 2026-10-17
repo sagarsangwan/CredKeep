@@ -35,16 +35,32 @@ export type LoanTerm = {
   start_date: string;
   maturity_date: string;
   interest_settled: number;
+  settled?: number;
+  operation_id?: string | null;
   created_at: string;
 };
+
+export type LoanAttachmentInput = {
+  uri?: string;
+  file_path?: string;
+  doc_type: string;
+  notes?: string;
+};
+
+export interface CreateLoanOptions extends ScheduleOptions {
+  attachments?: LoanAttachmentInput[];
+}
 
 export type LoanAttachment = {
   id: string;
   loan_id: string;
   file_path: string;
+  file_name?: string;
   doc_type: string;
+  document_type?: string;
   notes?: string | null;
   synced: number;
+  sync_status?: string;
   created_at: string;
 };
 
@@ -73,7 +89,7 @@ export class LoanRepository {
 
   async createLoanWithSchedule(
     borrowerId: string, 
-    options: ScheduleOptions,
+    options: CreateLoanOptions,
     clientOpId?: string
   ): Promise<Loan> {
     let resolvedLoan: Loan | null = null;
@@ -162,8 +178,8 @@ export class LoanRepository {
         await txHandle.runAsync(
           `INSERT INTO loan_terms (
             id, loan_id, term_number, duration_months, annual_rate, interest_paise,
-            start_date, maturity_date, interest_settled, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            start_date, maturity_date, interest_settled, settled, operation_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             generateUuid(),
             loanId,
@@ -174,6 +190,8 @@ export class LoanRepository {
             options.startDate,
             maturityDate,
             0,
+            0,
+            clientOpId || null,
             created_at,
           ]
         );
@@ -201,6 +219,43 @@ export class LoanRepository {
           }
         } finally {
           await statement.finalizeAsync();
+        }
+      }
+
+      if (options.attachments && options.attachments.length > 0) {
+        for (const att of options.attachments) {
+          const attPath = att.file_path || att.uri || '';
+          const fileName = attPath.split('/').pop()?.split('\\').pop() || 'attachment';
+          const attId = generateUuid();
+          await txHandle.runAsync(
+            `INSERT INTO loan_attachments (
+              id, loan_id, file_path, file_name, doc_type, document_type, notes, synced, sync_status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'LOCAL_ONLY', ?)`,
+            [
+              attId,
+              loanId,
+              attPath,
+              fileName,
+              att.doc_type,
+              att.doc_type,
+              att.notes || null,
+              created_at,
+            ]
+          );
+
+          await OutboxManager.enqueue(txHandle, {
+            operationId: `att-${attId}`,
+            operationType: 'upload_attachment_metadata',
+            payload: {
+              id: attId,
+              loan_id: loanId,
+              file_path: attPath,
+              file_name: fileName,
+              doc_type: att.doc_type,
+              document_type: att.doc_type,
+              notes: att.notes || null,
+            },
+          });
         }
       }
 
@@ -326,6 +381,25 @@ export class LoanRepository {
     clientOpId?: string
   ): Promise<{ loan: Loan; term: LoanTerm }> {
     const opId = clientOpId || generateUuid();
+
+    // Idempotency pre-check
+    if (clientOpId) {
+      const existingOutbox = await this.db.getFirstAsync<any>(
+        `SELECT * FROM sync_outbox WHERE operation_id = ?`,
+        [clientOpId]
+      );
+      if (existingOutbox) {
+        const existingLoan = await this.getById(loanId);
+        const existingTerm = await this.db.getFirstAsync<LoanTerm>(
+          `SELECT * FROM loan_terms WHERE loan_id = ? ORDER BY term_number DESC LIMIT 1`,
+          [loanId]
+        );
+        if (existingLoan && existingTerm) {
+          return { loan: existingLoan, term: existingTerm };
+        }
+      }
+    }
+
     let updatedLoan: Loan | null = null;
     let createdTerm: LoanTerm | null = null;
 
@@ -342,7 +416,7 @@ export class LoanRepository {
       );
 
       const lastTerm = terms.length > 0 ? terms[terms.length - 1] : null;
-      if (lastTerm && !lastTerm.interest_settled) {
+      if (lastTerm && !lastTerm.interest_settled && !lastTerm.settled) {
         if (interestCollectedPaise < lastTerm.interest_paise) {
           throw new Error(
             `Prior term's contractual interest must be fully settled before extending the loan. Required: ${lastTerm.interest_paise} paise, collected: ${interestCollectedPaise} paise.`
@@ -387,7 +461,7 @@ export class LoanRepository {
 
         if (lastTerm) {
           await txHandle.runAsync(
-            `UPDATE loan_terms SET interest_settled = 1 WHERE id = ?`,
+            `UPDATE loan_terms SET interest_settled = 1, settled = 1 WHERE id = ?`,
             [lastTerm.id]
           );
         }
@@ -396,8 +470,8 @@ export class LoanRepository {
       await txHandle.runAsync(
         `INSERT INTO loan_terms (
           id, loan_id, term_number, duration_months, annual_rate, interest_paise,
-          start_date, maturity_date, interest_settled, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          start_date, maturity_date, interest_settled, settled, operation_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           termId,
           loanId,
@@ -408,6 +482,8 @@ export class LoanRepository {
           startDate,
           maturityDate,
           0,
+          0,
+          opId,
           createdAt,
         ]
       );
@@ -433,6 +509,7 @@ export class LoanRepository {
           loan_id: loanId,
           additional_months: additionalMonths,
           interest_collected_paise: interestCollectedPaise,
+          effective_date: todayStr,
         },
       });
 
@@ -488,13 +565,24 @@ export class LoanRepository {
     const opId = clientOpId || generateUuid();
     const id = generateUuid();
     const createdAt = new Date().toISOString();
+    const fileName = attachment.file_path ? attachment.file_path.split('/').pop()?.split('\\').pop() || 'attachment' : 'attachment';
 
     await withDbTransaction(this.db, async (tx) => {
       const txHandle = tx || this.db;
       await txHandle.runAsync(
-        `INSERT INTO loan_attachments (id, loan_id, file_path, doc_type, notes, synced, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, attachment.loan_id, attachment.file_path, attachment.doc_type, attachment.notes || null, 0, createdAt]
+        `INSERT INTO loan_attachments (
+          id, loan_id, file_path, file_name, doc_type, document_type, notes, synced, sync_status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'LOCAL_ONLY', ?)`,
+        [
+          id,
+          attachment.loan_id,
+          attachment.file_path,
+          fileName,
+          attachment.doc_type,
+          attachment.doc_type,
+          attachment.notes || null,
+          createdAt,
+        ]
       );
 
       await OutboxManager.enqueue(txHandle, {
@@ -504,7 +592,9 @@ export class LoanRepository {
           id,
           loan_id: attachment.loan_id,
           file_path: attachment.file_path,
+          file_name: fileName,
           doc_type: attachment.doc_type,
+          document_type: attachment.doc_type,
           notes: attachment.notes || null,
         },
       });

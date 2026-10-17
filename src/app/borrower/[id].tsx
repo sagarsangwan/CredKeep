@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { View, StyleSheet, ScrollView, TouchableOpacity, Linking, Alert, Modal, KeyboardAvoidingView, Platform } from 'react-native';
-import { useLocalSearchParams, Stack, useRouter } from 'expo-router';
-import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
-import { Phone, Plus, CreditCard, Edit3 } from 'lucide-react-native';
+import { useLocalSearchParams, Stack, useRouter, useFocusEffect } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Phone, Edit3, ChevronRight } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { Card } from '../../ui/Card';
 import { Button } from '../../ui/Button';
@@ -33,6 +33,7 @@ export default function BorrowerDetailsScreen() {
   const [isEditModalVisible, setEditModalVisible] = useState(false);
   const [editName, setEditName] = useState('');
   const [editPhone, setEditPhone] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const loadData = useCallback(async () => {
     if (borrowers && loans && transactions && id) {
@@ -48,19 +49,20 @@ export default function BorrowerDetailsScreen() {
         console.error(e);
       }
     }
-  }, [id, borrowers, loans, transactions]);
+  }, [id, borrowers, loans, transactions, refreshVersion]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadData();
-  }, [loadData, refreshVersion]);
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [loadData])
+  );
 
   if (!borrower) {
     return (
       <SafeAreaView style={styles.safeArea} edges={['bottom', 'left', 'right']}>
-        <Stack.Screen options={{ title: 'Customer Profile', headerShown: true }} />
+        <Stack.Screen options={{ title: 'Borrower Profile', headerShown: true }} />
         <View style={[styles.container, styles.centered]}>
-          <Typography variant="bodyLg">Loading customer...</Typography>
+          <Typography variant="bodyMd" color={theme.colors.textSecondary}>Loading profile...</Typography>
         </View>
       </SafeAreaView>
     );
@@ -69,16 +71,16 @@ export default function BorrowerDetailsScreen() {
   const getInitials = (name: string) => {
     return name
       .split(' ')
-      .map((n) => n[0])
-      .join('')
-      .substring(0, 2)
-      .toUpperCase();
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((n) => n[0].toUpperCase())
+      .join('');
   };
 
   const handleCall = () => {
     if (borrower.phone) {
       Linking.openURL(`tel:${borrower.phone}`).catch(() => {
-        Alert.alert('Error', 'Unable to make a call');
+        Alert.alert('Error', 'Unable to initiate phone call on this device.');
       });
     }
   };
@@ -91,7 +93,7 @@ export default function BorrowerDetailsScreen() {
 
   const handleSaveEdit = async () => {
     if (!editName.trim() || !editPhone.trim()) {
-      Alert.alert('Error', 'Please provide both name and phone number.');
+      Alert.alert('Required Fields', 'Please provide both name and phone number.');
       return;
     }
 
@@ -101,136 +103,146 @@ export default function BorrowerDetailsScreen() {
     }
 
     try {
+      setSaving(true);
       const updated = await borrowers.update(borrower.id, editName.trim(), editPhone.trim());
       setBorrower(updated);
       setEditModalVisible(false);
       triggerRefresh();
-      Alert.alert('Success', 'Customer details updated successfully.');
+      Alert.alert('Success', 'Borrower details updated successfully.');
     } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Failed to update customer details.');
+      Alert.alert('Error', err?.message || 'Failed to update borrower details.');
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom', 'left', 'right']}>
-      <Stack.Screen options={{ title: 'Customer Profile', headerShown: true }} />
+      <Stack.Screen
+        options={{
+          title: borrower.name,
+          headerShown: true,
+          headerTintColor: theme.colors.textPrimary,
+          headerStyle: { backgroundColor: theme.colors.background },
+        }}
+      />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         {/* Profile Card */}
-        <View style={styles.profileHeader}>
-          <View style={styles.avatar}>
-            <Typography variant="headlineMd" color={theme.colors.onPrimary}>
-              {getInitials(borrower.name)}
-            </Typography>
-          </View>
-          <View style={styles.profileInfo}>
-            <Typography variant="headlineMd" color={theme.colors.onBackground}>
-              {borrower.name}
-            </Typography>
-            <View style={styles.phoneRow}>
-              <Typography variant="bodyMd" color={theme.colors.onSurfaceVariant}>
+        <Card style={styles.profileCard}>
+          <View style={styles.profileHeader}>
+            <View style={styles.avatar}>
+              <Typography variant="headlineSm" color={theme.colors.textPrimary} style={{ fontWeight: '700' }}>
+                {getInitials(borrower.name)}
+              </Typography>
+            </View>
+            <View style={styles.profileInfo}>
+              <Typography variant="headlineSm" color={theme.colors.textPrimary} style={{ fontWeight: '700' }}>
+                {borrower.name}
+              </Typography>
+              <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 2 }}>
                 {borrower.phone}
               </Typography>
-              <TouchableOpacity onPress={handleCall} style={styles.callButton}>
-                <Phone size={15} color={theme.colors.primary} />
-                <Typography variant="labelMd" color={theme.colors.primary} style={{ marginLeft: 4 }}>
-                  Call
-                </Typography>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={openEditModal} style={styles.editButton}>
-                <Edit3 size={15} color={theme.colors.secondary} />
-                <Typography variant="labelMd" color={theme.colors.secondary} style={{ marginLeft: 4 }}>
-                  Edit
-                </Typography>
-              </TouchableOpacity>
             </View>
-            <Typography variant="bodySm" color={theme.colors.onSurfaceVariant}>
-              Customer since {new Date(borrower.created_at).toLocaleDateString()}
-            </Typography>
           </View>
-        </View>
 
-        {/* Navy Summary Card */}
+          {/* Action Row */}
+          <View style={styles.actionRow}>
+            <TouchableOpacity onPress={handleCall} style={styles.actionPill}>
+              <Phone size={14} color={theme.colors.actionPrimary} />
+              <Typography variant="labelMd" color={theme.colors.textPrimary} style={{ marginLeft: 6 }}>
+                Call
+              </Typography>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={openEditModal} style={styles.actionPill}>
+              <Edit3 size={14} color={theme.colors.textSecondary} />
+              <Typography variant="labelMd" color={theme.colors.textSecondary} style={{ marginLeft: 6 }}>
+                Edit
+              </Typography>
+            </TouchableOpacity>
+          </View>
+        </Card>
+
+        {/* Total Outstanding Hero Card */}
         <Card style={styles.summaryCard}>
-          <Typography variant="bodyMd" color={theme.colors.onPrimaryContainer}>
-            Total Outstanding
+          <Typography variant="labelSm" color={theme.colors.textSecondary} style={{ letterSpacing: 0.5 }}>
+            TOTAL OUTSTANDING
           </Typography>
-          <Typography variant="rupeeDisplay" color={theme.colors.onPrimary} style={{ marginVertical: theme.spacing.sm }}>
-            {summary ? formatINR(summary.totalOutstanding as Paise) : '₹0'}
+          <Typography variant="rupeeDisplay" tabularNums color={theme.colors.textPrimary} style={{ marginVertical: 6 }}>
+            {summary ? formatINR(summary.totalOutstanding as Paise) : '₹0.00'}
           </Typography>
 
           <View style={styles.summaryBreakdownRow}>
-            <View>
-              <Typography variant="labelSm" color={theme.colors.onPrimaryContainer}>
+            <View style={styles.breakdownCol}>
+              <Typography variant="labelSm" color={theme.colors.textSecondary}>
                 PRINCIPAL
               </Typography>
-              <Typography variant="bodyMd" color={theme.colors.onPrimary}>
+              <Typography variant="titleMd" tabularNums color={theme.colors.textPrimary} style={{ fontWeight: '600', marginTop: 2 }}>
                 {summary ? formatINR(summary.totalPrincipalRemaining as Paise) : '₹0'}
               </Typography>
             </View>
-            <View>
-              <Typography variant="labelSm" color={theme.colors.onPrimaryContainer}>
+            <View style={styles.breakdownCol}>
+              <Typography variant="labelSm" color={theme.colors.textSecondary}>
                 MARKUP
               </Typography>
-              <Typography variant="bodyMd" color={theme.colors.onPrimary}>
+              <Typography variant="titleMd" tabularNums color={theme.colors.textPrimary} style={{ fontWeight: '600', marginTop: 2 }}>
                 {summary ? formatINR(summary.totalMarkupRemaining as Paise) : '₹0'}
               </Typography>
             </View>
-            <View>
-              <Typography variant="labelSm" color={theme.colors.onPrimaryContainer}>
+            <View style={styles.breakdownCol}>
+              <Typography variant="labelSm" color={theme.colors.textSecondary}>
                 PENALTY
               </Typography>
-              <Typography variant="bodyMd" color={theme.colors.warningContainer}>
+              <Typography
+                variant="titleMd"
+                tabularNums
+                color={(summary?.totalPenaltyRemaining || 0) > 0 ? theme.colors.warningText : theme.colors.textSecondary}
+                style={{ fontWeight: '600', marginTop: 2 }}
+              >
                 {summary ? formatINR(summary.totalPenaltyRemaining as Paise) : '₹0'}
               </Typography>
             </View>
           </View>
         </Card>
 
-        {/* Quick Actions */}
-        <View style={styles.actionsRow}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.primaryAction]}
-            onPress={() => router.push({ pathname: '/collections', params: { borrowerId: borrower.id } } as any)}
-          >
-            <CreditCard size={20} color={theme.colors.onPrimary} />
-            <Typography variant="labelLg" color={theme.colors.onPrimary} style={styles.actionText}>
-              Record Payment
-            </Typography>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.secondaryAction]}
-            onPress={() => router.push({ pathname: '/loans', params: { borrowerId: borrower.id, openWizard: 'true' } } as any)}
-          >
-            <Plus size={20} color={theme.colors.primary} />
-            <Typography variant="labelLg" color={theme.colors.primary} style={styles.actionText}>
-              New Loan
-            </Typography>
-          </TouchableOpacity>
+        {/* Quick Action Buttons */}
+        <View style={styles.btnRow}>
+          <View style={{ flex: 1 }}>
+            <Button
+              title="Record Payment"
+              variant="primary"
+              onPress={() => router.push({ pathname: '/collections', params: { borrowerId: borrower.id } } as any)}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Button
+              title="+ New Loan"
+              variant="outline"
+              onPress={() => router.push({ pathname: '/loan/create', params: { borrowerId: borrower.id } } as any)}
+            />
+          </View>
         </View>
 
-        {/* Associated Loans */}
-        <Typography variant="titleMd" style={styles.sectionTitle}>
-          Associated Loans ({summary?.activeLoanCount || 0} active)
+        {/* Associated Loans Section */}
+        <Typography variant="labelLg" color={theme.colors.textPrimary} style={styles.sectionTitle}>
+          Associated Loans ({borrowerLoans.length})
         </Typography>
 
         {borrowerLoans.map((loan) => (
-          <TouchableOpacity key={loan.id} onPress={() => router.push(`/loan/${loan.id}` as any)}>
-            <Card elevated style={styles.loanCard}>
+          <TouchableOpacity key={loan.id} onPress={() => router.push(`/loan/${loan.id}` as any)} activeOpacity={0.7}>
+            <Card style={styles.loanCard}>
               <View style={styles.loanCardHeader}>
-                <Typography variant="labelLg" color={theme.colors.onSurfaceVariant}>
-                  {loan.product_type === 'instalment' ? 'Monthly Instalment' : 'Bullet (Interest Only)'}
+                <Typography variant="titleMd" color={theme.colors.textPrimary} style={{ fontWeight: '600' }}>
+                  {loan.product_type === 'instalment' ? 'Monthly Instalment' : 'Bullet Loan'}
                 </Typography>
                 <View
                   style={[
                     styles.statusBadge,
-                    {
-                      backgroundColor:
-                        loan.status === 'ACTIVE'
-                          ? theme.colors.successContainer
-                          : loan.status === 'SETTLED'
-                          ? theme.colors.surfaceVariant
-                          : theme.colors.errorContainer,
-                    },
+                    loan.status === 'ACTIVE'
+                      ? styles.badgeActive
+                      : loan.status === 'SETTLED'
+                      ? styles.badgeSettled
+                      : styles.badgeDefault,
                   ]}
                 >
                   <Typography
@@ -239,8 +251,8 @@ export default function BorrowerDetailsScreen() {
                       loan.status === 'ACTIVE'
                         ? theme.colors.success
                         : loan.status === 'SETTLED'
-                        ? theme.colors.onSurfaceVariant
-                        : theme.colors.error
+                        ? theme.colors.textSecondary
+                        : theme.colors.danger
                     }
                   >
                     {loan.status}
@@ -248,132 +260,212 @@ export default function BorrowerDetailsScreen() {
                 </View>
               </View>
 
-              <Typography variant="headlineSm" style={{ marginVertical: 4 }}>
+              <Typography variant="headlineSm" tabularNums color={theme.colors.textPrimary} style={{ marginVertical: 4 }}>
                 {formatINR(loan.principal_paise as Paise)}
               </Typography>
 
-              {loan.collateral && (
-                <Typography variant="bodySm" color={theme.colors.secondary} style={{ marginBottom: 4 }}>
+              {loan.collateral ? (
+                <Typography variant="bodySm" color={theme.colors.textSecondary}>
                   Collateral: {loan.collateral}
                 </Typography>
-              )}
+              ) : null}
 
-              <Typography variant="bodySm" color={theme.colors.onSurfaceVariant}>
-                Start Date: {new Date(loan.start_date).toLocaleDateString()}
-              </Typography>
+              <View style={styles.cardFooter}>
+                <Typography variant="bodySm" color={theme.colors.textDisabled}>
+                  Disbursed {loan.start_date}
+                </Typography>
+                <ChevronRight size={16} color={theme.colors.textDisabled} />
+              </View>
             </Card>
           </TouchableOpacity>
         ))}
-
-        {/* Edit Modal */}
-        <Modal visible={isEditModalVisible} animationType="slide" presentationStyle="pageSheet">
-          <SafeAreaProvider>
-            <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.background }}>
-              <KeyboardAvoidingView
-                style={{ flex: 1 }}
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-              >
-                <View style={styles.modalHeader}>
-                  <TouchableOpacity onPress={() => setEditModalVisible(false)}>
-                    <Typography color={theme.colors.primary}>Cancel</Typography>
-                  </TouchableOpacity>
-                  <Typography variant="labelLg">Edit Customer Details</Typography>
-                  <View style={{ width: 40 }} />
-                </View>
-                <View style={styles.modalContainer}>
-                  <Input
-                    label="Customer Full Name"
-                    value={editName}
-                    onChangeText={setEditName}
-                    placeholder="Enter name"
-                  />
-                  <Input
-                    label="Phone Number"
-                    value={editPhone}
-                    onChangeText={setEditPhone}
-                    placeholder="Enter phone"
-                    keyboardType="phone-pad"
-                  />
-
-                  <Button title="Save Changes" onPress={handleSaveEdit} style={{ marginTop: 20 }} />
-                </View>
-              </KeyboardAvoidingView>
-            </SafeAreaView>
-          </SafeAreaProvider>
-        </Modal>
       </ScrollView>
+
+      {/* Edit Modal */}
+      <Modal
+        visible={isEditModalVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setEditModalVisible(false)}
+      >
+        <SafeAreaView style={styles.modalSafeArea}>
+          <KeyboardAvoidingView
+            style={{ flex: 1 }}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <View style={styles.modalHeader}>
+              <TouchableOpacity onPress={() => setEditModalVisible(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Typography variant="bodyMd" color={theme.colors.textSecondary}>
+                  Cancel
+                </Typography>
+              </TouchableOpacity>
+              <Typography variant="titleMd" color={theme.colors.textPrimary} style={{ fontWeight: '600' }}>
+                Edit Borrower
+              </Typography>
+              <View style={{ width: 44 }} />
+            </View>
+
+            <View style={styles.modalBody}>
+              <Input
+                label="Full Name *"
+                value={editName}
+                onChangeText={setEditName}
+              />
+              <Input
+                label="Phone Number *"
+                value={editPhone}
+                onChangeText={setEditPhone}
+                keyboardType="phone-pad"
+              />
+
+              <View style={{ marginTop: 24 }}>
+                <Button
+                  title="Save Changes"
+                  onPress={handleSaveEdit}
+                  loading={saving}
+                  variant="primary"
+                />
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: theme.colors.background },
-  container: { flex: 1 },
-  centered: { justifyContent: 'center', alignItems: 'center' },
-  content: { padding: theme.spacing.lg },
-
-  profileHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: theme.spacing.xl },
-  avatar: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: theme.colors.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: theme.spacing.md,
-  },
-  profileInfo: { flex: 1 },
-  phoneRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 4 },
-  callButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.surfaceVariant,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: theme.borderRadius.sm,
-    marginLeft: theme.spacing.sm,
-  },
-  editButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.secondaryFixed,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: theme.borderRadius.sm,
-    marginLeft: theme.spacing.sm,
-  },
-
-  summaryCard: {
-    backgroundColor: theme.colors.primary,
-    padding: theme.spacing.lg,
-    marginBottom: theme.spacing.xl,
-  },
-  summaryBreakdownRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: theme.spacing.md },
-
-  actionsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: theme.spacing.xl },
-  actionButton: {
+  safeArea: {
     flex: 1,
+    backgroundColor: theme.colors.surfaceSoft,
+  },
+  container: {
+    flex: 1,
+  },
+  content: {
+    padding: theme.spacing.md,
+    gap: 12,
+  },
+  centered: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  profileCard: {
+    padding: theme.spacing.lg,
+    backgroundColor: theme.colors.surface,
+  },
+  profileHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: theme.spacing.md,
-    borderRadius: theme.borderRadius.md,
+    gap: 14,
   },
-  primaryAction: { backgroundColor: theme.colors.primary, marginRight: theme.spacing.sm },
-  secondaryAction: { backgroundColor: theme.colors.surfaceContainerHighest, marginLeft: theme.spacing.sm },
-  actionText: { marginLeft: 8 },
-
-  sectionTitle: { marginBottom: theme.spacing.md },
-  loanCard: { marginBottom: theme.spacing.md, padding: theme.spacing.md },
-  loanCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: theme.borderRadius.full },
-
+  avatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: theme.colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.borderDefault,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileInfo: {
+    flex: 1,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.borderDefault,
+  },
+  actionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.borderDefault,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: theme.borderRadius.full,
+  },
+  summaryCard: {
+    padding: theme.spacing.lg,
+    backgroundColor: theme.colors.surface,
+  },
+  summaryBreakdownRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.borderDefault,
+  },
+  breakdownCol: {
+    flex: 1,
+  },
+  btnRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginVertical: 4,
+  },
+  sectionTitle: {
+    marginTop: 8,
+    marginBottom: 4,
+    fontWeight: '600',
+  },
+  loanCard: {
+    padding: 14,
+    backgroundColor: theme.colors.surface,
+    marginBottom: 8,
+  },
+  loanCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: theme.borderRadius.xs,
+    borderWidth: 1,
+  },
+  badgeActive: {
+    backgroundColor: theme.colors.successContainer,
+    borderColor: '#86EFAC',
+  },
+  badgeSettled: {
+    backgroundColor: theme.colors.surfaceSoft,
+    borderColor: theme.colors.borderDefault,
+  },
+  badgeDefault: {
+    backgroundColor: theme.colors.dangerContainer,
+    borderColor: '#FECACA',
+  },
+  cardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.borderDefault,
+  },
+  modalSafeArea: {
+    flex: 1,
+    backgroundColor: theme.colors.background,
+  },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    padding: theme.spacing.md,
+    alignItems: 'center',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 14,
     borderBottomWidth: 1,
-    borderColor: theme.colors.surfaceVariant,
+    borderBottomColor: theme.colors.borderDefault,
   },
-  modalContainer: { padding: theme.spacing.xl },
+  modalBody: {
+    padding: theme.spacing.lg,
+  },
 });

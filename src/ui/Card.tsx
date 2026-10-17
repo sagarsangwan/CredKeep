@@ -2,32 +2,63 @@ import React from 'react';
 import { View, ViewProps, StyleSheet } from 'react-native';
 import { theme } from './theme';
 
-interface CardProps extends ViewProps {
+export interface CardProps extends ViewProps {
+  variant?: 'surface' | 'soft' | 'outline';
+  padding?: keyof typeof theme.spacing;
   elevated?: boolean;
 }
 
-export function Card({ elevated = false, style, children, ...rest }: CardProps) {
+export function Card({
+  variant = 'surface',
+  padding = 'md',
+  style,
+  children,
+  ...rest
+}: CardProps) {
+  const getVariantStyle = () => {
+    switch (variant) {
+      case 'soft':
+        return styles.soft;
+      case 'outline':
+        return styles.outline;
+      case 'surface':
+      default:
+        return styles.surface;
+    }
+  };
+
   return (
-    <View style={[styles.card, elevated && styles.elevated, style]} {...rest}>
+    <View
+      style={[
+        styles.card,
+        getVariantStyle(),
+        { padding: theme.spacing[padding] },
+        style,
+      ]}
+      {...rest}
+    >
       {children}
     </View>
   );
 }
 
+export const AppCard = Card;
+
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: theme.colors.surface,
     borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing.md,
     borderWidth: 1,
-    borderColor: theme.colors.outline,
   },
-  elevated: {
-    shadowColor: theme.colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 12,
-    elevation: 2,
-    borderWidth: 0,
+  surface: {
+    backgroundColor: theme.colors.surface,
+    borderColor: theme.colors.borderDefault,
+  },
+  soft: {
+    backgroundColor: theme.colors.surfaceSoft,
+    borderColor: theme.colors.borderDefault,
+  },
+  outline: {
+    backgroundColor: 'transparent',
+    borderColor: theme.colors.borderDefault,
   },
 });
