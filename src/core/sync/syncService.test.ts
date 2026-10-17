@@ -424,6 +424,116 @@ describe('SyncService & OutboxManager', () => {
       );
     });
 
+    it('prevents double-counting across pull pages when KIST snapshot precedes TRANSACTION acknowledgement', async () => {
+      outboxRows.push({
+        id: 'outbox-coll-1',
+        operation_id: 'op-coll-1',
+        operation_type: 'record_collection',
+        payload: JSON.stringify({
+          loan_id: 'loan-1',
+          amount_paise: 10000,
+          effective_date: '2026-01-01',
+        }),
+        status: 'PENDING',
+        error_message: null,
+        created_at: '2026-01-01T10:00:00Z',
+      });
+
+      (ApiClient.get as jest.Mock)
+        .mockResolvedValueOnce({
+          next_cursor: 1,
+          has_more: true,
+          changes: [
+            {
+              id: 'change-kist-1',
+              record_type: 'KIST',
+              operation_type: 'INSERT',
+              payload: {
+                id: 'kist-1',
+                loan_id: 'loan-1',
+                installment_number: 1,
+                original_due_date: '2026-01-01',
+                effective_due_date: '2026-01-01',
+                principal_component_paise: 10000,
+                markup_component_paise: 0,
+                total_due_paise: 10000,
+                principal_paid_paise: 10000,
+                markup_paid_paise: 0,
+                status: 'PAID',
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          next_cursor: 2,
+          has_more: false,
+          changes: [
+            {
+              id: 'change-tx-1',
+              record_type: 'TRANSACTION',
+              operation_type: 'INSERT',
+              payload: {
+                id: 'server-tx-1',
+                operation_id: 'op-coll-1',
+                loan_id: 'loan-1',
+                transaction_type: 'COLLECTION',
+                amount_paise: 10000,
+                allocated_principal_paise: 10000,
+                allocated_markup_paise: 0,
+                allocated_penalty_paise: 0,
+                unallocated_surplus_paise: 0,
+                effective_date: '2026-01-01',
+              },
+            },
+          ],
+        });
+
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM repayment_schedules WHERE id = ?')) {
+          return null;
+        }
+        if (sql.includes('FROM transactions WHERE operation_id = ?')) {
+          return null;
+        }
+        if (sql.includes('FROM loans WHERE id = ?')) {
+          return { id: 'loan-1', principal_paise: 10000, product_type: 'instalment', status: 'ACTIVE' };
+        }
+        return null;
+      });
+
+      mockDb.getAllAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM sync_outbox WHERE status IN (\'PENDING\', \'NEEDS_REVIEW\')')) {
+          return outboxRows.filter((r) => r.status === 'PENDING' || r.status === 'NEEDS_REVIEW');
+        }
+        if (sql.includes('FROM repayment_schedules WHERE loan_id = ?')) {
+          return [
+            {
+              id: 'kist-1',
+              loan_id: 'loan-1',
+              installment_number: 1,
+              principal_component_paise: 10000,
+              markup_component_paise: 0,
+              total_due_paise: 10000,
+              principal_paid_paise: 10000,
+              markup_paid_paise: 0,
+              effective_due_date: '2026-01-01',
+              status: 'PAID',
+            },
+          ];
+        }
+        return [];
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(2);
+
+      expect(outboxRows.find((r) => r.operation_id === 'op-coll-1')?.status).toBe('SYNCED');
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE repayment_schedules SET'),
+        ['loan-1']
+      );
+    });
+
     it('reports failure and review required when push has failed operations while still pulling authoritative server state', async () => {
       const pushSpy = jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
       const pullSpy = jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });

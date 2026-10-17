@@ -143,10 +143,8 @@ export class SyncService {
 
     if (
       (record_type === 'KIST' ||
-        (record_type === 'TRANSACTION' &&
-          (payload.transaction_type === 'WAIVER' ||
-            payload.transaction_type === 'PENALTY_ASSESSMENT' ||
-            (payload.transaction_type === 'REVERSAL' && (payload.forgiven_penalty_paise || 0) > 0)))) &&
+        record_type === 'TRANSACTION' ||
+        record_type === 'PAYMENT_CORRECTION') &&
       payload.loan_id &&
       modifiedLoanIds
     ) {
@@ -517,6 +515,26 @@ export class SyncService {
 
         if (payload.operation_id) {
           await OutboxManager.markSynced(tx, [payload.operation_id]);
+          let targetLoanId = payload.loan_id || existing?.loan_id;
+          if (!targetLoanId) {
+            const outboxRow = await tx.getFirstAsync<{ payload: string }>(
+              `SELECT payload FROM sync_outbox WHERE operation_id = ?`,
+              [payload.operation_id]
+            );
+            if (outboxRow?.payload) {
+              try {
+                const parsed = JSON.parse(outboxRow.payload);
+                targetLoanId = parsed.loan_id;
+              } catch {}
+            }
+          }
+          if (targetLoanId) {
+            if (modifiedLoanIds) {
+              modifiedLoanIds.add(targetLoanId);
+            } else {
+              await this.reapplyPendingCollections(tx, targetLoanId);
+            }
+          }
         }
         if (!existing) {
           await tx.runAsync(
