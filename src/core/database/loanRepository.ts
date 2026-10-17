@@ -222,43 +222,6 @@ export class LoanRepository {
         }
       }
 
-      if (options.attachments && options.attachments.length > 0) {
-        for (const att of options.attachments) {
-          const attPath = att.file_path || att.uri || '';
-          const fileName = attPath.split('/').pop()?.split('\\').pop() || 'attachment';
-          const attId = generateUuid();
-          await txHandle.runAsync(
-            `INSERT INTO loan_attachments (
-              id, loan_id, file_path, file_name, doc_type, document_type, notes, synced, sync_status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'LOCAL_ONLY', ?)`,
-            [
-              attId,
-              loanId,
-              attPath,
-              fileName,
-              att.doc_type,
-              att.doc_type,
-              att.notes || null,
-              created_at,
-            ]
-          );
-
-          await OutboxManager.enqueue(txHandle, {
-            operationId: `att-${attId}`,
-            operationType: 'upload_attachment_metadata',
-            payload: {
-              id: attId,
-              loan_id: loanId,
-              file_path: attPath,
-              file_name: fileName,
-              doc_type: att.doc_type,
-              document_type: att.doc_type,
-              notes: att.notes || null,
-            },
-          });
-        }
-      }
-
       await OutboxManager.enqueue(txHandle, {
         operationId: clientOpId,
         operationType: 'create_loan',
@@ -279,6 +242,44 @@ export class LoanRepository {
           collateral: options.collateral || null,
         },
       });
+
+      if (options.attachments && options.attachments.length > 0) {
+        for (const att of options.attachments) {
+          const attPath = att.file_path || att.uri || '';
+          const fileName = attPath.split('/').pop()?.split('\\').pop() || 'attachment';
+          const attId = generateUuid();
+          const attOpId = generateUuid();
+          await txHandle.runAsync(
+            `INSERT INTO loan_attachments (
+              id, loan_id, file_path, file_name, doc_type, document_type, notes, synced, sync_status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'LOCAL_ONLY', ?)`,
+            [
+              attId,
+              loanId,
+              attPath,
+              fileName,
+              att.doc_type,
+              att.doc_type,
+              att.notes || null,
+              created_at,
+            ]
+          );
+
+          await OutboxManager.enqueue(txHandle, {
+            operationId: attOpId,
+            operationType: 'upload_attachment_metadata',
+            payload: {
+              id: attId,
+              loan_id: loanId,
+              file_path: attPath,
+              file_name: fileName,
+              doc_type: att.doc_type,
+              document_type: att.doc_type,
+              notes: att.notes || null,
+            },
+          });
+        }
+      }
     });
 
     SyncCoordinator.notifyMutation();

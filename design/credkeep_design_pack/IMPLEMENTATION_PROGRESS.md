@@ -120,7 +120,11 @@
     - 151 / 151 Tests passed
   - Django / Python Backend Test Suite (`backend\.venv\Scripts\pytest backend`):
     - 87 passed, 3 skipped, 0 failed in 106s
-  - Offline Safety: Fully verified with encrypted SQLite and append-only ledger transactions.
+  - Independent Codex Milestone QA: Audited via `qa-codex.ps1` (`gpt-6.1-sol`, medium reasoning). Remediated 4 P1 edge cases:
+    1. Reconciled acknowledged transactions in pull to prevent payment replay over server snapshots.
+    2. Added `operation_id` reconciliation for `loan_terms` during pull to prevent UNIQUE constraint collisions.
+    3. Added `operation_id` reconciliation for `payment_corrections` during pull to prevent UNIQUE constraint collisions.
+    4. Enqueued `create_loan` before attachments and replaced `att-${id}` prefix with valid UUIDs for Django backend validation.
   - Release Gate Status: Ready for Product Owner review before triggering EAS release build.
 
 

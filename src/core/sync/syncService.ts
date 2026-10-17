@@ -247,29 +247,64 @@ export class SyncService {
     } else if (record_type === 'LOAN_TERM') {
       const isSettled = (payload.interest_settled !== undefined ? payload.interest_settled : (payload.settled ? 1 : 0)) ? 1 : 0;
       if (operation_type === 'INSERT') {
-        await tx.runAsync(
-          `INSERT INTO loan_terms (
-             id, loan_id, term_number, duration_months, annual_rate, interest_paise,
-             start_date, maturity_date, interest_settled, settled, operation_id, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             interest_settled = excluded.interest_settled,
-             settled = excluded.settled`,
-          [
-            payload.id,
-            payload.loan_id,
-            payload.term_number,
-            payload.duration_months,
-            payload.annual_rate,
-            payload.interest_paise,
-            payload.start_date,
-            payload.maturity_date,
-            isSettled,
-            isSettled,
-            payload.operation_id || null,
-            payload.created_at || new Date().toISOString(),
-          ]
-        );
+        let existingTerm: any = null;
+        if (payload.operation_id) {
+          existingTerm = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM loan_terms WHERE operation_id = ? OR id = ?`,
+            [payload.operation_id, payload.id]
+          );
+        } else {
+          existingTerm = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM loan_terms WHERE id = ?`,
+            [payload.id]
+          );
+        }
+
+        if (existingTerm) {
+          await tx.runAsync(
+            `UPDATE loan_terms SET 
+               id = ?,
+               interest_settled = ?,
+               settled = ?,
+               annual_rate = ?,
+               interest_paise = ?,
+               maturity_date = ?
+             WHERE id = ?`,
+            [
+              payload.id,
+              isSettled,
+              isSettled,
+              payload.annual_rate,
+              payload.interest_paise,
+              payload.maturity_date,
+              existingTerm.id,
+            ]
+          );
+        } else {
+          await tx.runAsync(
+            `INSERT INTO loan_terms (
+               id, loan_id, term_number, duration_months, annual_rate, interest_paise,
+               start_date, maturity_date, interest_settled, settled, operation_id, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               interest_settled = excluded.interest_settled,
+               settled = excluded.settled`,
+            [
+              payload.id,
+              payload.loan_id,
+              payload.term_number,
+              payload.duration_months,
+              payload.annual_rate,
+              payload.interest_paise,
+              payload.start_date,
+              payload.maturity_date,
+              isSettled,
+              isSettled,
+              payload.operation_id || null,
+              payload.created_at || new Date().toISOString(),
+            ]
+          );
+        }
       } else if (operation_type === 'UPDATE') {
         await tx.runAsync(
           `UPDATE loan_terms SET interest_settled = ?, settled = ? WHERE id = ?`,
@@ -308,28 +343,48 @@ export class SyncService {
     } else if (record_type === 'PAYMENT_CORRECTION') {
       if (operation_type === 'INSERT') {
         const origAmt = payload.original_amount_paise ?? payload.previous_amount_paise ?? 0;
-        await tx.runAsync(
-          `INSERT INTO payment_corrections (
-             id, loan_id, original_transaction_id, original_operation_id, reversal_transaction_id,
-             replacement_transaction_id, original_amount_paise, previous_amount_paise, corrected_amount_paise,
-             reason, operation_id, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO NOTHING`,
-          [
-            payload.id,
-            payload.loan_id,
-            payload.original_transaction_id,
-            payload.original_operation_id || null,
-            payload.reversal_transaction_id,
-            payload.replacement_transaction_id || null,
-            origAmt,
-            origAmt,
-            payload.corrected_amount_paise,
-            payload.reason,
-            payload.operation_id || null,
-            payload.created_at || new Date().toISOString(),
-          ]
-        );
+        let existingCorr: any = null;
+        if (payload.operation_id) {
+          existingCorr = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM payment_corrections WHERE operation_id = ? OR id = ?`,
+            [payload.operation_id, payload.id]
+          );
+        } else {
+          existingCorr = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM payment_corrections WHERE id = ?`,
+            [payload.id]
+          );
+        }
+
+        if (existingCorr) {
+          await tx.runAsync(
+            `UPDATE payment_corrections SET id = ? WHERE id = ?`,
+            [payload.id, existingCorr.id]
+          );
+        } else {
+          await tx.runAsync(
+            `INSERT INTO payment_corrections (
+               id, loan_id, original_transaction_id, original_operation_id, reversal_transaction_id,
+               replacement_transaction_id, original_amount_paise, previous_amount_paise, corrected_amount_paise,
+               reason, operation_id, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING`,
+            [
+              payload.id,
+              payload.loan_id,
+              payload.original_transaction_id,
+              payload.original_operation_id || null,
+              payload.reversal_transaction_id,
+              payload.replacement_transaction_id || null,
+              origAmt,
+              origAmt,
+              payload.corrected_amount_paise,
+              payload.reason,
+              payload.operation_id || null,
+              payload.created_at || new Date().toISOString(),
+            ]
+          );
+        }
       }
     } else if (record_type === 'KIST') {
       if (operation_type === 'INSERT') {
@@ -457,8 +512,11 @@ export class SyncService {
                 break;
               }
             }
-
           }
+        }
+
+        if (payload.operation_id) {
+          await OutboxManager.markSynced(tx, [payload.operation_id]);
         }
         if (!existing) {
           await tx.runAsync(
