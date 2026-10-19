@@ -15,7 +15,8 @@
       },
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://credkeep-v2-staging.onrender.com/api/v2"
+        "EXPO_PUBLIC_API_URL": "https://credkeep-v2-staging.onrender.com/api/v2",
+        "EXPO_PUBLIC_GOOGLE_CLIENT_ID": "387140373963-eolp5877u81mtm04vmkamtpoft2dvoog.apps.googleusercontent.com"
       }
     },
     "staging": {
@@ -25,7 +26,8 @@
       },
       "channel": "staging",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://credkeep-v2-staging.onrender.com/api/v2"
+        "EXPO_PUBLIC_API_URL": "https://credkeep-v2-staging.onrender.com/api/v2",
+        "EXPO_PUBLIC_GOOGLE_CLIENT_ID": "387140373963-eolp5877u81mtm04vmkamtpoft2dvoog.apps.googleusercontent.com"
       }
     },
     "production": {}

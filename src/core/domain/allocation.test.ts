@@ -133,4 +133,31 @@ describe('Payment Allocation Engine (INSTALMENT_FIRST)', () => {
     expect(result.updatedKists[0].amountPaid).toBe(toPaise(3000));
     expect(result.updatedKists[0].status).toBe('PAID');
   });
+
+  it('allocates ₹10,000 across ₹6,000 monthly installments: K1 PAID, K2 PARTIALLY_PAID (₹4,000), remaining balance ₹2,000', () => {
+    const kists = [
+      { kistNumber: 1, amountDue: toPaise(6000), principalDue: toPaise(5000), markupDue: toPaise(1000), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) },
+      { kistNumber: 2, amountDue: toPaise(6000), principalDue: toPaise(5000), markupDue: toPaise(1000), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) },
+      { kistNumber: 3, amountDue: toPaise(6000), principalDue: toPaise(5000), markupDue: toPaise(1000), amountPaid: toPaise(0), principalPaid: toPaise(0), markupPaid: toPaise(0) },
+    ];
+
+    const result = allocatePayment({
+      paymentAmount: toPaise(10000),
+      kists,
+      outstandingPenalty: toPaise(0),
+    });
+
+    // Kist 1: ₹6,000 -> PAID
+    expect(result.updatedKists[0].status).toBe('PAID');
+    expect(result.updatedKists[0].amountPaid).toBe(toPaise(6000));
+
+    // Kist 2: ₹4,000 -> PARTIALLY_PAID
+    expect(result.updatedKists[1].status).toBe('PARTIALLY_PAID');
+    expect(result.updatedKists[1].amountPaid).toBe(toPaise(4000));
+
+    // Remaining balance on Kist 2: ₹2,000
+    const remainingKist2Balance = result.updatedKists[1].amountDue - result.updatedKists[1].amountPaid;
+    expect(remainingKist2Balance).toBe(toPaise(2000));
+  });
 });
+

@@ -902,7 +902,44 @@ export class SyncService {
           const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
           isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise && finalOutstandingPenalty <= 0;
         } else if (loan.product_type === 'bullet') {
-          isSettled = allPaid && replayedBulletPrincipalPaid >= loan.principal_paise && finalOutstandingPenalty <= 0;
+          if (finalKists.length > 0) {
+            isSettled = allPaid && replayedBulletPrincipalPaid >= loan.principal_paise && finalOutstandingPenalty <= 0;
+          } else {
+            // One-time bullet loan with no installments (e.g. ANNUAL_SIMPLE_FLAT)
+            const prinRes = await tx.getFirstAsync<{ total: number }>(
+              `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
+               WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+              [loanId]
+            );
+            const markupRes = await tx.getFirstAsync<{ total: number }>(
+              `SELECT COALESCE(SUM(allocated_markup_paise), 0) as total FROM transactions
+               WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+              [loanId]
+            );
+            const totalPrin = prinRes?.total || 0;
+            const totalMarkup = markupRes?.total || 0;
+
+            const terms = await tx.getAllAsync<any>(
+              `SELECT * FROM loan_terms WHERE loan_id = ? ORDER BY term_number ASC`,
+              [loanId]
+            );
+            const totalContractInterest = terms && terms.length > 0
+              ? terms.reduce((acc: number, t: any) => acc + (t.interest_paise || 0), 0)
+              : (loan.interest_paise || 0);
+
+            const interestSatisfied = totalMarkup >= totalContractInterest;
+            const principalSatisfied = totalPrin >= loan.principal_paise;
+
+            isSettled = (principalSatisfied && interestSatisfied && finalOutstandingPenalty <= 0) ||
+                        (loan.status === 'SETTLED' && finalOutstandingPenalty <= 0);
+
+            if (interestSatisfied && terms && terms.length > 0) {
+              await tx.runAsync(
+                `UPDATE loan_terms SET interest_settled = 1, settled = 1 WHERE loan_id = ?`,
+                [loanId]
+              );
+            }
+          }
         }
         await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [isSettled ? 'SETTLED' : 'ACTIVE', loanId]);
       }

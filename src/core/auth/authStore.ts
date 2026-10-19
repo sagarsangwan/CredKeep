@@ -6,6 +6,7 @@ const KEY_TENANT_ID = 'credkeep_tenant_id';
 const KEY_TENANT_NAME = 'credkeep_tenant_name';
 const KEY_USER_INFO = 'credkeep_user_info';
 const KEY_DEVICE_ID = 'credkeep_device_id';
+const KEY_GOOGLE_LINKED_EMAIL = 'credkeep_google_linked_email';
 
 export interface UserInfo {
   id: number;
@@ -127,6 +128,7 @@ export class AuthStore {
       await SecureStore.deleteItemAsync(KEY_TENANT_ID);
       await SecureStore.deleteItemAsync(KEY_TENANT_NAME);
       await SecureStore.deleteItemAsync(KEY_USER_INFO);
+      await SecureStore.deleteItemAsync(KEY_GOOGLE_LINKED_EMAIL);
     } catch {
       // Ignore clear errors on missing keys
     }
@@ -137,4 +139,21 @@ export class AuthStore {
     const token = await this.getToken();
     return Boolean(token && token.trim().length > 0);
   }
+
+  static async getGoogleLinkedEmail(): Promise<string | null> {
+    try {
+      return await SecureStore.getItemAsync(KEY_GOOGLE_LINKED_EMAIL);
+    } catch {
+      return null;
+    }
+  }
+
+  static async setGoogleLinkedEmail(email: string): Promise<void> {
+    try {
+      await SecureStore.setItemAsync(KEY_GOOGLE_LINKED_EMAIL, email);
+    } catch {
+      // Non-fatal
+    }
+  }
 }
+
