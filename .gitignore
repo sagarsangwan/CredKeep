@@ -89,6 +89,9 @@ Thumbs.db
 graphify-out/
 test-bug.js
 .workflow/qa_prompt.txt
+.codex/hooks.json
+.codex/skills/
+
 
 # Python & Django
 __pycache__/
