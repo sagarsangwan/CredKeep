@@ -1,5 +1,5 @@
 import React, { useState, useEffect, createContext, useContext, useRef } from 'react';
-import { View, StyleSheet, TouchableOpacity, AppState, AppStateStatus, Modal } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, AppState, AppStateStatus, Modal, ActivityIndicator } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { Typography } from './Typography';
@@ -71,22 +71,22 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   };
 
   const checkPinSetup = async () => {
+    let pinExists = false;
+    let bioActive = false;
     try {
+      setLoading(true);
       setStorageError(null);
       const pin = await SecureStore.getItemAsync(PIN_KEY);
       const bio = await SecureStore.getItemAsync(BIO_ENABLED_KEY);
 
-      const pinExists = Boolean(pin && pin.trim().length === 4);
+      pinExists = Boolean(pin && pin.trim().length === 4);
       setHasPinState(pinExists);
       setStoredPin(pinExists ? pin : null);
-      const bioActive = bio === 'true';
+      bioActive = bio === 'true';
       setBioEnabledState(bioActive);
 
       if (pinExists) {
         setIsLocked(true);
-        if (bioActive) {
-          await promptBiometricsIfEligible();
-        }
       } else {
         setIsLocked(false);
       }
@@ -97,6 +97,10 @@ export function PinLock({ children }: { children: React.ReactNode }) {
       setStorageError('Failed to access secure storage. Please retry.');
     } finally {
       setLoading(false);
+    }
+
+    if (pinExists && bioActive) {
+      promptBiometricsIfEligible();
     }
   };
 
@@ -135,8 +139,20 @@ export function PinLock({ children }: { children: React.ReactNode }) {
   }, [hasPin, bioEnabled]);
 
   useEffect(() => {
+    // Fail-secure timeout ensures startup loading overlay never hangs indefinitely,
+    // and access is never unlocked without completing security checks
+    const safetyTimer = setTimeout(() => {
+      setIsLocked(true);
+      setStorageError('Secure storage check timed out. Please tap retry.');
+      setLoading(false);
+    }, 3500);
+
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    checkPinSetup();
+    checkPinSetup().finally(() => {
+      clearTimeout(safetyTimer);
+    });
+
+    return () => clearTimeout(safetyTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -219,7 +235,7 @@ export function PinLock({ children }: { children: React.ReactNode }) {
         {/* Loading overlay during initial PIN check */}
         {loading && (
           <View style={[StyleSheet.absoluteFill, styles.overlay]}>
-            <Typography variant="headlineMd">Loading...</Typography>
+            <ActivityIndicator size="large" color={theme.colors.primary} />
           </View>
         )}
 

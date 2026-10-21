@@ -12,7 +12,7 @@ import { Card } from '../../ui/Card';
 import { GoogleLogo } from '../../ui/GoogleSignInButton';
 import { AuthStore } from '../../core/auth/authStore';
 import { AuthService } from '../../core/auth/authService';
-import { promptGoogleSignIn } from '../../core/auth/googleAuth';
+import { promptGoogleSignIn, signOutGoogle } from '../../core/auth/googleAuth';
 
 export default function SecuritySettingsScreen() {
   const router = useRouter();
@@ -47,6 +47,11 @@ export default function SecuritySettingsScreen() {
         `Successfully linked ${linkRes.email}. You can now sign in to your CredKeep workspace using Continue with Google.`
       );
     } catch (err: any) {
+      try {
+        await signOutGoogle();
+      } catch {
+        // Non-fatal
+      }
       Alert.alert(
         'Unable to Link Account',
         err?.message || 'Failed to connect Google account. Please try again.'

@@ -20,7 +20,7 @@ import { AuthService } from '../../core/auth/authService';
 import { triggerBackendWarmup } from '../../core/api/backendWarmup';
 import { useSecurity } from '../../ui/PinLock';
 
-import { promptGoogleSignIn } from '../../core/auth/googleAuth';
+import { promptGoogleSignIn, signOutGoogle } from '../../core/auth/googleAuth';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -104,6 +104,12 @@ export default function LoginScreen() {
         }
       }
     } catch (err: any) {
+      // Clear stale Google SDK state after backend rejection so subsequent taps reopen picker
+      try {
+        await signOutGoogle();
+      } catch {
+        // Non-fatal
+      }
       if (
         err?.code === 'ACCOUNT_EXISTS_LINK_REQUIRED' ||
         err?.message?.includes('link your Google account')

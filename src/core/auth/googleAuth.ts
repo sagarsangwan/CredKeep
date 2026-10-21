@@ -55,6 +55,14 @@ export async function promptGoogleSignIn(): Promise<GooglePromptResult> {
   try {
     if (Platform.OS === 'android') {
       await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      // Reset stale native Google session before prompting so the account picker always opens
+      try {
+        if (typeof GoogleSignin.hasPreviousSignIn === 'function' && GoogleSignin.hasPreviousSignIn()) {
+          await GoogleSignin.signOut();
+        }
+      } catch {
+        // Non-fatal session reset
+      }
     }
 
     const response: SignInResponse = await GoogleSignin.signIn();
@@ -91,11 +99,15 @@ export async function promptGoogleSignIn(): Promise<GooglePromptResult> {
   } catch (error: any) {
     if (error?.code === statusCodes?.SIGN_IN_CANCELLED) {
       return { success: false, cancelled: true };
-    } else if (error?.code === statusCodes?.IN_PROGRESS) {
+    } else if (
+      error?.code === statusCodes?.IN_PROGRESS ||
+      error?.code === 'ASYNC_OP_IN_PROGRESS' ||
+      error?.message?.includes('ASYNC_OP_IN_PROGRESS')
+    ) {
       return {
         success: false,
         error: 'Sign in is already in progress. Please wait.',
-        code: error.code,
+        code: error.code || 'ASYNC_OP_IN_PROGRESS',
       };
     } else if (error?.code === statusCodes?.PLAY_SERVICES_NOT_AVAILABLE) {
       return {
