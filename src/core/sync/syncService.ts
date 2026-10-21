@@ -21,7 +21,7 @@ export class SyncService {
   /**
    * PUSH Protocol: Sends un-synced local operations to /api/v2/sync/push/
    */
-  static async pushPending(db: SQLiteDatabase): Promise<{ pushed: number; failed: number }> {
+  static async pushPending(db: SQLiteDatabase): Promise<{ pushed: number; failed: number; transportError?: string }> {
     const token = await AuthStore.getToken();
     if (!token) return { pushed: 0, failed: 0 };
 
@@ -82,9 +82,13 @@ export class SyncService {
           // Stop further batch execution on failure to preserve sequential dependency
           break;
         }
-      } catch {
-        totalFailed += pending.length;
-        break;
+      } catch (err: any) {
+        console.warn('[SYNC] Push batch failed transport:', err);
+        return {
+          pushed: totalPushed,
+          failed: totalFailed,
+          transportError: err?.message || 'Network or server error during push',
+        };
       }
     }
 
@@ -1288,6 +1292,15 @@ export class SyncService {
   static async syncAll(db: SQLiteDatabase): Promise<SyncResult> {
     try {
       const pushRes = await this.pushPending(db);
+      if ((pushRes as any).transportError) {
+        return {
+          pushedCount: pushRes.pushed,
+          pulledCount: 0,
+          needsReviewCount: 0,
+          success: false,
+          errors: [`Sync push failed: ${(pushRes as any).transportError}`],
+        };
+      }
       const pullRes = await this.pullChanges(db);
       const needsReviewItems = await OutboxManager.getNeedsReview(db);
       if (needsReviewItems.length > 0 || pushRes.failed > 0) {

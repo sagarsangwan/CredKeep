@@ -90,7 +90,7 @@ export default function Step4ReviewScreen() {
           />
           <FinancialSummaryRow
             label="First Payment Due"
-            value={calculated.schedule[0]?.dueDate || draft.startDate}
+            value={calculated.firstDueDate || calculated.schedule[0]?.dueDate || draft.startDate}
           />
           <FinancialSummaryRow
             label="Maturity Date"

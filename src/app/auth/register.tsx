@@ -278,17 +278,17 @@ export default function RegisterScreen() {
               }
             />
 
-            {/* Zero Cloud Reliance Spec Card */}
+            {/* Offline-First Encrypted Ledger Spec Card */}
             <View style={styles.specCard}>
               <View style={styles.specIconBadge}>
                 <Shield size={18} color={theme.colors.textPrimary} />
               </View>
               <View style={{ flex: 1 }}>
                 <Typography variant="labelMd" color={theme.colors.textPrimary} style={{ fontWeight: '600' }}>
-                  Zero Cloud Reliance
+                  Offline-First Encrypted Ledger
                 </Typography>
                 <Typography variant="bodySm" color={theme.colors.textSecondary} style={styles.specText}>
-                  Your records never leave internal sandboxed flash memory. Data export is manual via encrypted SQLite archives.
+                  Your records are securely encrypted on-device with SQLCipher 256-bit and synchronize seamlessly with your cloud ledger when online.
                 </Typography>
               </View>
             </View>

@@ -7,6 +7,7 @@ import {
   generateSchedule,
   calculateContractInterest,
   calculateMaturityDate,
+  calculateNextDueDate,
 } from '../../../core/domain/schedule';
 
 export interface LoanDraftState {
@@ -27,6 +28,7 @@ export interface CalculatedLoanSummary {
   totalInterestPaise: Paise;
   totalPayablePaise: Paise;
   monthlyAmountPaise: Paise;
+  firstDueDate: string;
   maturityDate: string;
   schedule: {
     periodNumber: number;
@@ -93,11 +95,13 @@ export const LoanWizardProvider: React.FC<{ children: ReactNode }> = ({ children
       const totalInterestPaise = Math.round(monthlyInterestPaise * months) as Paise;
       const totalPayablePaise = (principal + totalInterestPaise) as Paise;
       const maturityDate = calculateMaturityDate(startDate, months, dueDay);
+      const firstDueDate = calculateNextDueDate(startDate, 1, dueDay);
 
       return {
         totalInterestPaise,
         totalPayablePaise,
         monthlyAmountPaise: monthlyInterestPaise,
+        firstDueDate,
         maturityDate,
         schedule: [],
       };
@@ -106,6 +110,7 @@ export const LoanWizardProvider: React.FC<{ children: ReactNode }> = ({ children
       const interestPaise = calculateContractInterest(principal, rate, months);
       const totalPaise = (principal + interestPaise) as Paise;
       const maturityDate = calculateMaturityDate(startDate, months, dueDay);
+      const defaultFirstDueDate = calculateNextDueDate(startDate, 1, dueDay);
 
       let scheduleItems: any[] = [];
       try {
@@ -135,6 +140,7 @@ export const LoanWizardProvider: React.FC<{ children: ReactNode }> = ({ children
         totalInterestPaise: interestPaise,
         totalPayablePaise: totalPaise,
         monthlyAmountPaise: monthlyKist,
+        firstDueDate: scheduleItems[0]?.dueDate || defaultFirstDueDate,
         maturityDate,
         schedule: scheduleItems,
       };

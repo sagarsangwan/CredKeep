@@ -72,6 +72,7 @@ export const MonthlyKistView: React.FC<MonthlyKistViewProps> = ({
       case 'PAID':
         return { bg: theme.colors.successContainer, text: theme.colors.successText, label: 'Paid' };
       case 'PARTIAL':
+      case 'PARTIALLY_PAID':
         return { bg: theme.colors.warningContainer, text: theme.colors.warningText, label: 'Partial' };
       case 'OVERDUE':
         return { bg: theme.colors.dangerContainer, text: theme.colors.dangerText, label: 'Overdue' };
@@ -230,7 +231,7 @@ export const MonthlyKistView: React.FC<MonthlyKistViewProps> = ({
                 </View>
                 {totalPaid > 0 && item.status !== 'PAID' && (
                   <Typography variant="bodySm" tabularNums color={theme.colors.textSecondary} style={{ marginTop: 2 }}>
-                    Paid {formatINR(totalPaid)}
+                    Paid {formatINR(totalPaid)} • Due {formatINR(Math.max(0, (item.total_due_paise || 0) - totalPaid) as Paise)}
                   </Typography>
                 )}
               </View>

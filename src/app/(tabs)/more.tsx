@@ -161,11 +161,11 @@ export default function MoreScreen() {
         {/* Cloud Sync & Account Status Card */}
         <Card style={styles.syncCard}>
           <View style={styles.syncHeader}>
-            <View style={{ flex: 1 }}>
-              <Typography variant="titleMd" color={theme.colors.textPrimary} style={{ fontWeight: '700' }}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Typography variant="titleMd" color={theme.colors.textPrimary} style={{ fontWeight: '700' }} numberOfLines={1} ellipsizeMode="tail">
                 {user ? `Workspace: ${tenantName || 'Private'}` : 'Not Signed In'}
               </Typography>
-              <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 2 }}>
+              <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 2 }} numberOfLines={1} ellipsizeMode="tail">
                 {user ? `@${user.username}` : 'Sign in to access your ledger'}
               </Typography>
             </View>

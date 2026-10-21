@@ -144,7 +144,7 @@ export default function HomeScreen() {
       {/* Top Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Typography variant="headlineSm" color={theme.colors.textPrimary} style={{ fontWeight: '700' }}>
+          <Typography variant="headlineSm" color={theme.colors.textPrimary} style={{ fontWeight: '700' }} numberOfLines={1} ellipsizeMode="tail">
             {tenantName}
           </Typography>
           <View style={styles.syncRow}>
@@ -170,7 +170,7 @@ export default function HomeScreen() {
       </View>
 
       {/* Hairline Offline Banner */}
-      <OfflineBanner visible={syncState.status === 'OFFLINE' || syncState.pendingCount > 0} />
+      <OfflineBanner visible={syncState.status === 'OFFLINE'} />
 
       <ScrollView
         style={styles.container}
