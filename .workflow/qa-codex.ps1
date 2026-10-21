@@ -174,7 +174,11 @@ if (-not $content) {
 
 # 5. Persist invocation guard state
 $verdict = "UNKNOWN"
-if ($content -match "REWORK") {
+$lines = $content -split "`r?`n" | Where-Object { $_ -match "\S" }
+$lastLines = ($lines | Select-Object -Last 10) -join "`n"
+if ($lastLines -match "\bAPPROVED\b") {
+    $verdict = "APPROVED"
+} elseif ($lastLines -match "\bREWORK\b") {
     $verdict = "REWORK"
 } elseif ($content -match "APPROVED") {
     $verdict = "APPROVED"
