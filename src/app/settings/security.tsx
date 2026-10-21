@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, Alert, Switch, Modal, TouchableOpacity } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -9,6 +9,10 @@ import { Button } from '../../ui/Button';
 import { useSecurity } from '../../ui/PinLock';
 import { Keypad } from '../../ui/Keypad';
 import { Card } from '../../ui/Card';
+import { GoogleLogo } from '../../ui/GoogleSignInButton';
+import { AuthStore } from '../../core/auth/authStore';
+import { AuthService } from '../../core/auth/authService';
+import { promptGoogleSignIn } from '../../core/auth/googleAuth';
 
 export default function SecuritySettingsScreen() {
   const router = useRouter();
@@ -17,6 +21,40 @@ export default function SecuritySettingsScreen() {
   const [isSettingPin, setIsSettingPin] = useState(false);
   const [step, setStep] = useState<1 | 2>(1); // 1 = Enter, 2 = Confirm
   const [firstPin, setFirstPin] = useState('');
+  const [linkedGoogleEmail, setLinkedGoogleEmail] = useState<string | null>(null);
+  const [isLinkingGoogle, setIsLinkingGoogle] = useState(false);
+
+  useEffect(() => {
+    AuthStore.getGoogleLinkedEmail().then(setLinkedGoogleEmail);
+  }, []);
+
+  const handleConnectGoogle = async () => {
+    try {
+      setIsLinkingGoogle(true);
+      const promptResult = await promptGoogleSignIn();
+      if (!promptResult.success) {
+        if ('cancelled' in promptResult) {
+          return;
+        }
+        Alert.alert('Google Sign-In', promptResult.error || 'Authentication cancelled.');
+        return;
+      }
+
+      const linkRes = await AuthService.linkGoogleAccount(promptResult.idToken);
+      setLinkedGoogleEmail(linkRes.email);
+      Alert.alert(
+        'Google Account Connected',
+        `Successfully linked ${linkRes.email}. You can now sign in to your CredKeep workspace using Continue with Google.`
+      );
+    } catch (err: any) {
+      Alert.alert(
+        'Unable to Link Account',
+        err?.message || 'Failed to connect Google account. Please try again.'
+      );
+    } finally {
+      setIsLinkingGoogle(false);
+    }
+  };
 
   const handleToggleBio = async (val: boolean) => {
     if (!hasPin) {
@@ -131,6 +169,44 @@ export default function SecuritySettingsScreen() {
         {hasPin && (
           <Button variant="outline" title="Remove App Lock" onPress={handleRemovePin} style={{ marginTop: theme.spacing.xl }} />
         )}
+
+        {/* Connected Accounts Card */}
+        <View style={[styles.card, { marginTop: theme.spacing.xl }]}>
+          <Typography variant="titleMd" color={theme.colors.onSurface} style={{ marginBottom: 4, fontWeight: '600' }}>
+            Connected Accounts
+          </Typography>
+          <Typography variant="bodySm" color={theme.colors.onSurfaceVariant} style={{ marginBottom: theme.spacing.md }}>
+            Link your Google account for secure sign-in to this workspace.
+          </Typography>
+
+          <View style={[styles.row, { alignItems: 'center' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+              <GoogleLogo size={20} />
+              <View style={{ marginLeft: 12 }}>
+                <Typography variant="labelMd" color={theme.colors.onSurface} style={{ fontWeight: '500' }}>
+                  Google Account
+                </Typography>
+                <Typography variant="bodySm" color={theme.colors.onSurfaceVariant}>
+                  {linkedGoogleEmail ? linkedGoogleEmail : 'Not connected'}
+                </Typography>
+              </View>
+            </View>
+
+            {linkedGoogleEmail ? (
+              <Typography variant="labelSm" color={theme.colors.primary} style={{ fontWeight: '600' }}>
+                Connected
+              </Typography>
+            ) : (
+              <Button
+                title={isLinkingGoogle ? 'Connecting...' : 'Connect'}
+                variant="outline"
+                loading={isLinkingGoogle}
+                onPress={handleConnectGoogle}
+                style={{ minHeight: 38, paddingHorizontal: 16 }}
+              />
+            )}
+          </View>
+        </View>
 
         <Modal visible={isSettingPin} animationType="slide" presentationStyle="pageSheet">
           <SafeAreaProvider>

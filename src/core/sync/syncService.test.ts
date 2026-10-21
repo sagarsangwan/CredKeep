@@ -424,17 +424,211 @@ describe('SyncService & OutboxManager', () => {
       );
     });
 
-    it('reports failure, halts pull, and protects local state when push has failed operations', async () => {
+    it('prevents double-counting across pull pages when KIST snapshot precedes TRANSACTION acknowledgement', async () => {
+      outboxRows.push({
+        id: 'outbox-coll-1',
+        operation_id: 'op-coll-1',
+        operation_type: 'record_collection',
+        payload: JSON.stringify({
+          loan_id: 'loan-1',
+          amount_paise: 10000,
+          effective_date: '2026-01-01',
+        }),
+        status: 'PENDING',
+        error_message: null,
+        created_at: '2026-01-01T10:00:00Z',
+      });
+
+      (ApiClient.get as jest.Mock)
+        .mockResolvedValueOnce({
+          next_cursor: 1,
+          has_more: true,
+          changes: [
+            {
+              id: 'change-kist-1',
+              record_type: 'KIST',
+              operation_type: 'INSERT',
+              payload: {
+                id: 'kist-1',
+                loan_id: 'loan-1',
+                installment_number: 1,
+                original_due_date: '2026-01-01',
+                effective_due_date: '2026-01-01',
+                principal_component_paise: 10000,
+                markup_component_paise: 0,
+                total_due_paise: 10000,
+                principal_paid_paise: 10000,
+                markup_paid_paise: 0,
+                status: 'PAID',
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          next_cursor: 2,
+          has_more: false,
+          changes: [
+            {
+              id: 'change-tx-1',
+              record_type: 'TRANSACTION',
+              operation_type: 'INSERT',
+              payload: {
+                id: 'server-tx-1',
+                operation_id: 'op-coll-1',
+                loan_id: 'loan-1',
+                transaction_type: 'COLLECTION',
+                amount_paise: 10000,
+                allocated_principal_paise: 10000,
+                allocated_markup_paise: 0,
+                allocated_penalty_paise: 0,
+                unallocated_surplus_paise: 0,
+                effective_date: '2026-01-01',
+              },
+            },
+          ],
+        });
+
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM repayment_schedules WHERE id = ?')) {
+          return null;
+        }
+        if (sql.includes('FROM transactions WHERE operation_id = ?')) {
+          return null;
+        }
+        if (sql.includes('FROM loans WHERE id = ?')) {
+          return { id: 'loan-1', principal_paise: 10000, product_type: 'instalment', status: 'ACTIVE' };
+        }
+        return null;
+      });
+
+      mockDb.getAllAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM sync_outbox WHERE status IN (\'PENDING\', \'NEEDS_REVIEW\')')) {
+          return outboxRows.filter((r) => r.status === 'PENDING' || r.status === 'NEEDS_REVIEW');
+        }
+        if (sql.includes('FROM repayment_schedules WHERE loan_id = ?')) {
+          return [
+            {
+              id: 'kist-1',
+              loan_id: 'loan-1',
+              installment_number: 1,
+              principal_component_paise: 10000,
+              markup_component_paise: 0,
+              total_due_paise: 10000,
+              principal_paid_paise: 10000,
+              markup_paid_paise: 0,
+              effective_due_date: '2026-01-01',
+              status: 'PAID',
+            },
+          ];
+        }
+        return [];
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(2);
+
+      expect(outboxRows.find((r) => r.operation_id === 'op-coll-1')?.status).toBe('SYNCED');
+      expect(mockDb.runAsync).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE repayment_schedules SET'),
+        ['loan-1']
+      );
+    });
+
+    it('preserves and settles one-time bullet loans without installments upon transaction pull', async () => {
+      let loanStatus = 'ACTIVE';
+
+      mockDb.runAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('UPDATE loans SET status = ? WHERE id = ?')) {
+          loanStatus = params[0];
+        }
+        return { changes: 1 };
+      });
+
+      mockDb.getFirstAsync.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM loans WHERE id = ?')) {
+          return {
+            id: 'bullet-1',
+            product_type: 'bullet',
+            rate_basis: 'ANNUAL_SIMPLE_FLAT',
+            principal_paise: 10000,
+            interest_paise: 1000,
+            status: loanStatus,
+          };
+        }
+        if (sql.includes('allocated_principal_paise')) {
+          return { total: 10000 };
+        }
+        if (sql.includes('allocated_markup_paise')) {
+          return { total: 1000 };
+        }
+        if (sql.includes('as assessed')) {
+          return { assessed: 0, paid: 0, forgiven: 0 };
+        }
+        return null;
+      });
+
+      mockDb.getAllAsync.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM repayment_schedules')) {
+          return []; // One-time bullet loans have no repayment_schedules
+        }
+        if (sql.includes('FROM loan_terms')) {
+          return [{
+            id: 'term-1',
+            loan_id: 'bullet-1',
+            term_number: 1,
+            interest_paise: 1000,
+            interest_settled: 1,
+            settled: 1,
+          }];
+        }
+        if (sql.includes('FROM sync_outbox')) {
+          return [];
+        }
+        return [];
+      });
+
+      (ApiClient.get as jest.Mock).mockResolvedValueOnce({
+        next_cursor: 1,
+        has_more: false,
+        changes: [
+          {
+            record_type: 'LOAN',
+            operation_type: 'UPDATE',
+            payload: { id: 'bullet-1', status: 'SETTLED' },
+          },
+          {
+            record_type: 'TRANSACTION',
+            operation_type: 'INSERT',
+            payload: {
+              id: 'tx-1',
+              operation_id: 'op-1',
+              loan_id: 'bullet-1',
+              transaction_type: 'COLLECTION',
+              amount_paise: 11000,
+              allocated_principal_paise: 10000,
+              allocated_markup_paise: 1000,
+              effective_date: '2026-01-01',
+            },
+          },
+        ],
+      });
+
+      const pullRes = await SyncService.pullChanges(mockDb);
+      expect(pullRes.pulled).toBe(2);
+      expect(loanStatus).toBe('SETTLED');
+    });
+
+    it('reports failure and review required when push has failed operations while still pulling authoritative server state', async () => {
       const pushSpy = jest.spyOn(SyncService, 'pushPending').mockResolvedValueOnce({ pushed: 1, failed: 1 });
       const pullSpy = jest.spyOn(SyncService, 'pullChanges').mockResolvedValueOnce({ pulled: 5 });
 
       try {
         const res = await SyncService.syncAll(mockDb);
         expect(res.success).toBe(false);
-        expect(res.pulledCount).toBe(0);
-        expect(pullSpy).not.toHaveBeenCalled();
+        expect(res.pulledCount).toBe(5);
+        expect(pullSpy).toHaveBeenCalled();
         expect(res.errors).toBeDefined();
-        expect(res.errors![0]).toContain('failed to push to server; pull halted to protect local state');
+        expect(res.errors![0]).toContain('failed during push and require review');
       } finally {
         pushSpy.mockRestore();
         pullSpy.mockRestore();

@@ -5,9 +5,10 @@ import { useRouter, useFocusEffect, Stack } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
 import { Card } from '../../ui/Card';
+import { FinancialSummaryRow } from '../../ui/FinancialSummaryRow';
 import { theme } from '../../ui/theme';
 import { useDatabase } from '../../core/database/DatabaseProvider';
-import { formatINR } from '../../core/domain/money';
+import { formatINR, Paise } from '../../core/domain/money';
 
 export default function ReportsScreen() {
   const router = useRouter();
@@ -30,64 +31,75 @@ export default function ReportsScreen() {
     <SafeAreaView style={styles.safeArea}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <ArrowLeft size={24} color={theme.colors.onBackground} />
+        <TouchableOpacity style={styles.backButton} onPress={() => router.back()} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <ArrowLeft size={20} color={theme.colors.textPrimary} />
         </TouchableOpacity>
-        <Typography variant="headlineMd" style={styles.title}>
+        <Typography variant="titleMd" color={theme.colors.textPrimary} style={{ fontWeight: '700' }}>
           Earnings & Reports
         </Typography>
-        <View style={{ width: 40 }} />
+        <View style={{ width: 36 }} />
       </View>
 
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         {globalEarnings && (
-          <Card elevated style={styles.card}>
-            <Typography variant="titleMd" style={{ marginBottom: 10 }}>
-              Global Actual Cash Earnings
-            </Typography>
-            <View style={styles.row}>
-              <Typography variant="bodyMd">Principal Returned:</Typography>
-              <Typography variant="bodyMd">{formatINR(globalEarnings.principalReturned)}</Typography>
-            </View>
-            <View style={styles.row}>
-              <Typography variant="bodyMd">Contractual Markup Received:</Typography>
-              <Typography variant="bodyMd">{formatINR(globalEarnings.markupReceived)}</Typography>
-            </View>
-            <View style={styles.row}>
-              <Typography variant="bodyMd">Late Penalties Received:</Typography>
-              <Typography variant="bodyMd">{formatINR(globalEarnings.penaltyReceived)}</Typography>
-            </View>
-            <View
-              style={[
-                styles.row,
-                {
-                  marginTop: 10,
-                  paddingTop: 10,
-                  borderTopWidth: 1,
-                  borderColor: theme.colors.outlineVariant,
-                },
-              ]}
-            >
-              <Typography variant="labelLg">Total Actual Earnings:</Typography>
-              <Typography variant="labelLg" color={theme.colors.success}>
-                {formatINR(globalEarnings.totalEarnings)}
+          <>
+            {/* Total Collected Hero Card */}
+            <Card style={styles.heroCard}>
+              <Typography variant="labelSm" color={theme.colors.textSecondary} style={{ letterSpacing: 0.5 }}>
+                TOTAL ACTUAL EARNINGS
               </Typography>
-            </View>
+              <Typography variant="rupeeDisplay" tabularNums color={theme.colors.success} style={{ marginVertical: 4 }}>
+                {formatINR(globalEarnings.totalEarnings as Paise)}
+              </Typography>
+              <Typography variant="bodySm" color={theme.colors.textSecondary}>
+                Net cash realized from markups & penalties
+              </Typography>
+            </Card>
 
-            <View style={{ marginTop: 20 }}>
-              <Typography variant="labelMd" color={theme.colors.error}>
-                Outstanding / Uncollected
-              </Typography>
-              <View style={styles.row}>
-                <Typography variant="bodySm" color={theme.colors.error}>
-                  Outstanding Penalties:
-                </Typography>
-                <Typography variant="bodySm" color={theme.colors.error}>
-                  {formatINR(globalEarnings.outstandingPenalty)}
-                </Typography>
-              </View>
-            </View>
-          </Card>
+            {/* Inflow Breakdown */}
+            <Typography variant="labelLg" color={theme.colors.textPrimary} style={styles.sectionHeader}>
+              Cash Inflow Breakdown
+            </Typography>
+
+            <Card style={styles.breakdownCard}>
+              <FinancialSummaryRow
+                label="Principal Capital Returned"
+                sublabel="Capital recovery credited back"
+                value={formatINR(globalEarnings.principalReturned as Paise)}
+              />
+              <FinancialSummaryRow
+                label="Contractual Markup / Interest"
+                sublabel="Profit realized from repaid loans"
+                value={formatINR(globalEarnings.markupReceived as Paise)}
+                variant="success"
+              />
+              <FinancialSummaryRow
+                label="Late Penalties Collected"
+                sublabel="Fees collected on overdue payments"
+                value={formatINR(globalEarnings.penaltyReceived as Paise)}
+              />
+              <FinancialSummaryRow
+                label="Total Cash Inflow"
+                sublabel="Principal returned + earnings"
+                value={formatINR((globalEarnings.principalReturned + globalEarnings.totalEarnings) as Paise)}
+                variant="highlight"
+              />
+            </Card>
+
+            {/* Outstanding Receivables */}
+            <Typography variant="labelLg" color={theme.colors.textPrimary} style={styles.sectionHeader}>
+              Outstanding / Uncollected
+            </Typography>
+
+            <Card style={styles.breakdownCard}>
+              <FinancialSummaryRow
+                label="Accrued / Outstanding Penalties"
+                sublabel="Late fees assessed but unpaid"
+                value={formatINR(globalEarnings.outstandingPenalty as Paise)}
+                variant={globalEarnings.outstandingPenalty > 0 ? 'danger' : 'standard'}
+              />
+            </Card>
+          </>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -101,32 +113,40 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: theme.spacing.md,
-    paddingVertical: theme.spacing.sm,
+    paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: theme.colors.surfaceVariant,
-    backgroundColor: theme.colors.surface,
+    borderBottomColor: theme.colors.borderDefault,
+    backgroundColor: theme.colors.background,
   },
   backButton: {
-    padding: theme.spacing.xs,
-  },
-  title: {
-    fontWeight: '700',
+    width: 36,
+    height: 36,
+    borderRadius: theme.borderRadius.md,
+    backgroundColor: theme.colors.surfaceSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   container: {
     flex: 1,
+    backgroundColor: theme.colors.surfaceSoft,
   },
   content: {
-    padding: theme.spacing.lg,
+    padding: theme.spacing.md,
+    gap: 12,
   },
-  card: {
+  heroCard: {
     padding: theme.spacing.lg,
+    backgroundColor: theme.colors.surface,
   },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
+  sectionHeader: {
+    marginTop: 8,
+    fontWeight: '600',
+  },
+  breakdownCard: {
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.surface,
   },
 });

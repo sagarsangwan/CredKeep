@@ -1,94 +1,186 @@
 import React from 'react';
-import { TouchableOpacity, TouchableOpacityProps, StyleSheet, ActivityIndicator } from 'react-native';
+import {
+  Pressable,
+  PressableProps,
+  StyleSheet,
+  ActivityIndicator,
+  ViewStyle,
+  StyleProp,
+} from 'react-native';
 import { Typography } from './Typography';
 import { theme } from './theme';
 
-interface ButtonProps extends TouchableOpacityProps {
-  variant?: 'primary' | 'secondary' | 'outline' | 'ghost';
+export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'destructive' | 'ghost';
+
+export interface ButtonProps extends Omit<PressableProps, 'style'> {
+  variant?: ButtonVariant;
+  size?: 'small' | 'medium' | 'large';
   title: string;
   loading?: boolean;
+  disabled?: boolean;
+  style?: StyleProp<ViewStyle>;
+  icon?: React.ReactNode;
 }
 
 export function Button({
   variant = 'primary',
   title,
   loading = false,
+  disabled = false,
   style,
-  disabled,
+  icon,
   ...rest
 }: ButtonProps) {
-  const getStyles = () => {
+  const isDisabled = disabled || loading;
+
+  const getVariantStyles = (pressed: boolean) => {
     switch (variant) {
       case 'primary':
         return {
-          container: [styles.container, styles.primaryContainer, disabled && styles.disabledContainer],
-          text: theme.colors.onPrimary,
+          container: [
+            styles.base,
+            styles.primary,
+            pressed && styles.primaryPressed,
+            isDisabled && styles.disabled,
+          ],
+          textColor: isDisabled ? theme.colors.textDisabled : theme.colors.actionOnPrimary,
+          spinnerColor: theme.colors.actionOnPrimary,
         };
       case 'secondary':
         return {
-          container: [styles.container, styles.secondaryContainer, disabled && styles.disabledContainer],
-          text: theme.colors.onSecondary,
+          container: [
+            styles.base,
+            styles.secondary,
+            pressed && styles.secondaryPressed,
+            isDisabled && styles.disabled,
+          ],
+          textColor: isDisabled ? theme.colors.textDisabled : theme.colors.textPrimary,
+          spinnerColor: theme.colors.textPrimary,
         };
-      case 'outline':
+      case 'destructive':
         return {
-          container: [styles.container, styles.outlineContainer, disabled && styles.disabledOutlineContainer],
-          text: theme.colors.primary,
+          container: [
+            styles.base,
+            styles.destructive,
+            pressed && styles.destructivePressed,
+            isDisabled && styles.disabled,
+          ],
+          textColor: isDisabled ? theme.colors.textDisabled : '#FFFFFF',
+          spinnerColor: '#FFFFFF',
         };
       case 'ghost':
         return {
-          container: [styles.container, styles.ghostContainer],
-          text: theme.colors.primary,
+          container: [
+            styles.base,
+            styles.ghost,
+            pressed && styles.ghostPressed,
+            isDisabled && styles.disabledGhost,
+          ],
+          textColor: isDisabled ? theme.colors.textDisabled : theme.colors.textSecondary,
+          spinnerColor: theme.colors.textSecondary,
+        };
+      case 'outline':
+      default:
+        return {
+          container: [
+            styles.base,
+            styles.outline,
+            pressed && styles.outlinePressed,
+            isDisabled && styles.disabledOutline,
+          ],
+          textColor: isDisabled ? theme.colors.textDisabled : theme.colors.textPrimary,
+          spinnerColor: theme.colors.textPrimary,
         };
     }
   };
 
-  const currentStyles = getStyles();
-
   return (
-    <TouchableOpacity
-      activeOpacity={0.8}
-      style={[currentStyles.container, style]}
-      disabled={disabled || loading}
+    <Pressable
+      style={({ pressed }) => [getVariantStyles(pressed).container, style]}
+      disabled={isDisabled}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: isDisabled, busy: loading }}
       {...rest}
     >
-      {loading ? (
-        <ActivityIndicator color={currentStyles.text} />
-      ) : (
-        <Typography variant="labelLg" color={currentStyles.text}>
-          {title}
-        </Typography>
-      )}
-    </TouchableOpacity>
+      {({ pressed }) => {
+        const { textColor, spinnerColor } = getVariantStyles(pressed);
+        return loading ? (
+          <ActivityIndicator color={spinnerColor} size="small" />
+        ) : (
+          <>
+            {icon ? <>{icon}</> : null}
+            <Typography
+              variant="labelLg"
+              color={textColor}
+              style={icon ? { marginLeft: theme.spacing.sm } : undefined}
+            >
+              {title}
+            </Typography>
+          </>
+        );
+      }}
+    </Pressable>
   );
 }
 
+// Export alias for AppButton
+export const AppButton = Button;
+
 const styles = StyleSheet.create({
-  container: {
-    height: 48,
+  base: {
+    minHeight: 48,
     borderRadius: theme.borderRadius.md,
+    flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.sm,
   },
-  primaryContainer: {
-    backgroundColor: theme.colors.primary,
+  primary: {
+    backgroundColor: theme.colors.actionPrimary,
   },
-  secondaryContainer: {
-    backgroundColor: theme.colors.secondary,
+  primaryPressed: {
+    backgroundColor: '#383838',
   },
-  outlineContainer: {
+  secondary: {
+    backgroundColor: theme.colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.borderDefault,
+  },
+  secondaryPressed: {
+    backgroundColor: theme.colors.surfacePressed,
+  },
+  outline: {
     backgroundColor: 'transparent',
     borderWidth: 1,
-    borderColor: theme.colors.outline,
+    borderColor: theme.colors.borderDefault,
   },
-  ghostContainer: {
+  outlinePressed: {
+    backgroundColor: theme.colors.surfaceSoft,
+  },
+  destructive: {
+    backgroundColor: theme.colors.danger,
+  },
+  destructivePressed: {
+    backgroundColor: '#991B1B',
+  },
+  ghost: {
     backgroundColor: 'transparent',
   },
-  disabledContainer: {
-    backgroundColor: theme.colors.outlineVariant,
+  ghostPressed: {
+    backgroundColor: theme.colors.surfaceSoft,
   },
-  disabledOutlineContainer: {
-    borderColor: theme.colors.outlineVariant,
+  disabled: {
+    backgroundColor: theme.colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.borderDefault,
+    opacity: 0.6,
+  },
+  disabledOutline: {
+    borderColor: theme.colors.borderDefault,
+    opacity: 0.5,
+  },
+  disabledGhost: {
     opacity: 0.5,
   },
 });

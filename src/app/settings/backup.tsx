@@ -136,7 +136,7 @@ export default function BackupScreen() {
         await testDb.execAsync('PRAGMA journal_mode = WAL;');
         await testDb.getFirstAsync('SELECT count(*) FROM loans');
         await testDb.getFirstAsync('PRAGMA integrity_check');
-      } catch (e: any) {
+      } catch {
         await FileSystem.deleteAsync(tempDbPath, { idempotent: true });
         throw new Error('Backup integrity check failed. The file is corrupt or incompatible.');
       }

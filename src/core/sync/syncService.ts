@@ -61,10 +61,10 @@ export class SyncService {
             await this.revertRejectedPayment(db, res.operation_id, res.error);
             batchFailed++;
           } else if (res.status === 'FAILED') {
-            await OutboxManager.markStatus(db, res.operation_id, 'PENDING', res.error);
+            await OutboxManager.markStatus(db, res.operation_id, 'NEEDS_REVIEW', res.error);
             batchFailed++;
           } else {
-            await OutboxManager.markStatus(db, res.operation_id, res.status, res.error);
+            await OutboxManager.markStatus(db, res.operation_id, 'NEEDS_REVIEW', res.error || res.status);
             batchFailed++;
           }
         }
@@ -72,7 +72,7 @@ export class SyncService {
         // Validate that every submitted operation received an acknowledgment result
         for (const op of operations) {
           if (!acknowledgedOpIds.has(op.operation_id)) {
-            await OutboxManager.markStatus(db, op.operation_id, 'PENDING', 'Missing server result in push response');
+            await OutboxManager.markStatus(db, op.operation_id, 'NEEDS_REVIEW', 'Missing server result in push response');
             batchFailed++;
           }
         }
@@ -143,10 +143,8 @@ export class SyncService {
 
     if (
       (record_type === 'KIST' ||
-        (record_type === 'TRANSACTION' &&
-          (payload.transaction_type === 'WAIVER' ||
-            payload.transaction_type === 'PENALTY_ASSESSMENT' ||
-            (payload.transaction_type === 'REVERSAL' && (payload.forgiven_penalty_paise || 0) > 0)))) &&
+        record_type === 'TRANSACTION' ||
+        record_type === 'PAYMENT_CORRECTION') &&
       payload.loan_id &&
       modifiedLoanIds
     ) {
@@ -245,44 +243,96 @@ export class SyncService {
         }
       }
     } else if (record_type === 'LOAN_TERM') {
+      const isSettled = (payload.interest_settled !== undefined ? payload.interest_settled : (payload.settled ? 1 : 0)) ? 1 : 0;
       if (operation_type === 'INSERT') {
-        await tx.runAsync(
-          `INSERT INTO loan_terms (
-             id, loan_id, term_number, duration_months, annual_rate, interest_paise,
-             start_date, maturity_date, interest_settled, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             interest_settled = excluded.interest_settled`,
-          [
-            payload.id,
-            payload.loan_id,
-            payload.term_number,
-            payload.duration_months,
-            payload.annual_rate,
-            payload.interest_paise,
-            payload.start_date,
-            payload.maturity_date,
-            payload.interest_settled ? 1 : 0,
-            payload.created_at || new Date().toISOString(),
-          ]
-        );
+        let existingTerm: any = null;
+        if (payload.operation_id) {
+          existingTerm = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM loan_terms WHERE operation_id = ? OR id = ?`,
+            [payload.operation_id, payload.id]
+          );
+        } else {
+          existingTerm = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM loan_terms WHERE id = ?`,
+            [payload.id]
+          );
+        }
+
+        if (existingTerm) {
+          await tx.runAsync(
+            `UPDATE loan_terms SET 
+               id = ?,
+               interest_settled = ?,
+               settled = ?,
+               annual_rate = ?,
+               interest_paise = ?,
+               maturity_date = ?
+             WHERE id = ?`,
+            [
+              payload.id,
+              isSettled,
+              isSettled,
+              payload.annual_rate,
+              payload.interest_paise,
+              payload.maturity_date,
+              existingTerm.id,
+            ]
+          );
+        } else {
+          await tx.runAsync(
+            `INSERT INTO loan_terms (
+               id, loan_id, term_number, duration_months, annual_rate, interest_paise,
+               start_date, maturity_date, interest_settled, settled, operation_id, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               interest_settled = excluded.interest_settled,
+               settled = excluded.settled`,
+            [
+              payload.id,
+              payload.loan_id,
+              payload.term_number,
+              payload.duration_months,
+              payload.annual_rate,
+              payload.interest_paise,
+              payload.start_date,
+              payload.maturity_date,
+              isSettled,
+              isSettled,
+              payload.operation_id || null,
+              payload.created_at || new Date().toISOString(),
+            ]
+          );
+        }
       } else if (operation_type === 'UPDATE') {
         await tx.runAsync(
-          `UPDATE loan_terms SET interest_settled = ? WHERE id = ?`,
-          [payload.interest_settled ? 1 : 0, payload.id]
+          `UPDATE loan_terms SET interest_settled = ?, settled = ? WHERE id = ?`,
+          [isSettled, isSettled, payload.id]
         );
       }
     } else if (record_type === 'LOAN_ATTACHMENT') {
       if (operation_type === 'INSERT') {
+        const docType = payload.doc_type || payload.document_type || 'OTHER';
+        const filePath = payload.file_path || payload.file_name || payload.storage_key || '';
+        const fileName = payload.file_name || (filePath ? filePath.split('/').pop()?.split('\\').pop() : 'attachment') || 'attachment';
         await tx.runAsync(
-          `INSERT INTO loan_attachments (id, loan_id, file_path, doc_type, notes, synced, created_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?)
-           ON CONFLICT(id) DO UPDATE SET notes = excluded.notes, synced = 1`,
+          `INSERT INTO loan_attachments (
+             id, loan_id, file_path, file_name, doc_type, document_type, notes, synced, sync_status, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'SYNCED', ?)
+           ON CONFLICT(id) DO UPDATE SET
+             file_path = excluded.file_path,
+             file_name = excluded.file_name,
+             doc_type = excluded.doc_type,
+             document_type = excluded.document_type,
+             notes = excluded.notes,
+             synced = 1,
+             sync_status = 'SYNCED'`,
           [
             payload.id,
             payload.loan_id,
-            payload.file_path,
-            payload.doc_type,
+            filePath,
+            fileName,
+            docType,
+            docType,
             payload.notes || null,
             payload.created_at || new Date().toISOString(),
           ]
@@ -290,25 +340,49 @@ export class SyncService {
       }
     } else if (record_type === 'PAYMENT_CORRECTION') {
       if (operation_type === 'INSERT') {
-        await tx.runAsync(
-          `INSERT INTO payment_corrections (
-             id, loan_id, original_transaction_id, reversal_transaction_id,
-             replacement_transaction_id, previous_amount_paise, corrected_amount_paise,
-             reason, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO NOTHING`,
-          [
-            payload.id,
-            payload.loan_id,
-            payload.original_transaction_id,
-            payload.reversal_transaction_id,
-            payload.replacement_transaction_id,
-            payload.previous_amount_paise,
-            payload.corrected_amount_paise,
-            payload.reason,
-            payload.created_at || new Date().toISOString(),
-          ]
-        );
+        const origAmt = payload.original_amount_paise ?? payload.previous_amount_paise ?? 0;
+        let existingCorr: any = null;
+        if (payload.operation_id) {
+          existingCorr = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM payment_corrections WHERE operation_id = ? OR id = ?`,
+            [payload.operation_id, payload.id]
+          );
+        } else {
+          existingCorr = await tx.getFirstAsync<{ id: string }>(
+            `SELECT id FROM payment_corrections WHERE id = ?`,
+            [payload.id]
+          );
+        }
+
+        if (existingCorr) {
+          await tx.runAsync(
+            `UPDATE payment_corrections SET id = ? WHERE id = ?`,
+            [payload.id, existingCorr.id]
+          );
+        } else {
+          await tx.runAsync(
+            `INSERT INTO payment_corrections (
+               id, loan_id, original_transaction_id, original_operation_id, reversal_transaction_id,
+               replacement_transaction_id, original_amount_paise, previous_amount_paise, corrected_amount_paise,
+               reason, operation_id, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING`,
+            [
+              payload.id,
+              payload.loan_id,
+              payload.original_transaction_id,
+              payload.original_operation_id || null,
+              payload.reversal_transaction_id,
+              payload.replacement_transaction_id || null,
+              origAmt,
+              origAmt,
+              payload.corrected_amount_paise,
+              payload.reason,
+              payload.operation_id || null,
+              payload.created_at || new Date().toISOString(),
+            ]
+          );
+        }
       }
     } else if (record_type === 'KIST') {
       if (operation_type === 'INSERT') {
@@ -436,7 +510,30 @@ export class SyncService {
                 break;
               }
             }
+          }
+        }
 
+        if (payload.operation_id) {
+          await OutboxManager.markSynced(tx, [payload.operation_id]);
+          let targetLoanId = payload.loan_id || existing?.loan_id;
+          if (!targetLoanId) {
+            const outboxRow = await tx.getFirstAsync<{ payload: string }>(
+              `SELECT payload FROM sync_outbox WHERE operation_id = ?`,
+              [payload.operation_id]
+            );
+            if (outboxRow?.payload) {
+              try {
+                const parsed = JSON.parse(outboxRow.payload);
+                targetLoanId = parsed.loan_id;
+              } catch {}
+            }
+          }
+          if (targetLoanId) {
+            if (modifiedLoanIds) {
+              modifiedLoanIds.add(targetLoanId);
+            } else {
+              await this.reapplyPendingCollections(tx, targetLoanId);
+            }
           }
         }
         if (!existing) {
@@ -805,7 +902,44 @@ export class SyncService {
           const totalPrincipalPaid = finalKists.reduce((acc, k) => acc + (k.principal_paid_paise || 0), 0);
           isSettled = allPaid && totalPrincipalPaid >= loan.principal_paise && finalOutstandingPenalty <= 0;
         } else if (loan.product_type === 'bullet') {
-          isSettled = allPaid && replayedBulletPrincipalPaid >= loan.principal_paise && finalOutstandingPenalty <= 0;
+          if (finalKists.length > 0) {
+            isSettled = allPaid && replayedBulletPrincipalPaid >= loan.principal_paise && finalOutstandingPenalty <= 0;
+          } else {
+            // One-time bullet loan with no installments (e.g. ANNUAL_SIMPLE_FLAT)
+            const prinRes = await tx.getFirstAsync<{ total: number }>(
+              `SELECT COALESCE(SUM(allocated_principal_paise), 0) as total FROM transactions
+               WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+              [loanId]
+            );
+            const markupRes = await tx.getFirstAsync<{ total: number }>(
+              `SELECT COALESCE(SUM(allocated_markup_paise), 0) as total FROM transactions
+               WHERE loan_id = ? AND transaction_type IN ('COLLECTION', 'REVERSAL')`,
+              [loanId]
+            );
+            const totalPrin = prinRes?.total || 0;
+            const totalMarkup = markupRes?.total || 0;
+
+            const terms = await tx.getAllAsync<any>(
+              `SELECT * FROM loan_terms WHERE loan_id = ? ORDER BY term_number ASC`,
+              [loanId]
+            );
+            const totalContractInterest = terms && terms.length > 0
+              ? terms.reduce((acc: number, t: any) => acc + (t.interest_paise || 0), 0)
+              : (loan.interest_paise || 0);
+
+            const interestSatisfied = totalMarkup >= totalContractInterest;
+            const principalSatisfied = totalPrin >= loan.principal_paise;
+
+            isSettled = (principalSatisfied && interestSatisfied && finalOutstandingPenalty <= 0) ||
+                        (loan.status === 'SETTLED' && finalOutstandingPenalty <= 0);
+
+            if (interestSatisfied && terms && terms.length > 0) {
+              await tx.runAsync(
+                `UPDATE loan_terms SET interest_settled = 1, settled = 1 WHERE loan_id = ?`,
+                [loanId]
+              );
+            }
+          }
         }
         await tx.runAsync(`UPDATE loans SET status = ? WHERE id = ?`, [isSettled ? 'SETTLED' : 'ACTIVE', loanId]);
       }
@@ -1154,23 +1288,18 @@ export class SyncService {
   static async syncAll(db: SQLiteDatabase): Promise<SyncResult> {
     try {
       const pushRes = await this.pushPending(db);
-      if (pushRes.failed > 0) {
-        return {
-          pushedCount: pushRes.pushed,
-          pulledCount: 0,
-          success: false,
-          errors: [`${pushRes.failed} operations failed to push to server; pull halted to protect local state`],
-        };
-      }
       const pullRes = await this.pullChanges(db);
       const needsReviewItems = await OutboxManager.getNeedsReview(db);
-      if (needsReviewItems.length > 0) {
+      if (needsReviewItems.length > 0 || pushRes.failed > 0) {
         return {
           pushedCount: pushRes.pushed,
           pulledCount: pullRes.pulled,
           needsReviewCount: needsReviewItems.length,
           success: false,
-          errors: [`${needsReviewItems.length} operation(s) require review due to server conflicts`],
+          errors: [
+            ...(pushRes.failed > 0 ? [`${pushRes.failed} operation(s) failed during push and require review.`] : []),
+            ...(needsReviewItems.length > 0 ? [`${needsReviewItems.length} operation(s) require review due to server conflicts.`] : []),
+          ],
         };
       }
       return {

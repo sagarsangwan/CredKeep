@@ -1,7 +1,7 @@
 import { SQLiteDatabase } from 'expo-sqlite';
 import * as crypto from 'expo-crypto';
 
-export type OutboxStatus = 'PENDING' | 'SYNCED' | 'NEEDS_REVIEW' | 'REJECTED';
+export type OutboxStatus = 'PENDING' | 'SYNCED' | 'NEEDS_REVIEW' | 'REJECTED' | 'FAILED';
 
 export interface OutboxRecord {
   id: string;
@@ -71,7 +71,7 @@ export class OutboxManager {
 
   static async getPending(db: SQLiteDatabase, limit: number = 50): Promise<OutboxRecord[]> {
     return await db.getAllAsync<OutboxRecord>(
-      `SELECT * FROM sync_outbox WHERE status IN ('PENDING', 'FAILED') ORDER BY created_at ASC LIMIT ?`,
+      `SELECT * FROM sync_outbox WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT ?`,
       [limit]
     );
   }

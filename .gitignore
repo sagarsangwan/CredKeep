@@ -104,6 +104,9 @@ backend/.venv/
 htmlcov/
 .jest-cache/
 # Build artifacts & packages
+*.apk
+*.aab
 artifacts/**/*.apk
 artifacts/**/*.aab
+screen_*.png
 

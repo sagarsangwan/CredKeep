@@ -81,3 +81,5 @@ export function formatINR(paise: Paise): string {
     currency: 'INR',
   }).format(paise / 100);
 }
+
+export const formatRupees = formatINR;

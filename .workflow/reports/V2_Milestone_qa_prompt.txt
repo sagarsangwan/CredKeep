@@ -1,0 +1,10 @@
+﻿Perform focused, read-only QA review on milestone V2_Milestone.
+Review ONLY the git diff between 9258311 and 62ee653 and directly impacted dependencies.
+Scope: Verify financial calculation correctness, payment idempotency, tenant isolation, SQLCipher/database mutations, migrations, or sync integrity.
+
+Token-Optimization & Review Invariants:
+1. Review only the changed files in the commit range (9258311...62ee653). Do not perform broad repository indexing.
+2. Limit your findings to at most 5 actionable issues, ordered strictly by severity (P0 Critical first, down to P2 Minor).
+3. If no critical or high severity defects are found, return: APPROVED.
+4. If blocking defects exist, provide concise file/line references and return: REWORK.
+5. Do NOT suggest broad architectural rewrites or stylistic nitpicks.

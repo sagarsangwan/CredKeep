@@ -922,8 +922,11 @@ describe('Real SQLite Engine Integration Guarantees', () => {
       }
     }, modifiedLoansPage3);
 
-    // Verified: non-KIST change does NOT touch modifiedLoansPage3
-    expect(modifiedLoansPage3.size).toBe(0);
+    // Verified: TRANSACTION change tracks modifiedLoansPage3 so acknowledged collections rebuild correctly
+    expect(modifiedLoansPage3.has('loan-replay')).toBe(true);
+    for (const lid of modifiedLoansPage3) {
+      await SyncService.reapplyPendingCollections(db, lid);
+    }
 
     // CRITICAL INVARIANT: Multi-page replay did NOT credit kist 2 or double-credit kist 1
     const k1Final = await db.getFirstAsync<any>(`SELECT * FROM repayment_schedules WHERE id = 'kist-rep-1'`);

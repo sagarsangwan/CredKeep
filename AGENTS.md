@@ -232,27 +232,35 @@ Reserve intensive APK analysis and performance tuning for the final V1 stabiliza
 
 ## Multi-Agent Workflow Integration
 This project uses a split-agent model:
-- **Codex:** Independent Reviewer for phase boundaries and critical security changes.
+- **Codex:** Independent Reviewer for completed milestone boundaries and critical security changes.
 - **Gemini / Antigravity:** Implementer and Orchestrator.
 
 ### Permanent Agent Operating Rules
 Standard workflow:
 ANTIGRAVITY IMPLEMENTS
-→ TARGETED TESTS
-→ FULL LOCAL INTEGRATION TESTS
-→ ONE INDEPENDENT CODEX REVIEW
-→ ONE TARGETED REMEDIATION PASS
+→ LOCAL STATIC CHECKS (`npx tsc --noEmit` & `npx expo lint`)
+→ LOCAL AUTOMATED TESTS (Jest & pytest)
+→ OPTIONAL CODEX QA (MAX ONCE PER COMPLETED MILESTONE, HIGH-RISK CHANGES ONLY)
+→ LOCAL REMEDIATION & VERIFICATION (NO AUTOMATIC RE-REVIEW)
 → FINAL LOCAL ACCEPTANCE
 → REQUEST RELEASE APPROVAL.
 
-These rules apply automatically to future meaningful CredKeep changes.
-
-**Coordination Rules (Lightweight V2 Policy):**
-1. Stop requiring Codex planning for every task. Follow the executable backlog in `.workflow/V2_TASKS.md` directly.
-2. Use Gemini for continuous implementation.
-3. Invoke Codex via WSL only for a meaningful independent review at completed phase boundaries (e.g., End of Phase 1).
-4. No redundant full-repository reads or verbose reporting. Use Graphify selectively for unfamiliar code.
-5. All completed work MUST have local Git commits with conventional commit messages following an APPROVED status.
+### Token-Optimized Codex QA Rules
+1. **Milestone Boundaries Only:** Run Codex at most ONCE per completed milestone (e.g. End of Phase 1), never after small changes, individual tasks, or routine PRs.
+2. **Loop & Retry Prevention:** Automatic recursive reviews, retries, and fix-review loops are strictly DISABLED.
+3. **No Automatic Re-Review:** Do NOT automatically invoke Codex after implementing its findings. Remediation is verified via local static checks, TypeScript compiler, and automated unit/integration tests.
+4. **Scope Exclusions:** NEVER invoke Codex for formatting, UI polish, documentation, asset updates, or simple style changes.
+5. **Permitted High-Risk Triggers Only:** Only invoke Codex when the milestone diff touches:
+   - Financial calculations, money math, schedule generators, or waterfall allocations (`src/core/domain/`)
+   - Payment corrections, idempotency, or transaction conservation (`src/core/database/`, `backend/credkeep/`)
+   - Multi-tenant isolation, row-level security (RLS), or tenancy middleware (`backend/tenants/`)
+   - SQLCipher encryption or schema migrations (`migrations/`)
+   - Authentication or device security (`auth`)
+   - Offline sync protocol integrity (`sync`, `SyncOutbox`)
+6. **Scoped Review:** Review strictly changed files and direct dependencies in the commit range. Broad exploratory indexing is forbidden.
+7. **Actionable Findings Cap:** Limit findings to at most 5 actionable issues, strictly ordered by severity (P0 critical first).
+8. **Configured Model & Sandbox:** Always use `gpt-6.1-sol` with Medium reasoning explicitly configured (`-Model "gpt-6.1-sol" -ReasoningEffort "medium"`) in a read-only sandbox (`--sandbox read-only`).
+9. **Duplicate Invocation Guard:** `.workflow/qa-codex.ps1` maintains an invocation guard to automatically block duplicate QA runs for the same commit range and scope.
 
 ## graphify
 

@@ -564,6 +564,7 @@ def extend_loan(
                 'start_date': str(term_obj.start_date),
                 'maturity_date': str(term_obj.maturity_date),
                 'settled': term_obj.settled,
+                'interest_settled': term_obj.settled,
                 'operation_id': str(operation_id)
             }
         )

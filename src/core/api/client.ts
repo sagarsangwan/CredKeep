@@ -69,6 +69,9 @@ export class ApiClient {
       const error: any = new Error(errorMsg);
       error.status = response.status;
       error.data = data;
+      if (typeof data === 'object' && data !== null && data.code) {
+        error.code = data.code;
+      }
       throw error;
     }
 

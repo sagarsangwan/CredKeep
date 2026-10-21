@@ -19,4 +19,7 @@ Quality assurance for CredKeep V2 relies on strict automated testing and indepen
 - **Sync Integration:** Test the UI behavior when operations are pending vs. synced. Ensure rejected operations flag a clear error for the user.
 
 ## 4. QA Gates
-No task advances to `SOURCE_QA_APPROVED` without evidence of test execution and an independent Codex review. No deployment is `DEPLOYMENT_VERIFIED` without manual device validation.
+- **Local Quality Gates First:** All static checks (`npx tsc --noEmit`, `npx expo lint`), unit tests (Jest), and backend integration tests (pytest) must pass before a milestone is declared ready for review.
+- **Milestone Codex QA:** Independent QA validation (via Codex `gpt-6.1-sol`, Medium reasoning, read-only sandbox) is executed at most ONCE per completed milestone for high-risk domains (financial logic, payment corrections, tenant isolation, SQLCipher, auth, migrations, sync protocol).
+- **Zero-Loop Remediation:** Any findings (capped at 5 actionable issues) are remediated locally and verified with local tests without automatic re-review loops.
+- **Physical Acceptance:** No mobile deployment is `DEPLOYMENT_VERIFIED` without physical device validation.

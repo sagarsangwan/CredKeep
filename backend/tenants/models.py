@@ -30,3 +30,22 @@ class Device(models.Model):
 
     def __str__(self):
         return f"Device {self.id} for {self.tenant.name}"
+
+
+class GoogleIdentity(models.Model):
+    """
+    Links a user to an immutable Google subject (sub) identifier.
+    Guarantees account integrity and prevents account takeover via matching email.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='google_identity'
+    )
+    google_sub = models.CharField(max_length=255, unique=True, db_index=True)
+    email = models.EmailField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"GoogleIdentity({self.user.username}, sub={self.google_sub})"

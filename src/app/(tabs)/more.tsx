@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, StyleSheet, TouchableOpacity, Alert, ScrollView } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ChevronRight, Shield, Database, FileText } from 'lucide-react-native';
 import { Typography } from '../../ui/Typography';
@@ -12,6 +12,8 @@ import { AuthStore, UserInfo } from '../../core/auth/authStore';
 import { AuthService } from '../../core/auth/authService';
 import { SyncCoordinator, SyncState } from '../../core/sync/syncCoordinator';
 import { OutboxManager } from '../../core/sync/outbox';
+
+import { SyncBadge, SyncStatus } from '../../ui/SyncBadge';
 
 export default function MoreScreen() {
   const router = useRouter();
@@ -34,10 +36,13 @@ export default function MoreScreen() {
     }
   }, [db]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadAuthAndSyncState();
+  useFocusEffect(
+    useCallback(() => {
+      loadAuthAndSyncState();
+    }, [loadAuthAndSyncState])
+  );
 
+  useEffect(() => {
     const unsubscribeSync = SyncCoordinator.subscribe((state) => {
       setSyncState(state);
     });
@@ -45,13 +50,13 @@ export default function MoreScreen() {
     return () => {
       unsubscribeSync();
     };
-  }, [loadAuthAndSyncState]);
+  }, []);
 
   const promptResolveConflicts = (count: number) => {
     if (!db) return;
     Alert.alert(
       'Conflicts Require Review',
-      `${count} operation(s) require review due to server conflicts (e.g. actions on settled loans). Would you like to discard them?`,
+      `${count} operation(s) require review due to server conflicts. Would you like to discard them?`,
       [
         { text: 'Review Later', style: 'cancel' },
         {
@@ -130,32 +135,26 @@ export default function MoreScreen() {
     { title: 'Backup & Restore', route: '/settings/backup', icon: Database },
   ];
 
-  const getSyncStatusBadge = () => {
+  const getSyncBadgeStatus = (): SyncStatus => {
     switch (syncState.status) {
       case 'SYNCING':
-        return { label: 'Syncing...', color: theme.colors.primary, bg: theme.colors.primaryContainer };
+        return 'SYNCING';
       case 'PENDING':
-        return {
-          label: `${syncState.pendingCount} Pending Sync`,
-          color: theme.colors.warning,
-          bg: theme.colors.warningContainer,
-        };
+        return syncState.pendingCount > 0 ? 'SAVED_ON_PHONE' : 'SYNCED';
       case 'OFFLINE':
-        return { label: 'Offline Mode', color: theme.colors.error, bg: theme.colors.errorContainer };
+        return 'SAVED_ON_PHONE';
       case 'ERROR':
-        return { label: 'Sync Error', color: theme.colors.error, bg: theme.colors.errorContainer };
+        return 'NEEDS_REVIEW';
       case 'IDLE':
       default:
-        return { label: 'Up to Date', color: theme.colors.success, bg: theme.colors.successContainer };
+        return 'SYNCED';
     }
   };
-
-  const badge = getSyncStatusBadge();
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
-        <Typography variant="headlineMd" color={theme.colors.onBackground} style={styles.title}>
+        <Typography variant="headlineSm" color={theme.colors.textPrimary} style={styles.title}>
           More & Settings
         </Typography>
 
@@ -163,18 +162,18 @@ export default function MoreScreen() {
         <Card style={styles.syncCard}>
           <View style={styles.syncHeader}>
             <View style={{ flex: 1 }}>
-              <Typography variant="titleMd" color={theme.colors.textPrimary}>
+              <Typography variant="titleMd" color={theme.colors.textPrimary} style={{ fontWeight: '700' }}>
                 {user ? `Workspace: ${tenantName || 'Private'}` : 'Not Signed In'}
               </Typography>
               <Typography variant="bodySm" color={theme.colors.textSecondary} style={{ marginTop: 2 }}>
-                {user ? `Logged in as @${user.username}` : 'Sign in to access your ledger'}
+                {user ? `@${user.username}` : 'Sign in to access your ledger'}
               </Typography>
             </View>
-            <View style={[styles.badge, { backgroundColor: badge.bg }]}>
-              <Typography variant="labelSm" color={badge.color}>
-                {badge.label}
-              </Typography>
-            </View>
+            <SyncBadge
+              status={getSyncBadgeStatus()}
+              needsReviewCount={syncState.pendingCount}
+              onPress={handleSyncNow}
+            />
           </View>
 
           {syncState.lastSyncedAt && (
@@ -184,7 +183,7 @@ export default function MoreScreen() {
           )}
 
           {syncState.errorMessage && (
-            <Typography variant="bodySm" color={theme.colors.error} style={{ marginTop: 4 }}>
+            <Typography variant="bodySm" color={theme.colors.danger} style={{ marginTop: 4 }}>
               {syncState.errorMessage}
             </Typography>
           )}
@@ -201,7 +200,7 @@ export default function MoreScreen() {
               title="Log Out"
               variant="outline"
               onPress={handleLogout}
-              style={[styles.actionBtn, { borderColor: theme.colors.error }]}
+              style={styles.actionBtn}
             />
           </View>
         </Card>

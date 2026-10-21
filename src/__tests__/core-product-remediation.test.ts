@@ -80,26 +80,36 @@ function createInMemoryTestDb(): any {
       start_date TEXT NOT NULL,
       maturity_date TEXT NOT NULL,
       interest_settled INTEGER NOT NULL DEFAULT 0,
+      settled INTEGER NOT NULL DEFAULT 0,
+      operation_id TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE payment_corrections (
       id TEXT PRIMARY KEY NOT NULL,
       loan_id TEXT NOT NULL,
       original_transaction_id TEXT NOT NULL,
+      original_operation_id TEXT,
       reversal_transaction_id TEXT NOT NULL,
       replacement_transaction_id TEXT,
-      previous_amount_paise INTEGER NOT NULL,
+      original_amount_paise INTEGER NOT NULL DEFAULT 0,
+      previous_amount_paise INTEGER NOT NULL DEFAULT 0,
       corrected_amount_paise INTEGER NOT NULL,
       reason TEXT NOT NULL,
+      operation_id TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE loan_attachments (
       id TEXT PRIMARY KEY NOT NULL,
       loan_id TEXT NOT NULL,
-      file_path TEXT NOT NULL,
+      document_type TEXT,
       doc_type TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_name TEXT,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      mime_type TEXT,
       notes TEXT,
       synced INTEGER NOT NULL DEFAULT 0,
+      sync_status TEXT NOT NULL DEFAULT 'LOCAL_ONLY',
       created_at TEXT NOT NULL
     );
     CREATE TABLE sync_outbox (
